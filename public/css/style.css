@@ -1,0 +1,229 @@
+/* ============================================================
+   Star Fighter — Global Styles
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --color-bg:        #030810;
+  --color-hud-bg:    rgba(2, 15, 35, 0.85);
+  --color-border:    rgba(0, 180, 255, 0.25);
+  --color-primary:   #00b4ff;
+  --color-secondary: #0affb2;
+  --color-danger:    #ff3a3a;
+  --color-warning:   #ffaa00;
+  --color-capital:   #ffd700;
+  --color-starbase:  #00b4ff;
+  --color-fog:       rgba(0, 0, 0, 0.75);
+  --color-text:      #a0ccee;
+  --font-hud:        'Orbitron', sans-serif;
+  --font-mono:       'Share Tech Mono', monospace;
+}
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Sector / combat view — always full-screen, always visible once entered */
+#combat-view {
+  position: absolute; inset: 0;
+  display: none;   /* shown as soon as sector enters */
+}
+
+/* Galaxy map — floating overlay panel in centre of screen */
+#galaxy-view {
+  position: absolute;
+  left: 6%; right: 6%;
+  top: 4%;
+  bottom: 110px;          /* leaves dashboard + margins visible below */
+  z-index: 20;
+  background: rgba(2, 10, 28, 0.93);
+  border: 1px solid rgba(0, 180, 255, 0.35);
+  border-radius: 6px;
+  backdrop-filter: blur(3px);
+  display: none;           /* hidden until G is pressed */
+}
+#galaxy-view.map-open {
+  display: block;
+}
+/* Warp tunnel — full-screen overlay during hyperspace jump */
+#warp-view {
+  position: absolute; inset: 0;
+  z-index: 25;
+  display: none;
+}
+#warp-view.warp-active { display: block; }
+
+canvas {
+  display: block;
+  width: 100%; height: 100%;
+}
+
+/* ---- HUD ---- */
+#hud {
+  position: absolute; inset: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 16px;
+  pointer-events: none;
+}
+
+#hud-left, #hud-right {
+  display: flex; flex-direction: column; gap: 10px;
+  min-width: 180px;
+}
+
+.hud-panel {
+  background: var(--color-hud-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  backdrop-filter: blur(6px);
+}
+
+.hud-label {
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--color-primary);
+  margin-bottom: 4px;
+}
+
+.hud-value {
+  font-family: var(--font-hud);
+  font-size: 14px;
+  color: #fff;
+}
+
+.hud-bar-wrap {
+  background: rgba(0,0,0,0.5);
+  border-radius: 3px;
+  height: 6px;
+  margin-bottom: 4px;
+  overflow: hidden;
+}
+
+.hud-bar {
+  height: 100%;
+  width: 100%;
+  background: var(--color-primary);
+  border-radius: 3px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.hud-bar.shield { background: var(--color-secondary); }
+
+/* ---- HUD Center ---- */
+#hud-center {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  pointer-events: none;
+}
+
+#game-title {
+  font-family: var(--font-hud);
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 6px;
+  color: var(--color-primary);
+  text-shadow: 0 0 20px rgba(0,180,255,0.8), 0 0 40px rgba(0,180,255,0.4);
+}
+
+#alert-box {
+  background: rgba(255, 58, 58, 0.15);
+  border: 1px solid var(--color-danger);
+  border-radius: 4px;
+  padding: 6px 16px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--color-danger);
+  text-align: center;
+  animation: pulse-alert 1s ease-in-out infinite;
+}
+
+@keyframes pulse-alert {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+
+.hidden { display: none !important; }
+
+/* ---- Sector Tooltip ---- */
+#sector-tooltip {
+  position: absolute;
+  background: var(--color-hud-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  color: var(--color-text);
+  max-width: 200px;
+  z-index: 10;
+}
+
+#sector-tooltip .tt-title {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--color-primary);
+  margin-bottom: 4px;
+}
+
+/* ---- Instructions ---- */
+#instructions {
+  position: absolute;
+  bottom: 16px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-hud-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 6px 16px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: rgba(160,204,238,0.6);
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+#instructions span {
+  color: var(--color-primary);
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 2px;
+}
+
+/* ---- Combat View ---- */
+#combat-hud {
+  position: absolute;
+  top: 16px; left: 16px;
+  pointer-events: all;
+}
+
+#exit-combat {
+  background: var(--color-hud-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--color-primary);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+#exit-combat:hover {
+  background: rgba(0,180,255,0.15);
+  border-color: var(--color-primary);
+}

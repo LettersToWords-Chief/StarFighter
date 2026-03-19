@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Star Fighter</title>
+  <meta name="description" content="Star Fighter — A modern multiplayer space combat game inspired by Star Raiders" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Galaxy Map Overlay (z-index 20, always on top until toggled off) -->
+  <div id="galaxy-view">
+    <canvas id="galaxy-canvas"></canvas>
+
+    <!-- HUD overlay -->
+    <div id="hud">
+      <div id="hud-left">
+        <div class="hud-panel">
+          <div class="hud-label">SECTOR</div>
+          <div class="hud-value" id="hud-sector">--</div>
+        </div>
+        <div class="hud-panel">
+          <div class="hud-label">FUEL</div>
+          <div class="hud-bar-wrap"><div class="hud-bar" id="fuel-bar"></div></div>
+          <div class="hud-value" id="hud-fuel">100%</div>
+        </div>
+        <div class="hud-panel">
+          <div class="hud-label">SHIELDS</div>
+          <div class="hud-bar-wrap"><div class="hud-bar shield" id="shield-bar"></div></div>
+          <div class="hud-value" id="hud-shields">100%</div>
+        </div>
+      </div>
+
+      <div id="hud-center">
+        <div id="game-title">STAR FIGHTER</div>
+        <div id="alert-box" class="hidden"></div>
+      </div>
+
+      <div id="hud-right">
+        <div class="hud-panel">
+          <div class="hud-label">WARP COST</div>
+          <div class="hud-value" id="hud-warp-cost">--</div>
+        </div>
+        <div class="hud-panel">
+          <div class="hud-label">STATUS</div>
+          <div class="hud-value" id="hud-status">STANDBY</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tooltip -->
+    <div id="sector-tooltip" class="hidden"></div>
+
+    <!-- Instructions -->
+    <div id="instructions">
+      <span>HOVER</span> sector info &nbsp;|&nbsp;
+      <span>CLICK</span> select target &nbsp;|&nbsp;
+      <span>ENTER</span> warp &nbsp;|&nbsp;
+      <span>ESC</span> cancel
+    </div>
+  </div>
+
+  <!-- Sector / Combat View (runs underneath galaxy map overlay) -->
+  <div id="combat-view">
+    <canvas id="combat-canvas"></canvas>
+    <div id="combat-hud">
+      <button id="exit-combat">◀ GALAXY MAP</button>
+    </div>
+  </div>
+
+  <!-- Warp tunnel overlay — full-screen, above sector, below galaxy map -->
+  <div id="warp-view">
+    <canvas id="warp-canvas"></canvas>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/GameConfig.js"></script>
+  <script src="js/utils/HexMath.js"></script>
+  <script src="js/galaxy/Starbase.js"></script>
+  <script src="js/galaxy/CommerceLane.js"></script>
+  <script src="js/galaxy/SupplyShip.js"></script>
+  <script src="js/galaxy/GalaxyMap.js"></script>
+  <script src="js/warp/WarpTunnel.js"></script>
+  <script src="js/sector/ZylonShip.js"></script>
+  <script src="js/sector/SectorView.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
