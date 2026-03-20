@@ -103,7 +103,9 @@
       name:        starbase
                      ? starbase.name.toUpperCase()
                      : `SECTOR ${pos.q},${pos.r}`,
-      hasStarbase: !!starbase,
+      hasStarbase:   !!starbase,
+      supplyShips:    galaxyMap.shipsInSector(pos.q, pos.r),
+      allSupplyShips: galaxyMap.supplyShips,
     };
 
     _sectorLive = true;
@@ -175,7 +177,9 @@
       name:        starbase
                      ? starbase.name.toUpperCase()
                      : `SECTOR ${destination.q},${destination.r}`,
-      hasStarbase: !!starbase,
+      hasStarbase:   !!starbase,
+      supplyShips:    galaxyMap.shipsInSector(destination.q, destination.r),
+      allSupplyShips: galaxyMap.supplyShips,
     };
 
     _sectorLive = true;

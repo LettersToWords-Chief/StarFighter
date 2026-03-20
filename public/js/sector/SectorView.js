@@ -53,6 +53,7 @@ const SectorView = (() => {
   const _keys = new Set();
 
   let _sectorType = 'void', _sectorName = '', _hasStarbase = false;
+  let _sectorQ = 0, _sectorR = 0;   // current sector coords — used by cargo ship system
   let _sbGroup = null, _starsMesh = null, _dustMesh = null;
   let _nearSB = false, _entryTimer = 3.5;
   let _voidObjects = [];   // translucent fragments in void sectors — recycled as camera moves
@@ -105,35 +106,27 @@ const SectorView = (() => {
     return 1; // emergency thruster
   }
 
-  // ---- Cannon thermal model ----
-  // Each cannon: hp, temp (0-100), charge (0-100), coolingEff (0-1), chargeEff (0-1)
-  const COOL_BASE    = 18;   // units/sec cooling per speed unit (at full efficiency)
-  const COOL_PASSIVE = 4;    // passive cooling at speed 0
-  const CHARGE_RATE  = 85;   // units/sec charge refill (at full efficiency)
-  const TEMP_PER_SHOT = 35;  // temp spike per shot
-  const TEMP_FIRE_MAX = 80;  // can't fire above this temperature
-
+  // ---- Cannon thermal model — see GameConfig.cannons for all tuned values ----
+  // Each cannon: hp (0–100), temp (0–200+), charge (0–100)
   let _cannon = null;
   let _fRPending = 0;
+  let _cannonCoolingRate = 10; // updated each tick; shown on dashboard
   let _targetLocked = false;
   let _torpedoes    = [];
   let _fireFlash    = 0;
   let _hitFlash     = 0;
 
-  const BASE_CD_FRONT = 0.28;
-  const BASE_CD_AFT   = 0.32;
-
   function _resetCannons() {
     _cannon = {
-      fL:  { hp:100, temp:0, charge:100, coolingEff:1.0, chargeEff:1.0, baseCd:BASE_CD_FRONT, cd:0 },
-      fR:  { hp:100, temp:0, charge:100, coolingEff:1.0, chargeEff:1.0, baseCd:BASE_CD_FRONT, cd:0 },
-      aft: { hp:100, temp:0, charge:100, coolingEff:1.0, chargeEff:1.0, baseCd:BASE_CD_AFT,   cd:0 },
+      fL:  { hp:100, temp:0, charge:100 },
+      fR:  { hp:100, temp:0, charge:100 },
+      aft: { hp:100, temp:0, charge:100 },
     };
     _fRPending = 0;
   }
 
   function _cannonReady(c) {
-    return c.hp > 0 && c.temp < TEMP_FIRE_MAX && c.charge >= 99.5 && c.cd <= 0;
+    return c.hp > 25 && c.temp < GameConfig.cannons.tempFireMax && c.charge >= 99.5;
   }
 
   // ---- View modes ----
@@ -148,7 +141,10 @@ const SectorView = (() => {
   let _zylons = [];  // ZylonShip instances
 
   // ---- Asteroids ----
-  let _asteroids = [];
+  let _asteroids    = [];
+  let _cargoShips   = [];
+  let _allSupplyShips = [];
+  let _cargoDrones  = []; // service drones flying between SB and docked cargo ships
 
   // ---- Docking state machine ----
   // idle → outbound → connected → returning → done → idle
@@ -167,7 +163,7 @@ const SectorView = (() => {
   function _onMM(e) {
     if (!_canvas) return;
     const r     = _canvas.getBoundingClientRect();
-    const DH    = 90; // dashboard height — must match _drawHUD
+    const DH    = 120; // dashboard height — must match _drawHUD
     const scale = r.width * 0.45;
     const viewCy = r.top + (r.height - DH) / 2; // crosshair center Y in page coords
     _mnx = Math.max(-1, Math.min(1, (e.clientX - r.left - r.width / 2) / scale));
@@ -576,7 +572,9 @@ const SectorView = (() => {
     _updateDocking(dt);
     _updateTorpedoes(dt);
     _updateCannons(dt);
+    _updateCargoDrones(dt);
     _updateZylons(dt);
+    _updateCargoShips(dt);
     _checkAsteroidCollision();
     if (_hitFlash  > 0) _hitFlash  -= dt;
     if (_fireFlash > 0) _fireFlash -= dt;
@@ -748,50 +746,64 @@ const SectorView = (() => {
 
   // Update cannon thermals each tick
   function _updateCannons(dt) {
-    const cooling = COOL_PASSIVE + COOL_BASE * _speed;
+    const CC = GameConfig.cannons;
+    // Cooling = baseline + each engine's contribution (engine health × speed)
+    const engCooling = _engines
+      ? _engines.reduce((s, e) => s + CC.coolingPerEnginePerSpeed * _speed * (e.hp / 100), 0)
+      : 0;
+    _cannonCoolingRate = Math.min(100, CC.coolingBaseline + engCooling);
+    const tempDrop = (_cannonCoolingRate / 100) * CC.maxCoolingTempDrop; // °/sec
+    const optRate  = 100 / CC.optimalChargeTime; // 500 units/sec at optimal
+
     for (const c of Object.values(_cannon)) {
       if (c.hp <= 0) continue;
-      // Cool down (speed-boosted)
-      c.temp = Math.max(0, c.temp - cooling * c.coolingEff * dt);
-      // Recharge
-      if (c.charge < 100) c.charge = Math.min(100, c.charge + CHARGE_RATE * c.chargeEff * dt);
-      // Legacy cd (still used for stagger timing)
-      if (c.cd > 0) c.cd -= dt;
+      c.temp = Math.max(0, c.temp - tempDrop * dt);
+      // Charge rate: full below slowChargeAt, linear decay to 0 at noChargeAt
+      let chargeRate = 0;
+      if (c.temp < CC.tempSlowChargeAt) {
+        chargeRate = optRate;
+      } else if (c.temp < CC.tempNoChargeAt) {
+        const t = (c.temp - CC.tempSlowChargeAt) / (CC.tempNoChargeAt - CC.tempSlowChargeAt);
+        chargeRate = optRate * (1 - t);
+      }
+      // Damaged cannons charge slower: hp=100 → 100%, hp=0 → 20%
+      chargeRate *= (0.2 + 0.8 * (c.hp / 100));
+      if (c.charge < 100) c.charge = Math.min(100, c.charge + chargeRate * dt);
     }
-    // Delayed right cannon (stagger)
+    // Delayed right cannon stagger
     if (_fRPending > 0) {
       _fRPending -= dt;
       if (_fRPending <= 0 && _cannonReady(_cannon.fR)) {
-        _cannon.fR.temp  += TEMP_PER_SHOT;
-        _cannon.fR.charge = 0;
-        _spawnTorpedo(+TORPEDO_OFFSET, false);
+        _doFire(_cannon.fR, +TORPEDO_OFFSET, false);
       }
     }
   }
 
+  // Fire a single cannon shot: apply heat, possible damage, spawn torpedo
+  function _doFire(c, xOffset, aft) {
+    const CC = GameConfig.cannons;
+    const tempRise = CC.tempPerShot * (1 + (100 - c.hp) / 100);
+    c.temp = Math.min(c.temp + tempRise, 200);
+    if (c.temp > CC.tempDamageAt) {
+      c.hp = Math.max(0, c.hp - (c.temp - CC.tempDamageAt));
+    }
+    c.charge = 0;
+    _spawnTorpedo(xOffset, aft);
+  }
+
   // Front cannon — always fires ship-forward (left-click)
   function _fireFront() {
-    if (_energy <= 0) return;
-    // P system gate
-    if (_systems.P <= 0) return;
+    if (_energy <= 0 || _systems.P <= 0) return;
     const fL = _cannon.fL, fR = _cannon.fR;
-    const pHp = _systems.P;
-    // At P < 50, only fL fires
-    const bothAllowed = pHp >= 50;
-
+    const bothAllowed = _systems.P >= 50;
     let fired = false;
     if (_cannonReady(fL)) {
-      fL.temp  += TEMP_PER_SHOT;
-      fL.charge = 0;
-      fL.cd     = 0.05;
-      _spawnTorpedo(-TORPEDO_OFFSET, false);
+      _doFire(fL, -TORPEDO_OFFSET, false);
       fired = true;
     }
     if (bothAllowed && _cannonReady(fR)) {
       if (_targetLocked) {
-        fR.temp  += TEMP_PER_SHOT;
-        fR.charge = 0;
-        _spawnTorpedo(+TORPEDO_OFFSET, false);
+        _doFire(fR, +TORPEDO_OFFSET, false);
       } else {
         _fRPending = 0.20;
       }
@@ -808,10 +820,8 @@ const SectorView = (() => {
     if (_energy <= 0 || _systems.P <= 0) return;
     const c = _cannon.aft;
     if (!_cannonReady(c)) return;
-    c.temp  += TEMP_PER_SHOT;
-    c.charge = 0;
+    _doFire(c, 0, true);
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
-    _spawnTorpedo(0, true);
   }
 
   // ---- Player hit handler ----
@@ -843,13 +853,30 @@ const SectorView = (() => {
                   .addScaledVector(down, 0.8);
     const vel = fireDir.multiplyScalar(TORPEDO_SPEED);
 
-    const geo  = new THREE.CylinderGeometry(0.35, 0.35, 6, 6);
-    const mat  = new THREE.MeshBasicMaterial({ color: aft ? 0xff8844 : 0x44ddff }); // orange=aft, cyan=front
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), fireDir.clone().normalize());
-    mesh.position.copy(pos);
-    const gl = new THREE.PointLight(aft ? 0xff6622 : 0x44ddff, 3, 30);
+    const coreColor = 0xff9933;
+    const glowColor = 0xff5500;
+
+    // Bright inner core
+    const coreGeo = new THREE.SphereGeometry(1.0, 8, 6);
+    const coreMat = new THREE.MeshBasicMaterial({ color: coreColor });
+    const mesh = new THREE.Mesh(coreGeo, coreMat);
+
+    // Soft outer glow halo (additive blend for bloom-like effect)
+    const glowGeo = new THREE.SphereGeometry(2.2, 8, 6);
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: glowColor,
+      transparent: true,
+      opacity: 0.30,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    mesh.add(new THREE.Mesh(glowGeo, glowMat));
+
+    // Dynamic light so it illuminates nearby objects
+    const gl = new THREE.PointLight(glowColor, 5, 50);
     mesh.add(gl);
+
+    mesh.position.copy(pos);
     _scene.add(mesh);
     _torpedoes.push({ mesh, pos: pos.clone(), vel, life: TORPEDO_LIFE });
   }
@@ -917,12 +944,263 @@ const SectorView = (() => {
     }
   }
 
+  // ---- Cargo ship 3D presence ----
+  function _buildCargoShipMesh() {
+    const group = new THREE.Group();
+    // Main hull — small flat freighter
+    group.add(Object.assign(new THREE.Mesh(
+      new THREE.BoxGeometry(3, 1, 5),
+      new THREE.MeshLambertMaterial({ color: 0x445566 })
+    ), { name: 'hull' }));
+    // Bridge module on top/front
+    const bridge = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 0.8, 1.8),
+      new THREE.MeshLambertMaterial({ color: 0x223344 })
+    );
+    bridge.position.set(0, 0.9, -1.5);
+    group.add(bridge);
+    // Engine glow — rear
+    const eng = new THREE.PointLight(0x4488ff, 1.5, 20);
+    eng.position.set(0, 0, 2.5);
+    eng.name = 'EngineLight';
+    group.add(eng);
+    // Running lights
+    const port = new THREE.PointLight(0xff2222, 0.3, 8);
+    port.position.set(-1.5, 0, 0);
+    group.add(port);
+    const stbd = new THREE.PointLight(0x22ff22, 0.3, 8);
+    stbd.position.set(1.5, 0, 0);
+    group.add(stbd);
+    return group;
+  }
+
+  function _spawnCargoShips(ships) {
+    _cargoShips = [];
+    if (!_scene || !ships || ships.length === 0) return;
+    const SS = GameConfig.supplyShip;
+    for (const ship of ships) {
+      const mesh = _buildCargoShipMesh();
+      const angle    = Math.random() * Math.PI * 2;
+      const spawnDir = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      const spawnPos = _hasStarbase
+        ? SB_POS.clone().addScaledVector(spawnDir, 102 + SS.spawnOffset)
+        : new THREE.Vector3((Math.random()-0.5)*200, 0, (Math.random()-0.5)*200);
+      const dockPos = _hasStarbase
+        ? SB_POS.clone().addScaledVector(spawnDir, 102)
+        : spawnPos.clone();
+      mesh.position.copy(spawnPos);
+      _scene.add(mesh);
+      _cargoShips.push({
+        ship, mesh,
+        pos:       spawnPos.clone(),
+        dockPos:   dockPos.clone(),
+        spawnPos:  spawnPos.clone(),
+        phase:     _hasStarbase ? 'arriving' : 'waiting',
+        phaseTimer: 0,
+      });
+    }
+  }
+
+  function _warpBurst3D(pos, color) {
+    if (!_scene) return;
+    const light = new THREE.PointLight(color, 25, 400);
+    light.position.copy(pos);
+    _scene.add(light);
+    let elapsed = 0;
+    const fade = () => {
+      elapsed += 1/60;
+      light.intensity = 25 * Math.max(0, 1 - elapsed / 0.5);
+      if (elapsed < 0.5 && _scene) requestAnimationFrame(fade);
+      else if (_scene) _scene.remove(light);
+    };
+    requestAnimationFrame(fade);
+  }
+
+  // Bulletproof mesh removal — traverse all children, then detach from parent
+  function _removeCargoMesh(mesh) {
+    mesh.traverse(c => { c.visible = false; });
+    if (mesh.parent) mesh.parent.remove(mesh);
+    else _scene?.remove(mesh);
+  }
+
+  function _updateCargoShips(dt) {
+    const SS    = GameConfig.supplyShip;
+    const spd   = SS.sectorSpeed;
+    const toRem = [];
+
+    for (let i = 0; i < _cargoShips.length; i++) {
+      const cs   = _cargoShips[i];
+      const { ship, mesh } = cs;
+
+      // Highest priority: if the galaxy-level ship has warped to a different sector, remove immediately
+      const curHex = ship.currentHex;
+      if (!curHex || curHex.q !== _sectorQ || curHex.r !== _sectorR) {
+        _warpBurst3D(cs.pos, 0xffffff);
+        _removeCargoMesh(cs.mesh);
+        toRem.push(i);
+        continue;
+      }
+
+      // Pre-warp strobe
+      if (ship.isDeparting) {
+        const strobe = 0.5 + 0.5 * Math.sin(Date.now() * 0.02);
+        const eng = mesh.getObjectByName('EngineLight');
+        if (eng) { eng.intensity = 2 + 12 * strobe; eng.color.set(0xff8800); }
+      }
+
+      if (cs.phase === 'arriving') {
+        const toTarget = cs.dockPos.clone().sub(cs.pos);
+        const dist     = toTarget.length();
+        if (dist < 4) {
+          cs.phase = 'docked'; cs.phaseTimer = SS.dockTime;
+          _spawnCargoDrone(cs.pos.clone()); // send drone to service this ship
+        } else {
+          const dir = toTarget.normalize();
+          cs.pos.addScaledVector(dir, Math.min(spd * dt, dist));
+          mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), dir);
+        }
+
+      } else if (cs.phase === 'docked') {
+        cs.phaseTimer -= dt;
+        if (cs.phaseTimer <= 0) cs.phase = 'leaving';
+
+      } else if (cs.phase === 'leaving') {
+        const toTarget = cs.spawnPos.clone().sub(cs.pos);
+        const dist     = toTarget.length();
+        if (dist < 6) {
+          cs.phase = 'ready_to_depart';
+          cs.pos.copy(cs.spawnPos);
+        } else {
+          const dir = toTarget.normalize();
+          cs.pos.addScaledVector(dir, Math.min(spd * dt, dist));
+          mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), dir);
+        }
+
+      } else if (cs.phase === 'ready_to_depart') {
+        if (ship.isDeparting) {
+          cs.phase = 'pulsing'; cs.phaseTimer = SS.warpBurnTime;
+          _warpBurst3D(cs.pos, 0xff8800);
+        }
+
+      } else if (cs.phase === 'pulsing' || cs.phase === 'pulsing_solo') {
+        cs.phaseTimer -= dt;
+        const awayDir = cs.pos.clone().sub(SB_POS).normalize();
+        if (awayDir.lengthSq() < 0.01) awayDir.set(0, 0, 1);
+        cs.pos.addScaledVector(awayDir, spd * 2.5 * dt);
+        if (cs.phaseTimer <= 0) {
+          _warpBurst3D(cs.pos, 0xffffff);
+          _removeCargoMesh(cs.mesh);
+          toRem.push(i);
+        }
+
+      } else if (cs.phase === 'waiting') {
+        if (ship.isDeparting) {
+          cs.phase = 'pulsing_solo'; cs.phaseTimer = SS.warpBurnTime;
+          _warpBurst3D(cs.pos, 0xff8800);
+        }
+      }
+
+      mesh.position.copy(cs.pos);
+    }
+
+    for (let i = toRem.length - 1; i >= 0; i--) {
+      _cargoShips.splice(toRem[i], 1);
+    }
+
+    // Poll for ships that have warped INTO this sector since we entered
+    if (_scene && _allSupplyShips.length > 0) {
+      const knownShips = new Set(_cargoShips.map(cs => cs.ship));
+      for (const ship of _allSupplyShips) {
+        if (knownShips.has(ship)) continue;
+        const h = ship.currentHex;
+        if (!h || h.q !== _sectorQ || h.r !== _sectorR) continue;
+        const mesh   = _buildCargoShipMesh();
+        const angle  = Math.random() * Math.PI * 2;
+        const spawnDir = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+        const spawnPos = _hasStarbase
+          ? SB_POS.clone().addScaledVector(spawnDir, 102 + SS.spawnOffset)
+          : new THREE.Vector3((Math.random()-0.5)*200, 0, (Math.random()-0.5)*200);
+        const dockPos = _hasStarbase
+          ? SB_POS.clone().addScaledVector(spawnDir, 102)
+          : spawnPos.clone();
+        mesh.position.copy(spawnPos);
+        _scene.add(mesh);
+        _warpBurst3D(spawnPos, 0x88aaff);
+        _cargoShips.push({ ship, mesh, pos: spawnPos.clone(), dockPos: dockPos.clone(),
+          spawnPos: spawnPos.clone(), phase: _hasStarbase ? 'arriving' : 'waiting', phaseTimer: 0 });
+      }
+    }
+  }
+
+  // ---- Cargo service drones ----
+  function _buildCargoDroneMesh() {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.8, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff8800, wireframe: true }));
+    g.add(body);
+    const glow = new THREE.PointLight(0xff8800, 2, 18);
+    g.add(glow);
+    return g;
+  }
+
+  function _spawnCargoDrone(shipPos) {
+    if (!_scene || !_hasStarbase) return;
+    const mesh = _buildCargoDroneMesh();
+    mesh.position.copy(SB_POS);
+    _scene.add(mesh);
+    _cargoDrones.push({
+      mesh,
+      pos:     SB_POS.clone(),
+      target:  shipPos.clone(),
+      state:   'flying_to',
+      timer:   0,
+    });
+  }
+
+  function _updateCargoDrones(dt) {
+    const spd   = DRONE_SPEED;
+    const toRem = [];
+    for (let i = 0; i < _cargoDrones.length; i++) {
+      const d = _cargoDrones[i];
+      if (d.state === 'flying_to') {
+        const toTarget = d.target.clone().sub(d.pos);
+        const dist     = toTarget.length();
+        if (dist < 2) {
+          d.state = 'connected'; d.timer = 3;
+          d.pos.copy(d.target);
+        } else {
+          d.pos.addScaledVector(toTarget.normalize(), Math.min(spd * dt, dist));
+        }
+      } else if (d.state === 'connected') {
+        d.timer -= dt;
+        // Small hover bob while connected
+        d.pos.y = d.target.y + Math.sin(Date.now() * 0.004) * 0.3;
+        if (d.timer <= 0) { d.state = 'returning'; }
+      } else if (d.state === 'returning') {
+        const toSB = SB_POS.clone().sub(d.pos);
+        const dist  = toSB.length();
+        if (dist < 3) {
+          toRem.push(i);
+        } else {
+          d.pos.addScaledVector(toSB.normalize(), Math.min(spd * dt, dist));
+        }
+      }
+      d.mesh.position.copy(d.pos);
+    }
+    for (let i = toRem.length - 1; i >= 0; i--) {
+      _removeCargoMesh(_cargoDrones[toRem[i]].mesh);
+      _cargoDrones.splice(toRem[i], 1);
+    }
+  }
+
+
   // ---- HUD ----
   function _drawHUD() {
     const oc = _overlayCtx; if (!oc) return;
     const W = _overlayCanvas.width, H = _overlayCanvas.height;
     oc.clearRect(0, 0, W, H);
-    const DH = 90; // expanded dashboard height
+    const DH = 120; // expanded dashboard height
     const DY = H - DH;
     const cx = W/2, cy = DY / 2;
 
@@ -1053,6 +1331,9 @@ const SectorView = (() => {
         if (!z.dead) rawContacts.push({ pos: z.position, color: '#ff3300', size: 3, label: `ZY-${zyIdx++}` });
       }
       if (_hasStarbase) rawContacts.push({ pos: SB_POS.clone(), color: '#00e5ff', size: 3.5, label: 'SB' });
+      for (const cs of _cargoShips) {
+        rawContacts.push({ pos: cs.pos.clone(), color: '#aaff44', size: 2.5, label: 'CS' });
+      }
       if (rawContacts.length === 0)
         rawContacts.push({ pos: new THREE.Vector3(0,0,0), color: 'rgba(160,180,200,0.55)', size: 2, label: 'ORG' });
 
@@ -1242,169 +1523,172 @@ const SectorView = (() => {
       oc.fillText('MOUSE TO STEER  •  0-9 OR SCROLL = SPEED  •  G = GALAXY MAP', cx, DY/2 - 32);
     }
 
-    // Docking status
-    if (_hasStarbase) {
-      const distSB = _camera.position.distanceTo(SB_POS);
-      const p = 0.7 + 0.3 * Math.sin(Date.now() * 0.008);
+    // Docking status banner
+    if (_hasStarbase && _dockState === 'connected') {
+      const pct = Math.round((1 - _connectTimer / DOCK_CONNECT_SECS) * 100);
+      const bw  = W * 0.4, bx = (W - bw) / 2, by = DY - 24;
+      const p2  = 0.7 + 0.3 * Math.sin(Date.now() * 0.008);
+      oc.fillStyle = 'rgba(0,40,20,0.92)'; oc.fillRect(bx, by, bw, 20);
+      oc.fillStyle = '#00ffaa'; oc.fillRect(bx, by, bw * (pct/100), 20);
+      oc.font = 'bold 9px Orbitron, sans-serif'; oc.fillStyle = '#001a10';
       oc.textAlign = 'center';
-      if (_dockState === 'NONE' && distSB < DOCK_APPROACH_R && _speed > 0) {
-        oc.font = '10px Orbitron, sans-serif'; oc.fillStyle = `rgba(0,255,180,${p})`;
-        oc.fillText('STARBASE IN RANGE — REDUCE SPEED TO 0 TO DOCK', cx, DY - 6);
-      } else if (_dockState === 'PLUG_OUT') {
-        oc.font = '10px Orbitron, sans-serif'; oc.fillStyle = `rgba(255,160,0,${p})`;
-        oc.fillText('DOCKING ARM INBOUND — HOLD POSITION', cx, DY - 6);
-      } else if (_dockState === 'CONNECTED') {
-        const pct = Math.round((1 - _dockTimer / DOCK_CONNECT_SECS) * 100);
-        oc.font = '10px Orbitron, sans-serif'; oc.fillStyle = 'rgba(0,255,180,0.9)';
-        oc.fillText(`DOCKED — REFUELING ${pct}% — HOLD POSITION`, cx, DY - 6);
-      } else if (_dockState === 'PLUG_BACK') {
-        oc.font = '10px Orbitron, sans-serif'; oc.fillStyle = `rgba(0,200,255,${p})`;
-        oc.fillText('RESUPPLY COMPLETE — ARM RETURNING', cx, DY - 6);
-      }
+      oc.fillText(`DOCKED — REFUELING ${pct}%`, W/2, by + 14);
     }
 
     // ========================= DASHBOARD =========================
-    // Three zones: [FLIGHT DATA | CANNON STATUS | SYSTEMS PANEL]
     const alertBorder = _systems.S <= 0;
     oc.fillStyle = 'rgba(0,4,18,0.97)'; oc.fillRect(0, DY, W, DH);
     oc.strokeStyle = alertBorder ? 'rgba(255,200,0,0.5)' : 'rgba(0,180,255,0.35)';
     oc.lineWidth = 1;
     oc.beginPath(); oc.moveTo(0, DY); oc.lineTo(W, DY); oc.stroke();
 
-    const labelC = alertBorder ? 'rgba(255,200,0,0.55)' : 'rgba(0,180,255,0.45)';
-    const valueC = alertBorder ? '#ffdd00' : '#00e5ff';
-    const dimC   = alertBorder ? 'rgba(255,200,0,0.22)' : 'rgba(0,180,255,0.18)';
+    const lbC  = alertBorder ? 'rgba(255,200,0,0.90)' : 'rgba(0,200,255,0.80)';
+    const valC = alertBorder ? '#ffdd00' : '#00e5ff';
 
-    // Zone 1: Flight Data (left 28% of width)
-    const Z1W = Math.floor(W * 0.28);
-    const Z2X = Z1W + 1;
-    const Z2W = Math.floor(W * 0.42); // cannon zone
-    const Z3X = Z2X + Z2W + 1;
-    const Z3W = W - Z3X;
+    // Zone widths
+    const Z1W = Math.floor(W * 0.12);  const Z1X = 0;
+    const Z2W = Math.floor(W * 0.37);  const Z2X = Z1W + 1;
+    const Z3W = Math.floor(W * 0.22);  const Z3X = Z2X + Z2W + 1;
+    const Z4W = Math.floor(W * 0.15);  const Z4X = Z3X + Z3W + 1;
 
     // Zone dividers
-    oc.strokeStyle = 'rgba(0,80,120,0.4)'; oc.lineWidth = 1;
-    oc.beginPath(); oc.moveTo(Z2X, DY+4); oc.lineTo(Z2X, DY+DH-4); oc.stroke();
-    oc.beginPath(); oc.moveTo(Z3X, DY+4); oc.lineTo(Z3X, DY+DH-4); oc.stroke();
-    // Mid-row divider in zone 1
-    oc.strokeStyle = 'rgba(0,60,100,0.35)';
-    oc.beginPath(); oc.moveTo(8, DY+DH/2); oc.lineTo(Z1W-4, DY+DH/2); oc.stroke();
+    oc.strokeStyle = 'rgba(0,80,130,0.5)'; oc.lineWidth = 1;
+    [Z2X, Z3X, Z4X].forEach(zx => {
+      oc.beginPath(); oc.moveTo(zx, DY+4); oc.lineTo(zx, DY+DH-4); oc.stroke();
+    });
 
-    function _cell(label, value, x, row) {
-      const ry = row === 0 ? DY + 2 : DY + DH/2 + 1;
-      const rh = DH/2 - 4;
-      oc.textAlign = 'left';
-      oc.font = '7px Share Tech Mono, monospace'; oc.fillStyle = labelC;
-      oc.fillText(label, x + 7, ry + 10);
-      oc.font = 'bold 16px Orbitron, monospace'; oc.fillStyle = value === '—' ? dimC : valueC;
-      oc.fillText(value, x + 7, ry + rh - 2);
+    // Common bar extents
+    const barTop = DY + 18;
+    const barH   = DH - 32;  // ~88px
+    const barBot = barTop + barH;
+
+    function _lbl(text, x, y, align, col, sz) {
+      oc.font = `${sz||7}px Share Tech Mono, monospace`;
+      oc.fillStyle = col || lbC;
+      oc.textAlign = align || 'center';
+      oc.fillText(text, x, y);
+    }
+    function _vBar(val, maxV, x, y, w, h, col) {
+      const v = Math.max(0, Math.min(maxV, val));
+      oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(x, y, w, h);
+      const fillH = h * (v / maxV);
+      oc.fillStyle = col; oc.fillRect(x, y + h - fillH, w, fillH);
     }
 
-    // Actual velocity in units/sec — show ∞ at warp velocity
+    // ── ZONE 1: FLIGHT ──
+    _lbl('VELOCITY', Z1X + Z1W/2, DY + 11, 'center', lbC, 9);
     const actualVelocity = Math.round(_currentVelocity);
     const dispSpeed = _glitch()
       ? String(Math.floor(Math.random() * 999)).padStart(3, '0')
       : actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
-    const dispEnergy = _glitch() ? '????':String(Math.floor(_energy)).padStart(4,'0');
-    const halfW = Z1W / 2;
-    _cell('V u/s', dispSpeed,    0,      0);
-    _cell('K', String(_kills).padStart(3,'0'),  halfW, 0);
-    _cell('E', dispEnergy,   0,      1);
-    const noTarget = _targets === 0;
-    _cell('T', noTarget ? '—' : String(_targets).padStart(2,'0'), halfW, 1);
+    oc.font = 'bold 28px Orbitron, monospace';
+    oc.fillStyle = actualVelocity === 0 ? 'rgba(0,180,255,0.4)' : valC;
+    oc.textAlign = 'center';
+    oc.fillText(dispSpeed, Z1X + Z1W/2, DY + 52);
 
-    // ---- ZONE 2: Cannon Status ----
-    // Three columns: fL | aft | fR; each with T/C/η bars
-    const cannonCols = [
-      { c: _cannon.fL,  label: 'FL' },
-      { c: _cannon.aft, label: 'A'  },
-      { c: _cannon.fR,  label: 'FR' },
+    _lbl('ENERGY', Z1X + Z1W/2, DY + 62, 'center', lbC);
+    const ePct    = _energy / 9999;
+    const eBarCol = ePct > 0.5 ? '#00e5ff' : ePct > 0.25 ? '#ffaa00' : '#ff3300';
+    const eBarX = Z1X + 8, eBarY = DY + 66, eBarW = Z1W - 16, eBarH = 10;
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(eBarX, eBarY, eBarW, eBarH);
+    oc.fillStyle = eBarCol; oc.fillRect(eBarX, eBarY, eBarW * ePct, eBarH);
+    const dispEnergy = _glitch() ? '????' : String(Math.floor(_energy)).padStart(4,'0');
+    _lbl(dispEnergy, Z1X + Z1W/2, DY + 88, 'center', eBarCol, 9);
+    _lbl(`K:${String(_kills).padStart(3,'0')}  T:${_targets > 0 ? String(_targets).padStart(2,'0') : '--'}`,
+      Z1X + Z1W/2, DY + 105, 'center', lbC, 8);
+
+    // ── ZONE 2: CANNONS ──
+    _lbl('CANNONS', Z2X + Z2W/2, DY + 11, 'center', lbC, 9);
+    const CC = GameConfig.cannons;
+    const cannonDefs = [
+      { c: _cannon.fL,  label: 'LEFT',  x: Z2X },
+      { c: _cannon.fR,  label: 'RIGHT', x: Z2X + Math.floor(Z2W/3) },
+      { c: _cannon.aft, label: 'AFT',   x: Z2X + Math.floor(Z2W/3)*2 },
     ];
-    const colW = Math.floor(Z2W / 3);
-    function _miniBar(val, maxV, x, y, w, h, col) {
-      const v = Math.max(0, Math.min(maxV, val));
-      oc.fillStyle = 'rgba(0,0,0,0.4)'; oc.fillRect(x, y, w, h);
-      oc.fillStyle = col;
-      oc.fillRect(x, y, w * (v/maxV), h);
-    }
-    cannonCols.forEach((cc, i) => {
-      const cx2 = Z2X + i * colW;
-      const c   = cc.c;
-      const dead = c.hp <= 0;
-      // Label
-      oc.font = '7px Share Tech Mono, monospace'; oc.fillStyle = dead ? '#442222' : labelC; oc.textAlign = 'center';
-      oc.fillText(cc.label, cx2 + colW/2, DY + 11);
+    const cgW    = Math.floor(Z2W / 3);
+    const bW     = 16, bGap = 12;
+    const bGrpW  = bW*3 + bGap*2;
+
+    cannonDefs.forEach(({ c, label, x }) => {
+      const grpCx   = x + cgW/2;
+      const bStartX = Math.floor(grpCx - bGrpW/2);
+      const dead     = c.hp <= 0;
+      _lbl(label, grpCx, DY + 22, 'center', dead ? 'rgba(180,50,50,0.7)' : lbC, 10);
 
       if (dead) {
         oc.font = '9px Orbitron, monospace'; oc.fillStyle = '#662222'; oc.textAlign = 'center';
-        oc.fillText('OFFLINE', cx2 + colW/2, DY + DH/2 + 6);
+        oc.fillText('OFFLINE', grpCx, DY + DH/2 + 6);
         return;
       }
 
-      const barW = colW - 14, barX = cx2 + 7;
-      // T - Temperature
-      const tempV = _corruptVal(c.temp);
-      const tCol = tempV > 70 ? '#ff2200' : tempV > 50 ? '#ff8800' : '#00cc66';
-      oc.font = '6px Share Tech Mono, monospace'; oc.fillStyle = labelC; oc.textAlign = 'left';
-      oc.fillText('T', barX, DY + 22);
-      _miniBar(tempV, 100, barX+8, DY+15, barW-8, 5, tCol);
+      // CHRG bar
+      const chgV   = _corruptVal(c.charge);
+      const chgCol = chgV >= 99 ? '#00ff88' : chgV > 40 ? '#ffdd00' : chgV > 5 ? '#ff8800' : '#333';
+      _vBar(chgV, 100, bStartX,            barTop, bW, barH - 16, chgCol);
+      _lbl('CHRG', bStartX + bW/2,            barBot, 'center', lbC, 8);
 
-      // C - Charge
-      const chgV = _corruptVal(c.charge);
-      const cCol = chgV > 80 ? '#00e5ff' : chgV > 40 ? '#0088aa' : '#003344';
-      oc.fillText('C', barX, DY + 36);
-      _miniBar(chgV, 100, barX+8, DY+29, barW-8, 5, cCol);
+      // TEMP bar (display capped at 120 for scale; anything above 100 = red zone)
+      const tmpRaw = c.temp;
+      const tmpV   = _corruptVal(Math.min(tmpRaw, 120));
+      const tmpCol = tmpRaw > CC.tempDamageAt ? '#ff0000'
+                   : tmpRaw > CC.tempNoChargeAt ? '#ff4400'
+                   : tmpRaw > CC.tempSlowChargeAt ? '#ff9900' : '#00cc66';
+      _vBar(tmpV, 120, bStartX + bW + bGap,  barTop, bW, barH - 16, tmpCol);
+      _lbl('TEMP', bStartX + bW + bGap + bW/2, barBot, 'center', lbC, 8);
 
-      // η - Cooling efficiency
-      const etaV = _corruptVal(c.coolingEff * 100);
-      const eCol = etaV > 70 ? '#00ffaa' : etaV > 40 ? '#aaff00' : '#ff6600';
-      oc.fillText('η', barX, DY + 50);
-      _miniBar(etaV, 100, barX+8, DY+43, barW-8, 5, eCol);
-
-      // Charge efficiency dot
-      const ceV = _corruptVal(c.chargeEff * 100);
-      oc.fillText('χ', barX, DY + 64);
-      _miniBar(ceV, 100, barX+8, DY+57, barW-8, 5, ceV > 70 ? '#88ffcc' : ceV > 40 ? '#888800' : '#880000');
+      // HLTH bar
+      const hpV   = _corruptVal(c.hp);
+      const hpCol = hpV > 75 ? '#00e5ff' : hpV > 25 ? '#ffaa00' : '#ff3300';
+      _vBar(hpV, 100, bStartX + (bW + bGap)*2, barTop, bW, barH - 16, hpCol);
+      _lbl('HLTH', bStartX + (bW+bGap)*2 + bW/2, barBot, 'center', lbC, 8);
     });
 
-    // ---- ZONE 3: Systems panel ----
-    const sx = Z3X + 6, sw = Z3W - 12;
+    // Shared COOLING bar at the bottom of cannon zone
+    const coolV   = _glitch() ? Math.random()*100 : _cannonCoolingRate;
+    const coolCol = coolV > 60 ? '#00ccff' : coolV > 30 ? '#ffaa00' : '#ff4400';
+    const coolBarY = barBot + 4, coolBarH = 5;
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(Z2X + 6, coolBarY, Z2W - 12, coolBarH);
+    oc.fillStyle = coolCol; oc.fillRect(Z2X + 6, coolBarY, (Z2W - 12) * (coolV/100), coolBarH);
+    _lbl('COOLING', Z2X + Z2W/2, coolBarY + coolBarH + 9, 'center', lbC, 8);
 
-    // Shield CAP bar
-    const shCapV  = _glitch() ? Math.random()*100 : _shieldCapacity;
-    const shChgV  = _glitch() ? Math.random()*100 : _shieldCharge;
-    oc.font = '6px Share Tech Mono, monospace'; oc.fillStyle = labelC; oc.textAlign = 'left';
-    oc.fillText('SH CAP', sx, DY + 11);
-    _miniBar(shCapV, 100, sx, DY+13, sw, 4, '#004488');
-    oc.fillText('SH CHG', sx, DY + 24);
-    const shCol = shChgV > 60 ? '#00ffcc' : shChgV > 30 ? '#ffaa00' : '#ff3a3a';
-    _miniBar(shChgV, 100, sx, DY+26, sw, 4, shCol);
+    // ── ZONE 3: ENGINES ──
+    _lbl('ENGINES', Z3X + Z3W/2, DY + 11, 'center', lbC, 9);
+    _lbl('THRUST', Z3X + Z3W/2, DY + 20, 'center', lbC, 8);
+    oc.font = 'bold 22px Orbitron, monospace';
+    oc.fillStyle = valC; oc.textAlign = 'center';
+    oc.fillText(String(_speed), Z3X + Z3W/2, DY + 42);
 
-    // Engine dots (E1–E4)
-    oc.fillText('ENG', sx, DY + 40);
-    const eDotR = 4, eDotY = DY + 44, eDotGap = sw / 4;
+    const engBarH  = barH - 30, engBarTop = DY + 46;
+    const engBarW  = Math.floor((Z3W - 16) / 4);
     _engines.forEach((eng, i) => {
-      const ex = sx + eDotGap*(i+0.5);
-      const eCol = eng.hp <= 0 ? 'rgba(60,10,10,0.6)' : eng.hp < 40 ? '#ff4400' : eng.hp < 75 ? '#ffaa00' : '#00ff88';
-      oc.fillStyle = _glitch() ? '#555544' : eCol;
-      oc.beginPath(); oc.arc(ex, eDotY, eDotR, 0, Math.PI*2); oc.fill();
-      oc.font = '5px Share Tech Mono, monospace'; oc.fillStyle = labelC; oc.textAlign = 'center';
-      oc.fillText(`E${i+1}`, ex, eDotY + 9);
+      const ex    = Z3X + 8 + engBarW * i;
+      const eHp   = _glitch() ? Math.random()*100 : eng.hp;
+      const eColE = eng.hp <= 0 ? 'rgba(60,10,10,0.4)' : eHp < 25 ? '#ff3300' : eHp < 75 ? '#ffaa00' : '#00ff88';
+      _vBar(eHp, 100, ex, engBarTop, engBarW - 4, engBarH, eColE);
+      _lbl(`E${i+1}`, ex + (engBarW-4)/2, engBarTop + engBarH + 9, 'center', lbC, 8);
     });
 
-    // C / L / R health dots
-    const sysRow = ['C','L','R'];
-    oc.fillText('SYS', sx, DY + 66);
-    sysRow.forEach((key, i) => {
-      const val = _systems[key];
-      const dotX = sx + (sw/3)*(i+0.5);
-      const dotY2 = DY + 72;
-      const col = val <= 0 ? 'rgba(60,10,10,0.7)' : val < 40 ? '#ff4400' : val < 75 ? '#ffaa00' : '#00e5ff';
-      oc.fillStyle = col;
-      oc.beginPath(); oc.arc(dotX, dotY2, 4, 0, Math.PI*2); oc.fill();
-      oc.font = '6px Share Tech Mono, monospace'; oc.fillStyle = labelC; oc.textAlign = 'center';
-      oc.fillText(key, dotX, dotY2 + 10);
-    });
+    // ── ZONE 4: SHIELDS ──
+    _lbl('SHIELDS', Z4X + Z4W/2, DY + 11, 'center', lbC, 9);
+    const shBarW  = Math.floor((Z4W - 24) / 2);
+    const shBarX1 = Z4X + 8, shBarX2 = shBarX1 + shBarW + 8;
+
+    // HEALTH bar (shield system hp = ceiling/max charge possible)
+    const shHp    = _glitch() ? Math.random()*100 : _shieldCapacity;
+    const shHpCol = shHp > 75 ? '#00aaff' : shHp > 40 ? '#7766ff' : '#aa3366';
+    _vBar(shHp, 100, shBarX1, barTop, shBarW, barH - 16, shHpCol);
+    _lbl('HLTH', shBarX1 + shBarW/2, barBot, 'center', lbC, 8);
+
+    // CHARGE bar (current shield energy; capped by health ceiling)
+    const shChg    = _glitch() ? Math.random()*100 : _shieldCharge;
+    const shChgCol = shChg > 60 ? '#00ffcc' : shChg > 30 ? '#ffaa00' : '#ff3300';
+    // Background tinted by health ceiling
+    const shCapH = (barH-16) * (_shieldCapacity / 100);
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBarX2, barTop, shBarW, barH-16);
+    oc.fillStyle = 'rgba(0,50,100,0.35)'; oc.fillRect(shBarX2, barTop + (barH-16) - shCapH, shBarW, shCapH);
+    const shChgH = (barH-16) * (shChg / 100);
+    oc.fillStyle = shChgCol; oc.fillRect(shBarX2, barTop + (barH-16) - shChgH, shBarW, shChgH);
+    _lbl('CHRG', shBarX2 + shBarW/2, barBot, 'center', lbC, 8);
 
     oc.textAlign = 'left';
   }
@@ -1515,11 +1799,16 @@ const SectorView = (() => {
     _targetLocked = false;
     _zylons      = [];
     _torpedoes   = [];
+    _cargoShips     = [];
+    _allSupplyShips  = sector?.allSupplyShips || [];
+    _cargoDrones     = [];
     _resetCannons();
     _resetSystems();
     _resetEngines();
     _sectorType  = sector?.type        || 'void';
-    _hasStarbase  = !!sector?.hasStarbase;
+    _sectorQ     = sector?.q            ?? 0;
+    _sectorR     = sector?.r            ?? 0;
+    _hasStarbase = !!sector?.hasStarbase;
     _sectorName  = sector?.name        || `SECTOR ${sector?.q ?? '?'},${sector?.r ?? '?'}`;
 
     // Spawn Zylon enemies if sector has them
@@ -1529,6 +1818,7 @@ const SectorView = (() => {
 
     _initThree();
     _buildScene();
+    _spawnCargoShips(sector?.supplyShips || []);
 
     // Spawn Zylons after scene is built
     for (let i = 0; i < zylonCount; i++) {
@@ -1625,6 +1915,10 @@ const SectorView = (() => {
     _zylons = [];
     _scene = null;
     _asteroids = [];
+    _cargoShips.forEach(cs => cs.mesh && _removeCargoMesh(cs.mesh));
+    _cargoShips = [];
+    _cargoDrones.forEach(d => d.mesh && _removeCargoMesh(d.mesh));
+    _cargoDrones = [];
     if (_onExit) _onExit();
   }
 
@@ -1637,13 +1931,13 @@ const SectorView = (() => {
     _systems[id] = Math.max(0, _systems[id] - amount);
 
     if (id === 'P') {
-      // P system: cap all cannon chargeEff and coolingEff
-      const pct = _systems.P / 100;
+      // P-system damage reduces all cannon health directly
       if (_cannon) {
         for (const c of Object.values(_cannon)) {
-          c.coolingEff = Math.min(c.coolingEff, pct);
-          c.chargeEff  = Math.min(c.chargeEff,  pct);
-          if (_systems.P <= 0) c.hp = 0;
+          c.hp = Math.max(0, c.hp - amount * 0.5);
+        }
+        if (_systems.P <= 0) {
+          for (const c of Object.values(_cannon)) c.hp = 0;
         }
       }
     } else if (id === 'E') {

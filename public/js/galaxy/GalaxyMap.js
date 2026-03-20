@@ -314,27 +314,26 @@ class GalaxyMap {
 
       for (let i = 0; i < d; i++) {
         const path    = paths[i % paths.length];
-        const revPath = [...paths[i % paths.length]].reverse();
-
+        const reverse = (i % 2 === 1);
+        const usePath = reverse ? [...path].reverse() : path;
         this.supplyShips.push(new SupplyShip({
-          path,
-          startIndex:   i,
+          path:         usePath,
+          startIndex:   Math.floor(i / 2),
           forward:      true,
-          resource:     fwdResource,
-          rechargeTime: 2.0 + Math.random() * 0.5,
-          dockTime:     2.5,
-        }));
-
-        this.supplyShips.push(new SupplyShip({
-          path:         revPath,
-          startIndex:   i,
-          forward:      true,
-          resource:     revResource,
-          rechargeTime: 2.0 + Math.random() * 0.5,
-          dockTime:     2.5,
+          resource:     reverse ? revResource : fwdResource,
+          rechargeTime: GameConfig.supplyShip.rechargeTime,
+          dockTime:     GameConfig.supplyShip.dockTime,
         }));
       }
     }
+  }
+
+  /** Returns all supply ships currently in the given sector. */
+  shipsInSector(q, r) {
+    return this.supplyShips.filter(s => {
+      const h = s.currentHex;
+      return h && h.q === q && h.r === r;
+    });
   }
 
   // =========================================================
@@ -580,20 +579,17 @@ class GalaxyMap {
     this._resizeCanvas();
     let lastTime = performance.now();
     const tick = (now) => {
-      // Always re-register FIRST — loop must never die, even on error
       requestAnimationFrame(tick);
-
-      // Resize every frame — canvas starts at 0×0 when div is display:none;
-      // this detects when the map overlay first becomes visible.
       this._resizeCanvas();
-
-      // Skip draw when canvas still has no size
-      if (this.canvas.width === 0 || this.canvas.height === 0) return;
 
       try {
         const dt = Math.min((now - lastTime) / 1000, 0.1);
         lastTime = now;
+        // Always update ships regardless of map visibility
         this._updateSupplyShips(dt);
+
+        // Skip draw when canvas has no size (map overlay hidden)
+        if (this.canvas.width === 0 || this.canvas.height === 0) return;
         this._draw();
       } catch (err) {
         console.error('[GalaxyMap] tick error (loop preserved):', err);

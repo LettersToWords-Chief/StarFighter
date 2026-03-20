@@ -168,4 +168,57 @@ const GameConfig = Object.freeze({
     hardcore:    { miningMult: 0.6, zylonAggressionMult: 2.0, startingFuel: 9999, warpCorrectionForce: 0.7, warpDrift: 0.9 },
   },
 
+  // =========================================================
+  // SUPPLY SHIP (cargo ship NPC)
+  // =========================================================
+  supplyShip: {
+    /** Idle cooldown while warp drive recharges (seconds). */
+    rechargeTime: 36,
+    /** Acceleration burn before the hyperspace flash (seconds). */
+    warpBurnTime: 4,
+    /** In-sector flight speed (units/sec). At 6 u/s, 90 units = 15 seconds. */
+    sectorSpeed: 6,
+    /** Spawn offset from starbase: sectorSpeed × 15s = 90 units. */
+    spawnOffset: 90,
+    /** Fuel capacity per ship. */
+    fuelCapacity: 3000,
+    /** Seconds docked at starbase (covers drone exchange). */
+    dockTime: 10,
+  },
+
+  // =========================================================
+  // CANNON THERMAL MODEL
+  // =========================================================
+  cannons: {
+    /** Temperature (°) at which charge rate begins to slow. Full rate below this. */
+    tempSlowChargeAt: 25,
+    /** Temperature (°) at which charging stops completely. */
+    tempNoChargeAt: 95,
+    /** Peak temperature above this causes instant damage = (peak - this) per shot. */
+    tempDamageAt: 100,
+    /** Base temperature rise per shot on an undamaged cannon.
+     *  Scales up as cannon takes damage: rise = tempPerShot × (1 + damage%). */
+    tempPerShot: 20,
+    /** Always-on cooling contribution (units/sec), independent of engines. */
+    coolingBaseline: 10,
+    /** Each engine at full health contributes this × speed to cooling. Max total = 100. */
+    coolingPerEnginePerSpeed: 2.5,
+    /** Temperature drop per second when cooling rate is at maximum (100). */
+    maxCoolingTempDrop: 50,
+    /** Seconds to charge a cannon from 0 → 100% in optimal conditions (cool + healthy). */
+    optimalChargeTime: 0.2,
+    /** Cannot fire above this temperature. */
+    tempFireMax: 95,
+  },
+
+  // =========================================================
+  // SHIELDS
+  // =========================================================
+  shields: {
+    /** Shield charge regeneration rate (% per second) at full shield health (S-system 100%). */
+    rechargeRatePerSec: 20,
+    /** When shield charge falls below this fraction of the health ceiling, system bleed-through begins. */
+    systemDamageThreshold: 0.50,
+  },
+
 });
