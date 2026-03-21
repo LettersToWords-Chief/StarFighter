@@ -10,70 +10,75 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <!-- Galaxy Map Overlay (z-index 20, always on top until toggled off) -->
-  <div id="galaxy-view">
-    <canvas id="galaxy-canvas"></canvas>
+  <!-- 16:9 letterbox container -->
+  <div id="game-wrapper">
 
-    <!-- HUD overlay -->
-    <div id="hud">
-      <div id="hud-left">
-        <div class="hud-panel">
-          <div class="hud-label">SECTOR</div>
-          <div class="hud-value" id="hud-sector">--</div>
+    <!-- Galaxy Map Overlay (z-index 20, always on top until toggled off) -->
+    <div id="galaxy-view">
+      <canvas id="galaxy-canvas"></canvas>
+
+      <!-- HUD overlay -->
+      <div id="hud">
+        <div id="hud-left">
+          <div class="hud-panel">
+            <div class="hud-label">SECTOR</div>
+            <div class="hud-value" id="hud-sector">--</div>
+          </div>
+          <div class="hud-panel">
+            <div class="hud-label">FUEL</div>
+            <div class="hud-bar-wrap"><div class="hud-bar" id="fuel-bar"></div></div>
+            <div class="hud-value" id="hud-fuel">100%</div>
+          </div>
+          <div class="hud-panel">
+            <div class="hud-label">SHIELDS</div>
+            <div class="hud-bar-wrap"><div class="hud-bar shield" id="shield-bar"></div></div>
+            <div class="hud-value" id="hud-shields">100%</div>
+          </div>
         </div>
-        <div class="hud-panel">
-          <div class="hud-label">FUEL</div>
-          <div class="hud-bar-wrap"><div class="hud-bar" id="fuel-bar"></div></div>
-          <div class="hud-value" id="hud-fuel">100%</div>
+
+        <div id="hud-center">
+          <div id="game-title">STAR FIGHTER</div>
+          <div id="alert-box" class="hidden"></div>
         </div>
-        <div class="hud-panel">
-          <div class="hud-label">SHIELDS</div>
-          <div class="hud-bar-wrap"><div class="hud-bar shield" id="shield-bar"></div></div>
-          <div class="hud-value" id="hud-shields">100%</div>
+
+        <div id="hud-right">
+          <div class="hud-panel">
+            <div class="hud-label">WARP COST</div>
+            <div class="hud-value" id="hud-warp-cost">--</div>
+          </div>
+          <div class="hud-panel">
+            <div class="hud-label">STATUS</div>
+            <div class="hud-value" id="hud-status">STANDBY</div>
+          </div>
         </div>
       </div>
 
-      <div id="hud-center">
-        <div id="game-title">STAR FIGHTER</div>
-        <div id="alert-box" class="hidden"></div>
-      </div>
+      <!-- Tooltip -->
+      <div id="sector-tooltip" class="hidden"></div>
 
-      <div id="hud-right">
-        <div class="hud-panel">
-          <div class="hud-label">WARP COST</div>
-          <div class="hud-value" id="hud-warp-cost">--</div>
-        </div>
-        <div class="hud-panel">
-          <div class="hud-label">STATUS</div>
-          <div class="hud-value" id="hud-status">STANDBY</div>
-        </div>
+      <!-- Instructions -->
+      <div id="instructions">
+        <span>HOVER</span> sector info &nbsp;|&nbsp;
+        <span>CLICK</span> select target &nbsp;|&nbsp;
+        <span>ENTER</span> warp &nbsp;|&nbsp;
+        <span>ESC</span> cancel
       </div>
     </div>
 
-    <!-- Tooltip -->
-    <div id="sector-tooltip" class="hidden"></div>
-
-    <!-- Instructions -->
-    <div id="instructions">
-      <span>HOVER</span> sector info &nbsp;|&nbsp;
-      <span>CLICK</span> select target &nbsp;|&nbsp;
-      <span>ENTER</span> warp &nbsp;|&nbsp;
-      <span>ESC</span> cancel
+    <!-- Sector / Combat View (runs underneath galaxy map overlay) -->
+    <div id="combat-view">
+      <canvas id="combat-canvas"></canvas>
+      <div id="combat-hud">
+        <button id="exit-combat">◀ GALAXY MAP</button>
+      </div>
     </div>
-  </div>
 
-  <!-- Sector / Combat View (runs underneath galaxy map overlay) -->
-  <div id="combat-view">
-    <canvas id="combat-canvas"></canvas>
-    <div id="combat-hud">
-      <button id="exit-combat">◀ GALAXY MAP</button>
+    <!-- Warp tunnel overlay — full-screen, above sector, below galaxy map -->
+    <div id="warp-view">
+      <canvas id="warp-canvas"></canvas>
     </div>
-  </div>
 
-  <!-- Warp tunnel overlay — full-screen, above sector, below galaxy map -->
-  <div id="warp-view">
-    <canvas id="warp-canvas"></canvas>
-  </div>
+  </div><!-- /#game-wrapper -->
 
   <!-- Scripts -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>

@@ -24,17 +24,31 @@
 
 html, body {
   width: 100%; height: 100%;
-  background: var(--color-bg);
+  background: #000;          /* letterbox bars are pure black */
   color: var(--color-text);
   font-family: var(--font-mono);
   overflow: hidden;
   user-select: none;
+  /* Centre the 16:9 game area */
+  display: flex;
+  align-items: flex-end;        /* game snaps to browser bottom — black bar goes to top */
+  justify-content: center;
+}
+
+/* 16:9 letterbox — fills as much of the viewport as possible */
+#game-wrapper {
+  position: relative;
+  width:  min(100vw, 177.778vh);  /* 177.778vh = 100 × 16/9 */
+  height: min(56.25vw, 100vh);    /*  56.25vw  = 100 × 9/16 */
+  background: var(--color-bg);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
 /* Sector / combat view — always full-screen, always visible once entered */
 #combat-view {
   position: absolute; inset: 0;
-  display: none;   /* shown as soon as sector enters */
+  display: none;
 }
 
 /* Galaxy map — floating overlay panel in centre of screen */
@@ -42,13 +56,13 @@ html, body {
   position: absolute;
   left: 6%; right: 6%;
   top: 4%;
-  bottom: 110px;          /* leaves dashboard + margins visible below */
+  bottom: 110px;
   z-index: 20;
   background: rgba(2, 10, 28, 0.93);
   border: 1px solid rgba(0, 180, 255, 0.35);
   border-radius: 6px;
   backdrop-filter: blur(3px);
-  display: none;           /* hidden until G is pressed */
+  display: none;
 }
 #galaxy-view.map-open {
   display: block;

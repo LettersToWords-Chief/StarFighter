@@ -26,6 +26,11 @@ const SectorView = (() => {
   const TORPEDO_ENERGY = 35;
   const TORPEDO_CD     = 0.28;
 
+  // Force shield
+  const SHIELD_R      = 82;    // radius — outside starbase ring+arms (~65u), inside cargo dock (102u)
+  const SHIELD_DAMAGE = 15;    // HP dealt to player per collision event
+  const SHIELD_CD     = 1.5;   // seconds between player collision damage ticks
+
   // ---- State ----
   let _renderer = null, _scene = null, _camera = null;
   let _running  = false, _paused = false, _rafId = null;
@@ -50,6 +55,8 @@ const SectorView = (() => {
   let _warpMult = 1.0;
   let _lockState = 0;          // 0=none 1=partial-top 2=partial-bottom 3=full
   let _starbaseLocked = false;  // true when SB dot is inside inner scope box
+  let _targetLocked   = false;  // true when any combat contact is fully locked
+  let _lockedContactPos = null; // 3D world position of the locked contact
   const _keys = new Set();
 
   let _sectorType = 'void', _sectorName = '', _hasStarbase = false;
@@ -111,7 +118,6 @@ const SectorView = (() => {
   let _cannon = null;
   let _fRPending = 0;
   let _cannonCoolingRate = 10; // updated each tick; shown on dashboard
-  let _targetLocked = false;
   let _torpedoes    = [];
   let _fireFlash    = 0;
   let _hitFlash     = 0;
@@ -144,7 +150,16 @@ const SectorView = (() => {
   let _asteroids    = [];
   let _cargoShips   = [];
   let _allSupplyShips = [];
-  let _cargoDrones  = []; // service drones flying between SB and docked cargo ships
+  let _cargoDrones  = [];
+
+  // ---- Starbase force shield ----
+  let _sbShieldMeshes     = [];
+  let _sbShieldFlash      = 0;
+  let _sbShieldDmgCooldown = 0;
+  let _shieldImpacts      = []; // active hit animations [{ring, light, age, maxAge}]
+  let _explosions         = []; // active explosion animations
+
+  // service drones flying between SB and docked cargo ships
 
   // ---- Docking state machine ----
   // idle → outbound → connected → returning → done → idle
@@ -170,8 +185,8 @@ const SectorView = (() => {
     _mny = Math.max(-1, Math.min(1, (e.clientY - viewCy)               / scale));
   }
   function _onMD(e) {
-    if (e.button === 0) { _fireFront(); } // left  = front cannon (always forward)
-    if (e.button === 2) { _rearView = !_rearView; } // right = front/rear toggle
+    if (e.button === 0) { _fireFront(); } // left  = front cannons
+    if (e.button === 2) { _fireAft();   } // right = aft cannon
   }
   function _onCM(e) { e.preventDefault(); } // suppress right-click context menu
   function _onKD(e) {
@@ -189,9 +204,12 @@ const SectorView = (() => {
     if (e.code === 'Space') { e.preventDefault(); _fireAft(); } // Space = AFT cannon
   }
   function _onKU(e) { _keys.delete(e.code); }
-  function _onW(e)  {
+  function _onW(e) {
     e.preventDefault();
-    _speed = Math.max(0, Math.min(9, _speed + (e.deltaY < 0 ? 1 : -1)));
+    // Scroll forward (wheel up, deltaY < 0) = front view
+    // Scroll back    (wheel down, deltaY > 0) = rear  view
+    if (e.deltaY < 0) { _rearView = false; _computerOn = true; }
+    else              { _rearView = true;  _computerOn = true; }
   }
   function _bind() {
     if (_inputBound) return;
@@ -200,8 +218,10 @@ const SectorView = (() => {
     window.addEventListener('mousedown', _onMD);
     window.addEventListener('keydown',   _onKD);
     window.addEventListener('keyup',     _onKU);
+    window.addEventListener('resize',      _onResize);
+    window.addEventListener('contextmenu', _onCM);
+    window.addEventListener('wheel',       _onW, { passive: false });
     if (_canvas) {
-      _canvas.addEventListener('wheel',       _onW,  { passive: false });
       _canvas.addEventListener('contextmenu', _onCM);
     }
   }
@@ -212,9 +232,29 @@ const SectorView = (() => {
     window.removeEventListener('mousedown', _onMD);
     window.removeEventListener('keydown',   _onKD);
     window.removeEventListener('keyup',     _onKU);
+    window.removeEventListener('resize',      _onResize);
+    window.removeEventListener('contextmenu', _onCM);
+    window.removeEventListener('wheel',       _onW);
     if (_canvas) {
-      _canvas.removeEventListener('wheel',       _onW);
       _canvas.removeEventListener('contextmenu', _onCM);
+    }
+  }
+
+  function _onResize() {
+    if (!_renderer || !_canvas) return;
+    const par = _canvas.parentElement;
+    const W = par?.offsetWidth  || _canvas.clientWidth  || window.innerWidth;
+    const H = par?.offsetHeight || _canvas.clientHeight || window.innerHeight;
+    if (W === 0 || H === 0) return;
+    _renderer.setSize(W, H, false);
+    if (_camera) {
+      _camera.aspect = W / H;
+      _camera.updateProjectionMatrix();
+    }
+    // Sync overlay canvas size on resize
+    if (_overlayCanvas) {
+      _overlayCanvas.width  = W || _overlayCanvas.width;
+      _overlayCanvas.height = H || _overlayCanvas.height;
     }
   }
 
@@ -252,7 +292,7 @@ const SectorView = (() => {
 
     _renderer = new THREE.WebGLRenderer({ canvas: _glCanvas, antialias: true });
     _renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    _renderer.setSize(W, H);
+    _renderer.setSize(W, H, false); // false = let CSS control canvas display size
     _renderer.setClearColor(0x000005, 1);
     _camera = new THREE.PerspectiveCamera(60, W / H, 0.5, 40000);
     _camera.rotation.order = 'YXZ';
@@ -267,7 +307,7 @@ const SectorView = (() => {
     if (_sectorType === 'nebula')    _buildNebula();
     if (_sectorType === 'asteroid')  _buildAsteroids();
     if (_sectorType === 'habitable') _buildPlanet();
-    if (_hasStarbase) { _buildStarbase(); _buildPlug(); }
+    if (_hasStarbase) { _buildStarbase(); _buildPlug(); _buildShield(); }
   }
 
   // Fixed background star field — 2000 stars at large radius, 3px each for HD visibility
@@ -495,6 +535,86 @@ const SectorView = (() => {
     _scene.add(_plugMesh);
   }
 
+  // ---- Starbase force shield ----
+  function _buildShield() {
+    if (!_scene) return;
+    _sbShieldMeshes = [];
+
+    // Inner bubble — main visible surface
+    const inner = new THREE.Mesh(
+      new THREE.SphereGeometry(SHIELD_R, 40, 30),
+      new THREE.MeshBasicMaterial({
+        color: 0x00aaff, transparent: true, opacity: 0.055,
+        side: THREE.FrontSide,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    inner.position.copy(SB_POS);
+    _scene.add(inner);
+
+    // Outer halo — back-face for depth/glow
+    const outer = new THREE.Mesh(
+      new THREE.SphereGeometry(SHIELD_R * 1.03, 40, 30),
+      new THREE.MeshBasicMaterial({
+        color: 0x0055bb, transparent: true, opacity: 0.025,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    outer.position.copy(SB_POS);
+    _scene.add(outer);
+
+    _sbShieldMeshes = [inner, outer];
+  }
+
+  function _updateShield(dt) {
+    if (!_hasStarbase || _sbShieldMeshes.length === 0) return;
+
+    _sbShieldFlash       = Math.max(0, _sbShieldFlash - dt * 2.5);
+    _sbShieldDmgCooldown = Math.max(0, _sbShieldDmgCooldown - dt);
+
+    // Health-driven base color (cyan → orange → red)
+    const sbHP = 100; // placeholder until Zylon attacks are wired in
+    const healthT = sbHP / 100;
+    const baseCol = healthT > 0.5
+      ? new THREE.Color().lerpColors(new THREE.Color(0xff8800), new THREE.Color(0x00aaff), (healthT - 0.5) * 2)
+      : new THREE.Color().lerpColors(new THREE.Color(0xff2200), new THREE.Color(0xff8800), healthT * 2);
+
+    const flashCol  = new THREE.Color(0xffffff);
+    const finalCol  = _sbShieldFlash > 0
+      ? flashCol.clone().lerpColors(baseCol, flashCol, _sbShieldFlash)
+      : baseCol;
+
+    const [inner, outer] = _sbShieldMeshes;
+    const baseOpacity = 0.055 * healthT;
+
+    inner.material.color.copy(finalCol);
+    inner.material.opacity = baseOpacity + _sbShieldFlash * 0.25;
+    outer.material.color.copy(finalCol);
+    outer.material.opacity = 0.025 * healthT + _sbShieldFlash * 0.08;
+
+    inner.visible = outer.visible = sbHP > 0;
+    if (sbHP <= 0) return;
+
+    // Player collision — suppressed during warp arrival decel so player warps through shield
+    if (_warpDebursting) return;
+    const dist = _camera.position.distanceTo(SB_POS);
+    if (dist < SHIELD_R) {
+      // Push camera to shield surface
+      const pushDir = _camera.position.clone().sub(SB_POS);
+      if (pushDir.lengthSq() < 0.001) pushDir.set(0, 0, 1);
+      pushDir.normalize();
+      _camera.position.copy(SB_POS).addScaledVector(pushDir, SHIELD_R + 1);
+
+      // Damage player (rate-limited)
+      if (_sbShieldDmgCooldown <= 0) {
+        _applyPlayerHit(SHIELD_DAMAGE);
+        _sbShieldFlash       = 1.0;
+        _sbShieldDmgCooldown = SHIELD_CD;
+      }
+    }
+  }
+
   // ---- Docking state machine ----
   function _updateDocking(dt) {
     if (!_hasStarbase || !_running) return;
@@ -558,6 +678,133 @@ const SectorView = (() => {
     }
   }
 
+  // ---- Shield impact animations ----
+  function _spawnShieldImpact(hitPos) {
+    if (!_scene) return;
+    const normal = hitPos.clone().sub(SB_POS).normalize();
+    // Flat ring, tangent to shield surface at hit point
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(2, 5, 36),
+      new THREE.MeshBasicMaterial({
+        color: 0x88ddff, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    ring.position.copy(hitPos);
+    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    _scene.add(ring);
+    // Bright local flash
+    const light = new THREE.PointLight(0x88ddff, 12, 80);
+    light.position.copy(hitPos);
+    _scene.add(light);
+    _shieldImpacts.push({ ring, light, age: 0, maxAge: 0.5 });
+  }
+
+  function _updateShieldImpacts(dt) {
+    for (let i = _shieldImpacts.length - 1; i >= 0; i--) {
+      const imp = _shieldImpacts[i];
+      imp.age += dt;
+      const t = Math.min(1, imp.age / imp.maxAge);
+      imp.ring.scale.setScalar(1 + t * 8);          // grows from 1× to 9×
+      imp.ring.material.opacity = 0.9 * (1 - t);
+      imp.light.intensity       = 12  * (1 - t);
+      if (imp.age >= imp.maxAge) {
+        _scene?.remove(imp.ring);
+        _scene?.remove(imp.light);
+        _shieldImpacts.splice(i, 1);
+      }
+    }
+  }
+
+  // ---- Explosion system ----
+  // opts: { scale=1, debris=0, fireColor=0xff6600, debrisColor=0xff4400 }
+  function _spawnExplosion(pos, { scale = 1, debris = 0, fireColor = 0xff6600, debrisColor = 0xff4400 } = {}) {
+    if (!_scene) return;
+    const exp = { parts: [], age: 0, maxAge: 0.65 };
+
+    // Bright point light flash
+    const light = new THREE.PointLight(0xffffff, 20 * scale, 150 * scale);
+    light.position.copy(pos);
+    _scene.add(light);
+    exp.parts.push({ type: 'light', obj: light, peak: 20 * scale });
+
+    // Expanding fireball sphere
+    const ball = new THREE.Mesh(
+      new THREE.SphereGeometry(3 * scale, 10, 8),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 1,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      })
+    );
+    ball.position.copy(pos);
+    _scene.add(ball);
+    exp.parts.push({ type: 'fireball', obj: ball, fireColor: new THREE.Color(fireColor) });
+
+    // Shockwave ring (random orientation)
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(1.5 * scale, 4 * scale, 32),
+      new THREE.MeshBasicMaterial({
+        color: fireColor, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    ring.position.copy(pos);
+    const rn = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), rn);
+    _scene.add(ring);
+    exp.parts.push({ type: 'ring', obj: ring });
+
+    // Debris chunks
+    for (let i = 0; i < debris; i++) {
+      const chunk = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2 * scale, 0.7 * scale, 0.9 * scale),
+        new THREE.MeshBasicMaterial({ color: debrisColor, transparent: true, opacity: 1 })
+      );
+      chunk.position.copy(pos);
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 80 * scale,
+        (Math.random() - 0.5) * 80 * scale,
+        (Math.random() - 0.5) * 80 * scale
+      );
+      _scene.add(chunk);
+      exp.parts.push({ type: 'debris', obj: chunk, vel });
+    }
+
+    _explosions.push(exp);
+  }
+
+  function _updateExplosions(dt) {
+    for (let i = _explosions.length - 1; i >= 0; i--) {
+      const exp = _explosions[i];
+      exp.age += dt;
+      const t = Math.min(1, exp.age / exp.maxAge);
+      for (const p of exp.parts) {
+        if (p.type === 'light') {
+          p.obj.intensity = p.peak * Math.max(0, 1 - t * 2.5);
+        } else if (p.type === 'fireball') {
+          p.obj.scale.setScalar(1 + t * 9);
+          // White core → fire color → transparent
+          const fc = p.fireColor;
+          if (t < 0.25) p.obj.material.color.lerpColors(new THREE.Color(0xffffff), fc, t / 0.25);
+          else          p.obj.material.color.copy(fc);
+          p.obj.material.opacity = 0.95 * (1 - t);
+        } else if (p.type === 'ring') {
+          p.obj.scale.setScalar(1 + t * 11);
+          p.obj.material.opacity = 0.85 * (1 - t);
+        } else if (p.type === 'debris') {
+          p.vel.multiplyScalar(Math.max(0, 1 - dt * 2.5));
+          p.obj.position.addScaledVector(p.vel, dt);
+          p.obj.rotation.x += dt * 4; p.obj.rotation.y += dt * 6;
+          p.obj.material.opacity = 1 - t;
+        }
+      }
+      if (exp.age >= exp.maxAge) {
+        for (const p of exp.parts) _scene?.remove(p.obj);
+        _explosions.splice(i, 1);
+      }
+    }
+  }
+
   // ---- Loop ----
   function _tick(now) {
     if (!_running) return;
@@ -570,6 +817,9 @@ const SectorView = (() => {
     _updateDust();
     _updateVoidObjects();
     _updateDocking(dt);
+    _updateShield(dt);
+    _updateShieldImpacts(dt);
+    _updateExplosions(dt);
     _updateTorpedoes(dt);
     _updateCannons(dt);
     _updateCargoDrones(dt);
@@ -666,8 +916,10 @@ const SectorView = (() => {
     } else {
       _camera.quaternion.copy(_cameraQuat);
     }
-    // Energy drain proportional to velocity²
-    if (_energy > 0 && _currentVelocity > 0) _energy = Math.max(0, _energy - (_currentVelocity * _currentVelocity / 9801) * dt);
+    // Energy drain proportional to velocity² — but cap at normal max speed so warp arrival
+    // doesn't drain the full reserve in the first frame (99999² / 9801 >> 9999)
+    const drainVel = Math.min(_currentVelocity, 99);
+    if (_energy > 0 && drainVel > 0) _energy = Math.max(0, _energy - (drainVel * drainVel / 9801) * dt);
     // Shield recharge
     if (_shieldsOn && _shieldCapacity > 0) {
       _shieldCharge = Math.min(_shieldCapacity, _shieldCharge + _shieldRechargeRate * dt);
@@ -851,7 +1103,10 @@ const SectorView = (() => {
     const pos = _camera.position.clone()
                   .addScaledVector(right, xOffset)
                   .addScaledVector(down, 0.8);
-    const vel = fireDir.multiplyScalar(TORPEDO_SPEED);
+    // Aim: when combat-locked, fire toward the locked contact; otherwise fire forward
+    const vel = (!aft && _targetLocked && _lockedContactPos)
+      ? _lockedContactPos.clone().sub(pos).normalize().multiplyScalar(TORPEDO_SPEED)
+      : fireDir.multiplyScalar(TORPEDO_SPEED);
 
     const coreColor = 0xff9933;
     const glowColor = 0xff5500;
@@ -900,6 +1155,8 @@ const SectorView = (() => {
         // Player torpedo → asteroid
         for (let j = _asteroids.length - 1; j >= 0; j--) {
           if (t.pos.distanceTo(_asteroids[j].pos) < _asteroids[j].radius + 5) {
+            _spawnExplosion(_asteroids[j].pos.clone(),
+              { scale: 1.5, debris: 6, fireColor: 0xcc8833, debrisColor: 0x887755 });
             if (_asteroids[j].mesh) _scene.remove(_asteroids[j].mesh);
             _asteroids.splice(j, 1);
             hit = true;
@@ -920,6 +1177,38 @@ const SectorView = (() => {
               hit = true;
               break;
             }
+          }
+        }
+        // Player torpedo → cargo ships (friendly fire)
+        if (!hit) {
+          for (let ci = _cargoShips.length - 1; ci >= 0; ci--) {
+            if (t.pos.distanceTo(_cargoShips[ci].pos) < 8) {
+              _spawnExplosion(_cargoShips[ci].pos.clone(),
+                { scale: 2, debris: 8, fireColor: 0xff6600, debrisColor: 0xff4400 });
+              _removeCargoMesh(_cargoShips[ci].mesh);
+              _cargoShips.splice(ci, 1);
+              hit = true; break;
+            }
+          }
+        }
+        // Player torpedo → cargo drones (friendly fire)
+        if (!hit) {
+          for (let di = _cargoDrones.length - 1; di >= 0; di--) {
+            if (t.pos.distanceTo(_cargoDrones[di].pos) < 5) {
+              _spawnExplosion(_cargoDrones[di].pos.clone(),
+                { scale: 1, debris: 0, fireColor: 0xff8800, debrisColor: 0 });
+              _removeCargoMesh(_cargoDrones[di].mesh);
+              _cargoDrones.splice(di, 1);
+              hit = true; break;
+            }
+          }
+        }
+        // Player torpedo → starbase shield
+        if (!hit && _hasStarbase && _sbShieldMeshes.length > 0) {
+          if (t.pos.distanceTo(SB_POS) < SHIELD_R) {
+            _sbShieldFlash = 1.0;
+            _spawnShieldImpact(t.pos.clone());
+            hit = true;
           }
         }
       }
@@ -1068,18 +1357,13 @@ const SectorView = (() => {
         const toTarget = cs.spawnPos.clone().sub(cs.pos);
         const dist     = toTarget.length();
         if (dist < 6) {
-          cs.phase = 'ready_to_depart';
-          cs.pos.copy(cs.spawnPos);
+          // No snap, no wait — fire first flash and start warp burn immediately
+          cs.phase = 'pulsing'; cs.phaseTimer = SS.warpBurnTime;
+          _warpBurst3D(cs.pos, 0xff8800);
         } else {
           const dir = toTarget.normalize();
           cs.pos.addScaledVector(dir, Math.min(spd * dt, dist));
           mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), dir);
-        }
-
-      } else if (cs.phase === 'ready_to_depart') {
-        if (ship.isDeparting) {
-          cs.phase = 'pulsing'; cs.phaseTimer = SS.warpBurnTime;
-          _warpBurst3D(cs.pos, 0xff8800);
         }
 
       } else if (cs.phase === 'pulsing' || cs.phase === 'pulsing_solo') {
@@ -1200,9 +1484,10 @@ const SectorView = (() => {
     const oc = _overlayCtx; if (!oc) return;
     const W = _overlayCanvas.width, H = _overlayCanvas.height;
     oc.clearRect(0, 0, W, H);
-    const DH = 120; // expanded dashboard height
+    const DH = 90;  // compact dashboard — all content fits within DY+82
     const DY = H - DH;
     const cx = W/2, cy = DY / 2;
+    let _postDraw = () => {}; // contact-list rendered after dashboard so it overlays it
 
     // C-system corruption factor (0=perfect, 1=totally corrupt)
     const cCorrupt = _systems.C <= 0 ? 1.0 : Math.max(0, (75 - _systems.C) / 75);
@@ -1334,6 +1619,15 @@ const SectorView = (() => {
       for (const cs of _cargoShips) {
         rawContacts.push({ pos: cs.pos.clone(), color: '#aaff44', size: 2.5, label: 'CS' });
       }
+      // Docking drone — show as 'DD' contact when in transit or connected
+      if (_plugMesh && _plugMesh.visible &&
+          (_dockState === 'outbound' || _dockState === 'connected' || _dockState === 'returning')) {
+        rawContacts.push({ pos: _plugMesh.position.clone(), color: '#ff8800', size: 2, label: 'DD' });
+      }
+      // Cargo service drones
+      for (const d of _cargoDrones) {
+        rawContacts.push({ pos: d.pos.clone(), color: '#ff8800', size: 2, label: 'DD' });
+      }
       if (rawContacts.length === 0)
         rawContacts.push({ pos: new THREE.Vector3(0,0,0), color: 'rgba(160,180,200,0.55)', size: 2, label: 'ORG' });
 
@@ -1351,12 +1645,13 @@ const SectorView = (() => {
         return { ...ct, dist, fwd, rDot, uDot, theta, phi };
       });
 
-      // ---- Layout: list below scope ----
+      // ---- Layout: scope FIXED at bottom-right; list grows downward into dashboard area ----
       const scopeW = 180, scopeH = 140;
-      const rowH = 18, listH = contacts.length * rowH + 6;
-      const scopeX  = W - scopeW - 18;
-      const listY   = DY - listH - 6;
-      const scopeY  = listY - scopeH - 4;
+      const rowH = 18;
+      const scopeX  = W - scopeW - 6;         // tight right margin
+      const scopeY  = DY - scopeH - 4;        // always just above dashboard
+      const listY   = DY + 2;                  // always just inside dashboard top
+      const listH   = contacts.length * rowH + 6;
       const scopeCx = scopeX + scopeW / 2, scopeCy = scopeY + scopeH / 2;
       const maxH = scopeW / 2 - 6, maxV = scopeH / 2 - 8;
 
@@ -1412,6 +1707,18 @@ const SectorView = (() => {
         }
       }
       _lockState = scopeLock;
+
+      // Update combat lock: true only when lockState is full (3)
+      _targetLocked = (_lockState === 3);
+      if (_targetLocked) {
+        // Find the most-centered forward contact to aim at
+        const best = contacts
+          .filter(ct => ct.fwd > 0.1)
+          .sort((a, b) => (Math.abs(a.rDot) + Math.abs(a.uDot)) - (Math.abs(b.rDot) + Math.abs(b.uDot)))[0];
+        _lockedContactPos = best ? best.pos.clone() : null;
+      } else {
+        _lockedContactPos = null;
+      }
 
       // Drone dot on scope when plug is in transit
       if (_plugMesh && (_dockState === 'outbound' || _dockState === 'returning')) {
@@ -1483,25 +1790,24 @@ const SectorView = (() => {
         }
       }
 
-      // ---- Draw contact list below scope ----
-      oc.fillStyle = 'rgba(0,4,16,0.80)'; oc.fillRect(scopeX, listY, scopeW, listH);
-      oc.strokeStyle = bdrCol; oc.lineWidth = 1; oc.strokeRect(scopeX, listY, scopeW, listH);
-
-      contacts.forEach((ct, i) => {
-        const ry = listY + 4 + i * rowH + 9;
-        const tSign = n => (n >= 0 ? '+' : '') + String(Math.abs(n)).padStart(3, '0');
-        const rStr  = String(Math.round(ct.dist)).padStart(5, '0');
-        if (damaged && Math.random() < 0.4) {
-          oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
-          oc.fillText(`${ct.label}  --   ---  -----`, scopeX + 6, ry); return;
-        }
-        // Label in contact color
-        oc.font = 'bold 12px Share Tech Mono, monospace'; oc.fillStyle = ct.color; oc.textAlign = 'left';
-        oc.fillText(ct.label.padEnd(4), scopeX + 6, ry);
-        // θ φ R in scope color
-        oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = txtCol;
-        oc.fillText(`θ${tSign(ct.theta)} φ${tSign(ct.phi)} R${rStr}`, scopeX + 50, ry);
-      });
+      // ---- Defer contact list draw so it renders on top of the dashboard ----
+      _postDraw = () => {
+        oc.fillStyle = 'rgba(0,4,16,0.90)'; oc.fillRect(scopeX, listY, scopeW, listH);
+        oc.strokeStyle = bdrCol; oc.lineWidth = 1; oc.strokeRect(scopeX, listY, scopeW, listH);
+        contacts.forEach((ct, i) => {
+          const ry = listY + 4 + i * rowH + 9;
+          const tSign = n => (n >= 0 ? '+' : '') + String(Math.abs(n)).padStart(3, '0');
+          const rStr  = String(Math.round(ct.dist)).padStart(5, '0');
+          if (damaged && Math.random() < 0.4) {
+            oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
+            oc.fillText(`${ct.label}  --   ---  -----`, scopeX + 6, ry); return;
+          }
+          oc.font = 'bold 12px Share Tech Mono, monospace'; oc.fillStyle = ct.color; oc.textAlign = 'left';
+          oc.fillText(ct.label.padEnd(4), scopeX + 6, ry);
+          oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = txtCol;
+          oc.fillText(`θ${tSign(ct.theta)} φ${tSign(ct.phi)} R${rStr}`, scopeX + 50, ry);
+        });
+      };
 
       oc.textAlign = 'left';
     }
@@ -1549,7 +1855,7 @@ const SectorView = (() => {
     const Z1W = Math.floor(W * 0.12);  const Z1X = 0;
     const Z2W = Math.floor(W * 0.37);  const Z2X = Z1W + 1;
     const Z3W = Math.floor(W * 0.22);  const Z3X = Z2X + Z2W + 1;
-    const Z4W = Math.floor(W * 0.15);  const Z4X = Z3X + Z3W + 1;
+    const Z4W = Math.floor(W * 0.11);  const Z4X = Z3X + Z3W + 1;
 
     // Zone dividers
     oc.strokeStyle = 'rgba(0,80,130,0.5)'; oc.lineWidth = 1;
@@ -1558,8 +1864,8 @@ const SectorView = (() => {
     });
 
     // Common bar extents
-    const barTop = DY + 18;
-    const barH   = DH - 32;  // ~88px
+    const barTop = DY + 14;
+    const barH   = DH - 20;  // bars fill most of dashboard; labels land at DY+(DH-6)
     const barBot = barTop + barH;
 
     function _lbl(text, x, y, align, col, sz) {
@@ -1576,26 +1882,26 @@ const SectorView = (() => {
     }
 
     // ── ZONE 1: FLIGHT ──
-    _lbl('VELOCITY', Z1X + Z1W/2, DY + 11, 'center', lbC, 9);
+    _lbl('VELOCITY', Z1X + Z1W/2, DY + 10, 'center', lbC, 9);
     const actualVelocity = Math.round(_currentVelocity);
     const dispSpeed = _glitch()
       ? String(Math.floor(Math.random() * 999)).padStart(3, '0')
       : actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
-    oc.font = 'bold 28px Orbitron, monospace';
+    oc.font = 'bold 22px Orbitron, monospace';
     oc.fillStyle = actualVelocity === 0 ? 'rgba(0,180,255,0.4)' : valC;
     oc.textAlign = 'center';
-    oc.fillText(dispSpeed, Z1X + Z1W/2, DY + 52);
+    oc.fillText(dispSpeed, Z1X + Z1W/2, DY + 38);
 
-    _lbl('ENERGY', Z1X + Z1W/2, DY + 62, 'center', lbC);
+    _lbl('ENERGY', Z1X + Z1W/2, DY + 47, 'center', lbC);
     const ePct    = _energy / 9999;
     const eBarCol = ePct > 0.5 ? '#00e5ff' : ePct > 0.25 ? '#ffaa00' : '#ff3300';
-    const eBarX = Z1X + 8, eBarY = DY + 66, eBarW = Z1W - 16, eBarH = 10;
+    const eBarX = Z1X + 8, eBarY = DY + 51, eBarW = Z1W - 16, eBarH = 8;
     oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(eBarX, eBarY, eBarW, eBarH);
     oc.fillStyle = eBarCol; oc.fillRect(eBarX, eBarY, eBarW * ePct, eBarH);
     const dispEnergy = _glitch() ? '????' : String(Math.floor(_energy)).padStart(4,'0');
-    _lbl(dispEnergy, Z1X + Z1W/2, DY + 88, 'center', eBarCol, 9);
+    _lbl(dispEnergy, Z1X + Z1W/2, DY + 67, 'center', eBarCol, 9);
     _lbl(`K:${String(_kills).padStart(3,'0')}  T:${_targets > 0 ? String(_targets).padStart(2,'0') : '--'}`,
-      Z1X + Z1W/2, DY + 105, 'center', lbC, 8);
+      Z1X + Z1W/2, DY + 80, 'center', lbC, 8);
 
     // ── ZONE 2: CANNONS ──
     _lbl('CANNONS', Z2X + Z2W/2, DY + 11, 'center', lbC, 9);
@@ -1652,20 +1958,22 @@ const SectorView = (() => {
     _lbl('COOLING', Z2X + Z2W/2, coolBarY + coolBarH + 9, 'center', lbC, 8);
 
     // ── ZONE 3: ENGINES ──
-    _lbl('ENGINES', Z3X + Z3W/2, DY + 11, 'center', lbC, 9);
-    _lbl('THRUST', Z3X + Z3W/2, DY + 20, 'center', lbC, 8);
-    oc.font = 'bold 22px Orbitron, monospace';
+    _lbl('ENGINES', Z3X + Z3W/2, DY + 10, 'center', lbC, 9);
+    _lbl('THRUST', Z3X + Z3W/2, DY + 18, 'center', lbC, 8);
+    oc.font = 'bold 18px Orbitron, monospace';
     oc.fillStyle = valC; oc.textAlign = 'center';
-    oc.fillText(String(_speed), Z3X + Z3W/2, DY + 42);
+    oc.fillText(String(_speed), Z3X + Z3W/2, DY + 32);
 
-    const engBarH  = barH - 30, engBarTop = DY + 46;
-    const engBarW  = Math.floor((Z3W - 16) / 4);
+    const engLabelY = DY + DH - 6;             // pin labels to dashboard bottom
+    const engBarTop = DY + 37;                  // just below speed display
+    const engBarH   = Math.max(20, engLabelY - 9 - engBarTop); // fill to bottom
+    const engBarW   = Math.floor((Z3W - 16) / 4);
     _engines.forEach((eng, i) => {
       const ex    = Z3X + 8 + engBarW * i;
       const eHp   = _glitch() ? Math.random()*100 : eng.hp;
       const eColE = eng.hp <= 0 ? 'rgba(60,10,10,0.4)' : eHp < 25 ? '#ff3300' : eHp < 75 ? '#ffaa00' : '#00ff88';
       _vBar(eHp, 100, ex, engBarTop, engBarW - 4, engBarH, eColE);
-      _lbl(`E${i+1}`, ex + (engBarW-4)/2, engBarTop + engBarH + 9, 'center', lbC, 8);
+      _lbl(`E${i+1}`, ex + (engBarW-4)/2, engLabelY, 'center', lbC, 8);
     });
 
     // ── ZONE 4: SHIELDS ──
@@ -1690,6 +1998,8 @@ const SectorView = (() => {
     oc.fillStyle = shChgCol; oc.fillRect(shBarX2, barTop + (barH-16) - shChgH, shBarW, shChgH);
     _lbl('CHRG', shBarX2 + shBarW/2, barBot, 'center', lbC, 8);
 
+    // Draw contact list on top of everything (deferred — overlays dashboard)
+    _postDraw();
     oc.textAlign = 'left';
   }
 
@@ -1742,14 +2052,17 @@ const SectorView = (() => {
 
   // ---- Overlay ----
   function _mkOverlay() {
-    const { W, H } = _canvasSize();
+    // Use parent container (= #combat-view = game-wrapper size) for true canvas dimensions
+    const par = _canvas?.parentElement || document.body;
+    const W   = par.offsetWidth  || 1280;
+    const H   = par.offsetHeight || 720;
     if (!_overlayCanvas) {
       _overlayCanvas = document.createElement('canvas');
-      _overlayCanvas.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:10;';
+      // width/height:100% ensures CSS stretches to fill parent even if attribute lags
+      _overlayCanvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:10;';
       _overlayCtx = _overlayCanvas.getContext('2d');
     }
     _overlayCanvas.width = W; _overlayCanvas.height = H;
-    const par = _canvas.parentElement || document.body;
     par.style.position = 'relative';
     par.appendChild(_overlayCanvas);
   }
@@ -1802,6 +2115,11 @@ const SectorView = (() => {
     _cargoShips     = [];
     _allSupplyShips  = sector?.allSupplyShips || [];
     _cargoDrones     = [];
+    _sbShieldMeshes     = [];
+    _sbShieldFlash      = 0;
+    _sbShieldDmgCooldown = 0;
+    _shieldImpacts      = [];
+    _explosions         = [];
     _resetCannons();
     _resetSystems();
     _resetEngines();
@@ -1834,7 +2152,10 @@ const SectorView = (() => {
 
     // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
     const off = arrivalOffset && typeof arrivalOffset === 'object' ? arrivalOffset : { x: 0, z: 0 };
-    _camera.position.set(off.x ?? 0, 0, off.z ?? 0);
+    // Starbase sectors: arrive 100u above the SB plane so the deburst path never
+    // enters the 82u shield radius (player passes over the top, then flies down to dock)
+    const arrivalY = (_hasStarbase && _warpDebursting) ? 100 : 0;
+    _camera.position.set(off.x ?? 0, arrivalY, off.z ?? 0);
     // When arriving from a warp burst, pre-offset so the deburst travel cancels out
     // and the player lands at the arrivalOffset position (near centre for accurate jump).
     // Deburst travels (99999 + WARP_VELOCITY) / 2 ≈ 50049 units in -Z (forward).
@@ -1919,6 +2240,12 @@ const SectorView = (() => {
     _cargoShips = [];
     _cargoDrones.forEach(d => d.mesh && _removeCargoMesh(d.mesh));
     _cargoDrones = [];
+    _sbShieldMeshes.forEach(m => { if (m.parent) m.parent.remove(m); });
+    _sbShieldMeshes = [];
+    _shieldImpacts.forEach(imp => { _scene?.remove(imp.ring); _scene?.remove(imp.light); });
+    _shieldImpacts = [];
+    _explosions.forEach(exp => exp.parts.forEach(p => _scene?.remove(p.obj)));
+    _explosions = [];
     if (_onExit) _onExit();
   }
 
