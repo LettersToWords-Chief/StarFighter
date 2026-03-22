@@ -20,7 +20,7 @@ const SectorView = (() => {
   const SECTOR_R    = 1000;
   const DOCK_R      = 100;
   const SB_POS      = new THREE.Vector3(0, 0, -500);
-  const TORPEDO_SPEED  = 600;  // units/sec
+  const TORPEDO_SPEED  = 200;  // units/sec
   const TORPEDO_LIFE   = 2.5;  // seconds (travels 1500 units max in sector of radius 1000)
   const TORPEDO_OFFSET = 1.0;  // horizontal spawn offset
   const TORPEDO_ENERGY        = GameConfig.player.energyPerShot;
@@ -197,7 +197,7 @@ const SectorView = (() => {
 
   // ---- Docking state machine ----
   // idle → outbound → connected → returning → done → idle
-  const DOCK_MIN = 100, DOCK_MAX = 105;      // valid distance range to starbase
+  const DOCK_RANGE = 250;                     // max distance to starbase to initiate docking
   const DRONE_SPEED = 12;                    // units/sec for both legs
   const DOCK_CONNECT_SECS = 8;              // seconds connected while refueling
   // Camera-local attach point: lower-right as if docking with ship belly
@@ -219,8 +219,8 @@ const SectorView = (() => {
     _mny = Math.max(-1, Math.min(1, (e.clientY - viewCy)               / scale));
   }
   function _onMD(e) {
-    if (e.button === 0) { _fireFront(); } // left  = front cannons
-    if (e.button === 2) { _fireAft();   } // right = aft cannon
+    if (e.button === 0) { _fireLeft();  } // left  click = left  front cannon
+    if (e.button === 2) { _fireRight(); } // right click = right front cannon
   }
   function _onCM(e) { e.preventDefault(); } // suppress right-click context menu
   function _onKD(e) {
@@ -235,6 +235,18 @@ const SectorView = (() => {
     if (e.code === 'KeyL') { _lrsOn = !_lrsOn; }                     // Long range scan
     if (e.code === 'KeyM') { /* TODO: manual target */    }           // Manual target
     if (e.code === 'KeyP') { _paused ? resume() : pause(); }         // Pause
+    if (e.code === 'KeyD') {
+      // Initiate docking: must be within range, stopped, starbase present, and idle
+      if (_hasStarbase && _dockState === 'idle') {
+        const distToSB = _camera.position.distanceTo(SB_POS);
+        if (distToSB < DOCK_RANGE && _currentVelocity < 0.5) {
+          _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
+          _plugMesh.position.copy(SB_POS);
+          _plugMesh.visible = true;
+          _dockState = 'outbound';
+        }
+      }
+    }
     if (e.code === 'Space') { e.preventDefault(); _fireAft(); } // Space = AFT cannon
   }
   function _onKU(e) { _keys.delete(e.code); }
@@ -653,50 +665,37 @@ const SectorView = (() => {
 
   // ---- Docking state machine ----
   function _updateDocking(dt) {
-    if (!_hasStarbase || !_running) return;
-
-    const distToSB  = _camera.position.distanceTo(SB_POS);
-    const condDist  = distToSB >= DOCK_MIN && distToSB <= DOCK_MAX;
-    const condLock  = _starbaseLocked;
-    const condSpeed = _currentVelocity < 0.5;
-    const condsMet  = condDist && condLock && condSpeed;
-
-    if (_dockState === 'idle') {
-      if (condsMet && _plugMesh) {
-        // Compute lower-right world-space attach point from camera orientation
-        _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
-        _plugMesh.position.copy(SB_POS);
-        _plugMesh.visible = true;
-        _dockState = 'outbound';
+    if (!_hasStarbase || !_running || _dockState === 'idle' || _dockState === 'done') {
+      if (_dockState === 'done') {
+        const distToSB = _camera.position.distanceTo(SB_POS);
+        if (distToSB >= DOCK_RANGE || _currentVelocity >= 0.5) _dockState = 'idle';
       }
+      return;
+    }
 
-    } else if (_dockState === 'outbound') {
-      if (!condsMet) {
-        // Conditions broken mid-flight — return to base
-        _dockState = 'returning';
+    // Abort if player starts moving
+    if (_currentVelocity >= 0.5 && (_dockState === 'outbound' || _dockState === 'connected')) {
+      _dockState = 'returning';
+    }
+
+    if (_dockState === 'outbound') {
+      _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
+      const toTarget = _plugEndPos.clone().sub(_plugMesh.position);
+      if (toTarget.length() < 1) {
+        _plugMesh.position.copy(_plugEndPos);
+        _connectTimer = DOCK_CONNECT_SECS;
+        _dockState = 'connected';
       } else {
-        const toTarget = _plugEndPos.clone().sub(_plugMesh.position);
-        if (toTarget.length() < 1) {
-          _plugMesh.position.copy(_plugEndPos);
-          _connectTimer = DOCK_CONNECT_SECS;
-          _dockState = 'connected';
-        } else {
-          _plugMesh.position.addScaledVector(toTarget.normalize(), DRONE_SPEED * dt);
-        }
+        _plugMesh.position.addScaledVector(toTarget.normalize(), DRONE_SPEED * dt);
       }
 
     } else if (_dockState === 'connected') {
-      // Keep the plug locked to the (moving) attach point during connection
       _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
       _plugMesh.position.copy(_plugEndPos);
-      if (!condsMet) {
-        _dockState = 'returning'; // abort
-      } else {
-        _connectTimer -= dt;
-        if (_connectTimer <= 0) {
-          _repairAndRefuel();
-          _dockState = 'returning'; // head back after refuel
-        }
+      _connectTimer -= dt;
+      if (_connectTimer <= 0) {
+        _repairAndRefuel();
+        _dockState = 'returning';
       }
 
     } else if (_dockState === 'returning') {
@@ -708,9 +707,6 @@ const SectorView = (() => {
       } else {
         _plugMesh.position.addScaledVector(toSB.normalize(), DRONE_SPEED * dt);
       }
-
-    } else if (_dockState === 'done') {
-      if (!condsMet) _dockState = 'idle'; // ready for next docking
     }
   }
 
@@ -1152,6 +1148,24 @@ const SectorView = (() => {
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
   }
 
+  // Left front cannon only (left mouse button)
+  function _fireLeft() {
+    if (_energy <= 0 || _systems.P <= 0) return;
+    if (!_cannonReady(_cannon.fL)) return;
+    _doFire(_cannon.fL, -TORPEDO_OFFSET, false);
+    _fireFlash = 0.18;
+    _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+  }
+
+  // Right front cannon only (right mouse button)
+  function _fireRight() {
+    if (_energy <= 0 || _systems.P <= 0) return;
+    if (!_cannonReady(_cannon.fR)) return;
+    _doFire(_cannon.fR, +TORPEDO_OFFSET, false);
+    _fireFlash = 0.18;
+    _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+  }
+
   // ---- Player hit handler ----
   function _applyPlayerHit(dmg) {
     _hitFlash = 0.5;
@@ -1260,7 +1274,7 @@ const SectorView = (() => {
 
     const pos = _camera.position.clone()
                   .addScaledVector(right, xOffset)
-                  .addScaledVector(down, 0.8);
+                  .addScaledVector(down, 1.5);
     // Aim: when combat-locked, fire toward the locked contact; otherwise fire forward
     const vel = (!aft && _targetLocked && _lockedContactPos)
       ? _lockedContactPos.clone().sub(pos).normalize().multiplyScalar(TORPEDO_SPEED)
@@ -1359,6 +1373,15 @@ const SectorView = (() => {
               _cargoDrones.splice(di, 1);
               hit = true; break;
             }
+          }
+        }
+        // Player torpedo → docking drone (aborts docking)
+        if (!hit && _plugMesh && _plugMesh.visible && _dockState !== 'idle' && _dockState !== 'done') {
+          if (t.pos.distanceTo(_plugMesh.position) < 5) {
+            _spawnExplosion(_plugMesh.position.clone(),
+              { scale: 0.8, debris: 3, fireColor: 0xff8800, debrisColor: 0xffcc00 });
+            _dockState = 'returning'; // abort — drone heads home
+            hit = true;
           }
         }
         // Player torpedo → starbase shield
@@ -1847,6 +1870,29 @@ const SectorView = (() => {
       oc.moveTo(scopeCx, scopeCy-4); oc.lineTo(scopeCx, scopeCy+4);
       oc.stroke();
 
+      // ── Docking indicator (only when computer on and healthy) ──
+      if (_hasStarbase && !damaged) {
+        const distToSB = _camera.position.distanceTo(SB_POS);
+        const dockReady = distToSB < DOCK_RANGE && _currentVelocity < 0.5;
+        const dockActive = _dockState === 'outbound' || _dockState === 'connected' || _dockState === 'returning';
+
+        if (dockActive) {
+          const pulse = 0.55 + 0.45 * Math.sin(Date.now() * 0.006);
+          const msg = _dockState === 'connected' ? 'CONNECTED' : _dockState === 'returning' ? 'DRONE RETURNING' : 'DOCKING IN PROGRESS';
+          oc.font = '9px Share Tech Mono, monospace'; oc.textAlign = 'center';
+          oc.fillStyle = `rgba(0,255,180,${pulse})`;
+          oc.fillText(msg, scopeCx, scopeY + scopeH - 5);
+          // Pulsing ring around scope center
+          oc.strokeStyle = `rgba(0,220,160,${pulse * 0.6})`; oc.lineWidth = 1.2;
+          oc.beginPath(); oc.arc(scopeCx, scopeCy, sibH * 1.1, 0, Math.PI * 2); oc.stroke();
+        } else if (dockReady && _dockState === 'idle') {
+          const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.003);
+          oc.font = '9px Share Tech Mono, monospace'; oc.textAlign = 'center';
+          oc.fillStyle = `rgba(0,255,120,${0.6 + 0.4 * pulse})`;
+          oc.fillText('DOCK READY  PRESS D', scopeCx, scopeY + scopeH - 5);
+        }
+      }
+
       // Contact dots + lock detection
       let scopeLock = 0;
       _starbaseLocked = false;
@@ -1859,9 +1905,10 @@ const SectorView = (() => {
         oc.beginPath(); oc.arc(sx2, sy2, dotR, 0, Math.PI * 2);
         if (ct.fwd > 0) { oc.fillStyle = ct.color; oc.fill(); }
         else            { oc.strokeStyle = ct.color; oc.lineWidth = 1.2; oc.stroke(); }
-        // Check lock: only for targets IN FRONT (fwd > 0)
+        // Check lock: only for ENEMY targets IN FRONT and within 500 units
         const dx = sx2 - scopeCx, dy = sy2 - scopeCy;
-        if (ct.fwd > 0 && Math.abs(dx) < sibW) {
+        const isEnemy = ct.label.startsWith('ZY');
+        if (ct.fwd > 0 && isEnemy && ct.dist < 500 && Math.abs(dx) < sibW) {
           if (Math.abs(dy) < sibH)  scopeLock = Math.max(scopeLock, 3);
           else if (dy < -sibH)      scopeLock = Math.max(scopeLock, 1);
           else if (dy >  sibH)      scopeLock = Math.max(scopeLock, 2);
@@ -1878,7 +1925,7 @@ const SectorView = (() => {
       if (_targetLocked) {
         // Find the most-centered forward contact to aim at
         const best = contacts
-          .filter(ct => ct.fwd > 0.1)
+          .filter(ct => ct.fwd > 0.1 && ct.label.startsWith('ZY') && ct.dist < 500)
           .sort((a, b) => (Math.abs(a.rDot) + Math.abs(a.uDot)) - (Math.abs(b.rDot) + Math.abs(b.uDot)))[0];
         _lockedContactPos = best ? best.pos.clone() : null;
       } else {
@@ -1920,32 +1967,16 @@ const SectorView = (() => {
         }
         oc.stroke(); oc.globalAlpha = 1;
       }
-      // Docking status indicator above scope
+      // Docking status above scope — kept minimal, detail is in the scope indicator
       if (_hasStarbase) {
         const dockMsgs = {
-          idle:      null,
           outbound:  { text: 'DRONE EN ROUTE',   col: '#00ffee' },
           connected: { text: 'DOCKING...',        col: '#ffdd00' },
-          returning: { text: 'DOCK ABORTED',      col: '#ff4400' },
+          returning: { text: 'DRONE RETURNING',   col: '#ff4400' },
           done:      { text: 'SYSTEMS RESTORED',  col: '#00ff88' },
         };
         const dm = dockMsgs[_dockState];
-        // Show conditions when idle
-        if (!dm && _hasStarbase) {
-          const distToSB  = _camera.position.distanceTo(SB_POS);
-          const condDist  = distToSB >= DOCK_MIN && distToSB <= DOCK_MAX;
-          const condSpeed = _currentVelocity < 0.5;
-          if (condDist && condSpeed && _starbaseLocked) {
-            oc.font = 'bold 8px Share Tech Mono, monospace'; oc.fillStyle = '#ffdd00'; oc.textAlign = 'center';
-            oc.fillText('DOCK READY', scopeCx, scopeY - 4);
-          } else if (condDist) {
-            const hints = [];
-            if (!_starbaseLocked) hints.push('LOCK SB');
-            if (!condSpeed)       hints.push('STOP');
-            oc.font = '7px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,200,0,0.6)'; oc.textAlign = 'center';
-            oc.fillText(hints.join(' · '), scopeCx, scopeY - 4);
-          }
-        } else if (dm) {
+        if (dm) {
           const pulse = (_dockState === 'outbound' || _dockState === 'connected')
             ? 0.6 + 0.4 * Math.sin(Date.now() * 0.008) : 1.0;
           oc.font = 'bold 8px Share Tech Mono, monospace';
@@ -2142,14 +2173,15 @@ const SectorView = (() => {
       const GRAPH_MAX = 200;
       const logMaxE   = Math.log1p(GRAPH_MAX);
       oc.fillStyle = 'rgba(0,0,0,0.40)'; oc.fillRect(gX, gY, gW, gH);
-      const bw = Math.max(1, Math.floor(gW / 60));
       for (let i = 0; i < 60; i++) {
         const val = _energyHistory[(_energyHistIdx - 60 + i + 60) % 60];
         if (val <= 0) continue;
         const logFrac = Math.min(1, Math.log1p(val) / logMaxE);
-        const bh = Math.max(1, Math.round(logFrac * gH));
+        const bh  = Math.max(1, Math.round(logFrac * gH));
+        const bx  = gX + Math.round(i * gW / 60);
+        const bw2 = Math.round((i + 1) * gW / 60) - Math.round(i * gW / 60);
         oc.fillStyle = logFrac < 0.33 ? '#00cc55' : logFrac < 0.67 ? '#ffaa00' : '#ff3300';
-        oc.fillRect(gX + i * bw, gY + gH - bh, bw - 1, bh);
+        oc.fillRect(bx, gY + gH - bh, bw2, bh);
       }
     }
 
