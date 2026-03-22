@@ -29,6 +29,9 @@ const SectorView = (() => {
   const ENERGY_ENGINE_FACTOR  = GameConfig.player.energyEngineMultiplier;
   const TORPEDO_CD     = 0.28;
 
+  // Subspace message flash
+  let _msgTimer = 0, _msgFrom = '', _msgText = '', _msgClock = '';
+
   // Force shield
   const SHIELD_R      = 82;    // radius — outside starbase ring+arms (~65u), inside cargo dock (102u)
   const SHIELD_DAMAGE = 100;   // HP dealt to player per collision event
@@ -2046,6 +2049,30 @@ const SectorView = (() => {
       oc.fillText(`DOCKED — REFUELING ${pct}%`, W/2, by + 14);
     }
 
+    // ── Subspace message flash ──
+    if (_msgTimer > 0) {
+      _msgTimer -= (1/60); // approx per-frame decay (60fps)
+      const fade = Math.min(1, _msgTimer);
+      const panW = Math.min(560, W * 0.58);
+      const panX = (W - panW) / 2;
+      const panH = 62;
+      const panY = DY - panH - 6;
+      oc.fillStyle = `rgba(0,6,22,${0.88 * fade})`;
+      oc.fillRect(panX, panY, panW, panH);
+      oc.strokeStyle = `rgba(0,180,255,${0.5 * fade})`;
+      oc.lineWidth = 1;
+      oc.strokeRect(panX, panY, panW, panH);
+      oc.globalAlpha = 1;
+      oc.font = 'bold 13px Share Tech Mono, monospace';
+      oc.textAlign = 'left';
+      oc.fillStyle = 'rgba(0,229,255,0.95)';
+      oc.fillText(_msgFrom + ': (' + _msgClock + ')', panX + 12, panY + 22);
+      // Line 2: message
+      oc.font = '13px Share Tech Mono, monospace';
+      oc.fillStyle = `rgba(255,255,255,${fade})`;
+      oc.fillText(_msgText, panX + 12, panY + 46);
+    }
+
     // ========================= DASHBOARD =========================
     const alertBorder = _systems.S <= 0;
     oc.fillStyle = 'rgba(0,4,18,0.97)'; oc.fillRect(0, DY, W, DH);
@@ -2331,12 +2358,13 @@ const SectorView = (() => {
     });
 
     // ── ZONE 4: SHIELDS ──
-    _lbl('SHIELDS', Z4X + Z4W/2, DY + 11, 'center', lbC, 9);
+    _lbl('SHIELDS', Z4X + Z4W/2, DY + 15, 'center', lbC, 16);
 
     const shCapFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCapacity) / 400));
     const shChgFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCharge)    / 400));
 
     const shBH    = barH - 16;          // bar pixel height
+    const shBY    = barTop + 6;          // top — shifted down so bottom aligns with engine bars
     const shBX    = Z4X + 6;            // x position
     const shBW    = Z4W - 12;           // full-zone single bar
     const shRedH  = Math.round((1 - shCapFrac) * shBH);   // damaged cap (top)
@@ -2344,21 +2372,21 @@ const SectorView = (() => {
     const shAvailH = shBH - shRedH;                        // rechargeable zone
 
     // 1: dark background
-    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBX, barTop, shBW, shBH);
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBX, shBY, shBW, shBH);
     // 2: dull blue — uncharged but rechargeable capacity
     if (shAvailH > 0) {
       oc.fillStyle = 'rgba(0,60,130,0.50)';
-      oc.fillRect(shBX, barTop + shRedH, shBW, shAvailH);
+      oc.fillRect(shBX, shBY + shRedH, shBW, shAvailH);
     }
     // 3: bright blue — current charge (from bottom up)
     if (shChgH > 0) {
       oc.fillStyle = '#00aaff';
-      oc.fillRect(shBX, barTop + shBH - shChgH, shBW, shChgH);
+      oc.fillRect(shBX, shBY + shBH - shChgH, shBW, shChgH);
     }
     // 4: red — damaged zone (top, drawn last)
     if (shRedH > 0) {
       oc.fillStyle = '#cc1100';
-      oc.fillRect(shBX, barTop, shBW, shRedH);
+      oc.fillRect(shBX, shBY, shBW, shRedH);
     }
 
     // Draw contact list on top of everything (deferred — overlays dashboard)
@@ -2679,7 +2707,15 @@ const SectorView = (() => {
     _energy = Math.max(0, _energy - amount);
   }
 
-  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy,
+  function showMessage(from, stardate, text) {
+    _msgFrom  = from;
+    _msgClock = stardate;
+    _msgText  = text;
+    _msgTimer = 4.0;
+  }
+
+  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage,
+           get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
            get speed()         { return _speed;         },

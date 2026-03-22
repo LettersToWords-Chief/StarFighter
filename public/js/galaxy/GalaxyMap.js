@@ -421,10 +421,18 @@ class GalaxyMap {
       const my = e.clientY - rect.top;
 
       if (this.isPanning) {
-        this.pan.x += mx - this.panStart.x;
-        this.pan.y += my - this.panStart.y;
-        this.panStart = { x: mx, y: my };
-        return;
+        const dx = mx - this.panStart.x;
+        const dy = my - this.panStart.y;
+        if (!this._hasDragged && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+          this._hasDragged = true;
+          c.style.cursor = 'grabbing';
+        }
+        if (this._hasDragged) {
+          this.pan.x += dx;
+          this.pan.y += dy;
+          this.panStart = { x: mx, y: my };
+          return;
+        }
       }
 
       const h = this._screenToHex(mx, my);
@@ -446,6 +454,7 @@ class GalaxyMap {
     });
 
     c.addEventListener('click', e => {
+      if (this._hasDragged) return;  // was a drag, not a click
       if (!this.hoveredHex) return;
       const k = HexMath.key(this.hoveredHex.q, this.hoveredHex.r);
       if (!this.hexes.has(k)) return;
@@ -457,15 +466,16 @@ class GalaxyMap {
     });
 
     c.addEventListener('mousedown', e => {
-      if (e.button === 1 || e.button === 2) { // middle or right
+      if (e.button === 0) {
         const rect = c.getBoundingClientRect();
         this.isPanning = true;
+        this._hasDragged = false;
         this.panStart = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       }
     });
 
-    c.addEventListener('mouseup',   () => { this.isPanning = false; });
-    c.addEventListener('mouseleave',() => { this.isPanning = false; });
+    c.addEventListener('mouseup',    () => { this.isPanning = false; c.style.cursor = 'default'; });
+    c.addEventListener('mouseleave', () => { this.isPanning = false; });
     c.addEventListener('contextmenu', e => e.preventDefault());
 
     c.addEventListener('wheel', e => {

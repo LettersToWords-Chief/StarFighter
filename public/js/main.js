@@ -18,6 +18,40 @@
   let _warping    = false;  // true during warp transition — suppresses onExit map open
   const currentDifficulty = 'cadet';
 
+  // ---- Subspace message log ----
+  const SubspaceComm = window.SubspaceComm = (() => {
+    const _log = [];
+
+    function _clockStr() {
+      const tc = _sectorLive ? Math.floor(SectorView.galacticClock || 0) : _stardate;
+      const hh = Math.floor(tc / 3600);
+      const mm = Math.floor((tc % 3600) / 60);
+      const ss = tc % 60;
+      return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+    }
+
+    function send(from, stardate, text) {
+      const entry = { from, clock: stardate, text };
+      _log.unshift(entry);
+      _renderLog();
+      if (_sectorLive && SectorView.showMessage) SectorView.showMessage(from, stardate, text);
+    }
+    function getLog() { return [..._log]; }
+    function _renderLog() {
+      const el = document.getElementById('subspace-log');
+      if (!el) return;
+      el.innerHTML = _log.length === 0
+        ? '<div class="ssm-empty">NO MESSAGES</div>'
+        : _log.map(m =>
+            `<div class="ssm-entry">
+               <span class="ssm-from">${m.from}: <span class="ssm-time">(${m.clock})</span></span>
+               <span class="ssm-text">${m.text}</span>
+             </div>`
+          ).join('');
+    }
+    return { send, getLog, _renderLog };
+  })();
+
   // Stardate
   let _stardate = 0;
   setInterval(() => { _stardate++; }, 1000);
@@ -30,7 +64,8 @@
   function openMap() {
     _mapOpen = true;
     $galaxy().classList.add('map-open');
-    if (_sectorLive) SectorView.suspendInput(); // freeze ship controls, canvases stay visible
+    SubspaceComm._renderLog();   // refresh message list each time the map opens
+    if (_sectorLive) SectorView.suspendInput();
   }
 
   function closeMap(mode) {
@@ -44,6 +79,8 @@
     const canvas = document.getElementById('galaxy-canvas');
     galaxyMap = new GalaxyMap(canvas, { difficulty: currentDifficulty });
     galaxyMap.getStardate = () => _stardate;
+
+
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
       if (playerFuel < fuelCost) { showAlert('INSUFFICIENT FUEL'); return; }
@@ -241,11 +278,6 @@
 
   // ---- HUD ----
   function updateHUD() {
-    const pct = (playerFuel / GameConfig.player.maxFuel) * 100;
-    document.getElementById('hud-fuel').textContent = Math.round(pct) + '%';
-    document.getElementById('fuel-bar').style.width = pct + '%';
-    const fb = document.getElementById('fuel-bar');
-    fb.style.background = pct < 25 ? '#ff3a3a' : pct < 50 ? '#ffaa00' : '';
     const pos = galaxyMap ? galaxyMap.playerPos : { q: 0, r: 0 };
     document.getElementById('hud-sector').textContent = `${pos.q},${pos.r}`;
   }
