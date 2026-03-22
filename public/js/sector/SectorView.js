@@ -28,8 +28,8 @@ const SectorView = (() => {
 
   // Force shield
   const SHIELD_R      = 82;    // radius — outside starbase ring+arms (~65u), inside cargo dock (102u)
-  const SHIELD_DAMAGE = 15;    // HP dealt to player per collision event
-  const SHIELD_CD     = 1.5;   // seconds between player collision damage ticks
+  const SHIELD_DAMAGE = 100;   // HP dealt to player per collision event
+  const SHIELD_CD     = 1.0;   // seconds between player collision damage ticks
 
   // ---- State ----
   let _renderer = null, _scene = null, _camera = null;
@@ -74,9 +74,9 @@ const SectorView = (() => {
   // charge  : current energy stored (0-100)
   // capacity: max ceiling (degrades with S-system hp)
   // rechargeRate: units/sec refill speed (degrades with S-system hp)
-  let _shieldCharge     = 100;
-  let _shieldCapacity   = 100;
-  let _shieldRechargeRate = 20;
+  let _shieldCharge       = 400;
+  let _shieldCapacity     = 400;  // also the shield's own HP pool
+  let _shieldRechargeRate = 67;   // units/sec
 
   function _shieldParamsFromHP(hp) {
     if (hp >= 75) return { cap: 100, rate: 20 };
@@ -90,9 +90,28 @@ const SectorView = (() => {
   let _systems = null;
   function _resetSystems() {
     _systems = { P: 100, E: 100, S: 100, C: 100, L: 100, R: 100 };
-    _shieldCharge = 100;
-    _shieldCapacity = 100;
-    _shieldRechargeRate = 20;
+    _shieldCharge       = 400;
+    _shieldCapacity     = 400;
+    _shieldRechargeRate = 67;
+  }
+
+  // ---- Computer Subsystems ----
+  // Each subsystem: 100 HP. >=50=healthy, 1-49=damaged, 0=destroyed.
+  let _computer = null;
+  function _resetComputer() {
+    _computer = {
+      warpAutopilot: 100,
+      targeting:     100,
+      radio:         100,
+      scanner:       100,
+      dashboard:     100,
+    };
+  }
+  const _computerKeys = ['warpAutopilot','targeting','radio','scanner','dashboard'];
+  function _damageComputer(dmg) {
+    if (!_computer || dmg <= 0) return;
+    const key = _computerKeys[Math.floor(Math.random() * _computerKeys.length)];
+    _computer[key] = Math.max(0, _computer[key] - dmg);
   }
 
   // ---- Engines (4 independent) ----
@@ -104,14 +123,17 @@ const SectorView = (() => {
     return _engines ? _engines.filter(e => e.hp > 0).length : 4;
   }
   function _maxSpeedIdx() {
-    // Each engine contributes 25% of max speed range
-    const w = _workingEngineCount();
-    if (w >= 4) return 9;
-    if (w === 3) return 7;
-    if (w === 2) return 5;
-    if (w === 1) return 3;
-    return 1; // emergency thruster
+    // Use total combined engine HP (max 400) proportional to max speed index 9
+    if (!_engines) return 9;
+    const totalHP = _engines.reduce((s, e) => s + e.hp, 0);
+    return Math.max(1, Math.floor(totalHP / 400 * 9));
   }
+
+  // ---- Warp Drive ----
+  let _warpDriveHP = 100;
+  function _resetWarpDrive() { _warpDriveHP = 100; }
+  // Max warp range: half of 10% of HP, floor 1
+  function _maxWarpRange() { return Math.max(1, _warpDriveHP * 0.05); }
 
   // ---- Cannon thermal model — see GameConfig.cannons for all tuned values ----
   // Each cannon: hp (0–100), temp (0–200+), charge (0–100)
@@ -132,7 +154,7 @@ const SectorView = (() => {
   }
 
   function _cannonReady(c) {
-    return c.hp > 25 && c.temp < GameConfig.cannons.tempFireMax && c.charge >= 99.5;
+    return c.hp > 0 && c.temp < GameConfig.cannons.tempFireMax && c.charge >= 99.5;
   }
 
   // ---- View modes ----
@@ -178,9 +200,9 @@ const SectorView = (() => {
   function _onMM(e) {
     if (!_canvas) return;
     const r     = _canvas.getBoundingClientRect();
-    const DH    = 120; // dashboard height — must match _drawHUD
+    const DH    = 130; // dashboard height — must match _drawHUD
     const scale = r.width * 0.45;
-    const viewCy = r.top + (r.height - DH) / 2; // crosshair center Y in page coords
+    const viewCy = r.top + r.height / 2; // true canvas center = camera aim point
     _mnx = Math.max(-1, Math.min(1, (e.clientX - r.left - r.width / 2) / scale));
     _mny = Math.max(-1, Math.min(1, (e.clientY - viewCy)               / scale));
   }
@@ -505,10 +527,12 @@ const SectorView = (() => {
   function _repairAndRefuel() {
     _resetSystems();
     _resetEngines();
+    _resetWarpDrive();
+    _resetComputer();
     _energy = 9999;
-    const p = _shieldParamsFromHP(100);
-    _shieldCapacity = p.cap; _shieldRechargeRate = p.rate;
-    _shieldCharge   = _shieldCapacity;
+    _shieldCapacity     = 400;
+    _shieldRechargeRate = 67;
+    _shieldCharge       = 400;
   }
 
   // ---- Docking drone: orange plug mesh ----
@@ -840,9 +864,7 @@ const SectorView = (() => {
       _warpMult = Math.max(1.0, _warpMult - dt * 0.17); // 4 units over 24s
     }
 
-    // Clamp normal speed to engine capability (not enforced during warp decel)
-    const maxIdx = _maxSpeedIdx();
-    if (_warpMult <= 1.0 && _speed > maxIdx) _speed = maxIdx;
+    // Per-engine speed: don't clamp _speed — each engine contributes individually
 
     const dz = 0.05;
     const nx = Math.abs(_mnx) > dz ? _mnx : 0;
@@ -900,8 +922,13 @@ const SectorView = (() => {
       _currentVelocity = Math.max(WARP_VELOCITY, _currentVelocity - 99900 * dt);
       if (_currentVelocity <= WARP_VELOCITY) _warpDebursting = false;
     } else {
-      // Normal throttle ramping
-      const targetVel = SPD_VALS[Math.min(_speed, maxIdx)];
+      // Normal throttle ramping — each engine contributes SPD_VALS[min(speed, engMaxIdx)] / 4
+      const targetVel = _engines
+        ? _engines.reduce((sum, eng) => {
+            const engMaxIdx = Math.max(0, Math.floor(eng.hp / 100 * 9));
+            return sum + SPD_VALS[Math.min(_speed, engMaxIdx)] / 4;
+          }, 0)
+        : SPD_VALS[_speed];
       const diff = targetVel - _currentVelocity;
       const step = ACCEL_RATE * dt;
       _currentVelocity += diff > 0 ? Math.min(diff, step) : Math.max(diff, -step);
@@ -1079,16 +1106,98 @@ const SectorView = (() => {
   // ---- Player hit handler ----
   function _applyPlayerHit(dmg) {
     _hitFlash = 0.5;
-    // Shield capacitor absorbs proportionally
-    const absorbed = Math.floor(dmg * (_shieldCharge / 100));
-    _shieldCharge  = Math.max(0, _shieldCharge - absorbed);
-    const hull = dmg - absorbed;
+    let remaining = dmg;
+    let hull      = 0;
+
+    // Five-tier absorption — each tier covers a charge band with a fixed absorption rate.
+    // Layers are consumed top-down; charge below a tier's threshold is handled by the next.
+    const tiers = [
+      { threshold: 200, rate: 1.00 },  // 400–200 (> 50%): 100% absorbed
+      { threshold: 150, rate: 0.90 },  // 200–150:  90%
+      { threshold: 100, rate: 0.80 },  // 150–100:  80%
+      { threshold:  50, rate: 0.70 },  // 100– 50:  70%
+      { threshold:   0, rate: 0.60 },  //  50–  0:  60%
+    ];
+
+    for (const tier of tiers) {
+      if (remaining <= 0) break;
+      if (_shieldCharge <= tier.threshold) continue;  // shield below this tier
+
+      const available  = _shieldCharge - tier.threshold;
+      const tierCapDmg = available / tier.rate;        // max damage this tier can handle
+
+      if (remaining <= tierCapDmg) {
+        _shieldCharge -= remaining * tier.rate;
+        hull          += remaining * (1 - tier.rate);
+        remaining      = 0;
+      } else {
+        _shieldCharge -= available;
+        hull          += tierCapDmg * (1 - tier.rate);
+        remaining     -= tierCapDmg;
+      }
+    }
+
+    // Any damage left after shields are fully depleted becomes hull damage
+    hull += remaining;
+    _shieldCharge = Math.max(0, _shieldCharge);
+
+    hull = Math.round(hull);
     if (hull <= 0) return;
-    // Hull damage: S=0 → 3× to random system
-    const multiplier = _systems.S <= 0 ? 3 : 1;
-    const sysKeys = ['P','E','S','C','L','R'];
-    const key = sysKeys[Math.floor(Math.random() * sysKeys.length)];
-    damageSystem(key, hull * multiplier);
+
+    // ── 120-slot weighted component draw ──────────────────────────────────────
+    // Shields 40, Engine×4 10ea, Cannon×3 10ea, WarpDrive 10 = 120 total
+    const roll = Math.floor(Math.random() * 120) + 1;
+    let comp, isAlreadyDead;
+
+    if (roll <= 40) {
+      // Shields (HP pool)
+      isAlreadyDead = _shieldCapacity <= 0;
+      _shieldCapacity = Math.max(0, _shieldCapacity - hull);
+      // Cap charge at new capacity ceiling
+      _shieldCharge = Math.min(_shieldCharge, _shieldCapacity);
+      comp = 'shield';
+    } else if (roll <= 50) {
+      isAlreadyDead = _engines[0].hp <= 0;
+      _engines[0].hp = Math.max(0, _engines[0].hp - hull); comp = 'E1';
+    } else if (roll <= 60) {
+      isAlreadyDead = _engines[1].hp <= 0;
+      _engines[1].hp = Math.max(0, _engines[1].hp - hull); comp = 'E2';
+    } else if (roll <= 70) {
+      isAlreadyDead = _engines[2].hp <= 0;
+      _engines[2].hp = Math.max(0, _engines[2].hp - hull); comp = 'E3';
+    } else if (roll <= 80) {
+      isAlreadyDead = _engines[3].hp <= 0;
+      _engines[3].hp = Math.max(0, _engines[3].hp - hull); comp = 'E4';
+    } else if (roll <= 90) {
+      isAlreadyDead = _cannon.fL.hp <= 0;
+      _cannon.fL.hp = Math.max(0, _cannon.fL.hp - hull); comp = 'fL';
+    } else if (roll <= 100) {
+      isAlreadyDead = _cannon.fR.hp <= 0;
+      _cannon.fR.hp = Math.max(0, _cannon.fR.hp - hull); comp = 'fR';
+    } else if (roll <= 110) {
+      isAlreadyDead = _cannon.aft.hp <= 0;
+      _cannon.aft.hp = Math.max(0, _cannon.aft.hp - hull); comp = 'aft';
+    } else {
+      isAlreadyDead = _warpDriveHP <= 0;
+      _warpDriveHP = Math.max(0, _warpDriveHP - hull); comp = 'warp';
+    }
+
+    // ── Cascade rule: overflow to computer ────────────────────────────────────
+    // If component was already dead, or just got destroyed, 50% of damage hits computer
+    const justDestroyed = !isAlreadyDead && (
+      (comp === 'shield' && _shieldCapacity <= 0) ||
+      (comp === 'E1' && _engines[0].hp <= 0) ||
+      (comp === 'E2' && _engines[1].hp <= 0) ||
+      (comp === 'E3' && _engines[2].hp <= 0) ||
+      (comp === 'E4' && _engines[3].hp <= 0) ||
+      (comp === 'fL' && _cannon.fL.hp <= 0) ||
+      (comp === 'fR' && _cannon.fR.hp <= 0) ||
+      (comp === 'aft' && _cannon.aft.hp <= 0) ||
+      (comp === 'warp' && _warpDriveHP <= 0)
+    );
+    if (isAlreadyDead || justDestroyed) {
+      _damageComputer(Math.round(hull * 0.5));
+    }
   }
 
   function _spawnTorpedo(xOffset, aft) {
@@ -1222,13 +1331,16 @@ const SectorView = (() => {
 
   function _checkAsteroidCollision() {
     if (_sectorType !== 'asteroid') return;
-    for (const ast of _asteroids) {
+    for (let i = _asteroids.length - 1; i >= 0; i--) {
+      const ast = _asteroids[i];
       const dist = _camera.position.distanceTo(ast.pos);
       if (dist < ast.radius + 6) {
-        const pushDir = _camera.position.clone().sub(ast.pos).normalize();
-        _camera.position.copy(ast.pos).addScaledVector(pushDir, ast.radius + 8);
-        _applyPlayerHit(15);
-        _speed = 0;
+        // Destroy the rock — ship punches through it
+        _spawnExplosion(ast.pos.clone(),
+          { scale: ast.radius / 10, debris: 5, fireColor: 0xaa8855, debrisColor: 0x887755 });
+        if (ast.mesh) _scene.remove(ast.mesh);
+        _asteroids.splice(i, 1);
+        _applyPlayerHit(250);
       }
     }
   }
@@ -1484,21 +1596,30 @@ const SectorView = (() => {
     const oc = _overlayCtx; if (!oc) return;
     const W = _overlayCanvas.width, H = _overlayCanvas.height;
     oc.clearRect(0, 0, W, H);
-    const DH = 90;  // compact dashboard — all content fits within DY+82
-    const DY = H - DH;
-    const cx = W/2, cy = DY / 2;
-    let _postDraw = () => {}; // contact-list rendered after dashboard so it overlays it
 
-    // C-system corruption factor (0=perfect, 1=totally corrupt)
-    const cCorrupt = _systems.C <= 0 ? 1.0 : Math.max(0, (75 - _systems.C) / 75);
-    // Helper: corrupt a value (returns true if this frame's value should glitch)
-    function _glitch() { return cCorrupt > 0 && Math.random() < cCorrupt * 0.4; }
-    // Helper: corrupt a bar fill (±noise proportion)
-    function _corruptVal(v) { return _glitch() ? v + (Math.random()-0.5)*50 : v; }
+    // Dashboard destroyed → blank overlay
+    if (_computer && _computer.dashboard <= 0) return;
+
+    const DH = 130; // dashboard height
+    const DY = H - DH;
+    const cx = W/2, cy = H / 2; // H/2 = true camera aim point (camera renders full canvas)
+    let _postDraw = () => {}; // contact-list rendered after dashboard so it overlays it
+    // ---- Right-section geometry (scope + two contact columns) ----
+    const scopeW = 180, scopeH = 140;
+    const colW = 190, colGap = 8, rightMargin = 8;
+    const col2X = W - rightMargin - colW;
+    const col1X = col2X - colGap - colW;
+    const scopeX = Math.round((col1X + col2X + colW) / 2 - scopeW / 2);
+    const scopeY = DY - scopeH - Math.round(scopeH / 2); // bottom sits scopeH/2 above dashboard
+
+    // Dashboard HP available for future degraded-display effects (no per-frame flicker)
+    const dashHP = _computer ? _computer.dashboard : 100;
+    // _glitch() stub: always false — flicker permanently disabled
+    function _glitch() { return false; }
 
     // Shield tint (from capacitor charge)
     if (_shieldsOn && _shieldCharge > 0) {
-      const a = 0.05 + 0.08 * (_shieldCharge / 100);
+      const a = 0.05 + 0.08 * (_shieldCharge / 400);
       oc.fillStyle = `rgba(0,15,55,${a})`;
       oc.fillRect(0, 0, W, DY);
     }
@@ -1645,13 +1766,8 @@ const SectorView = (() => {
         return { ...ct, dist, fwd, rDot, uDot, theta, phi };
       });
 
-      // ---- Layout: scope FIXED at bottom-right; list grows downward into dashboard area ----
-      const scopeW = 180, scopeH = 140;
+      // ---- Scope geometry (scopeW/H/X/Y defined at top of _drawHUD) ----
       const rowH = 18;
-      const scopeX  = W - scopeW - 6;         // tight right margin
-      const scopeY  = DY - scopeH - 4;        // always just above dashboard
-      const listY   = DY + 2;                  // always just inside dashboard top
-      const listH   = contacts.length * rowH + 6;
       const scopeCx = scopeX + scopeW / 2, scopeCy = scopeY + scopeH / 2;
       const maxH = scopeW / 2 - 6, maxV = scopeH / 2 - 8;
 
@@ -1790,23 +1906,26 @@ const SectorView = (() => {
         }
       }
 
-      // ---- Defer contact list draw so it renders on top of the dashboard ----
+      // ---- Defer contact list draw so it renders on top of everything ----
       _postDraw = () => {
-        oc.fillStyle = 'rgba(0,4,16,0.90)'; oc.fillRect(scopeX, listY, scopeW, listH);
-        oc.strokeStyle = bdrCol; oc.lineWidth = 1; oc.strokeRect(scopeX, listY, scopeW, listH);
-        contacts.forEach((ct, i) => {
-          const ry = listY + 4 + i * rowH + 9;
-          const tSign = n => (n >= 0 ? '+' : '') + String(Math.abs(n)).padStart(3, '0');
-          const rStr  = String(Math.round(ct.dist)).padStart(5, '0');
-          if (damaged && Math.random() < 0.4) {
-            oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
-            oc.fillText(`${ct.label}  --   ---  -----`, scopeX + 6, ry); return;
-          }
-          oc.font = 'bold 12px Share Tech Mono, monospace'; oc.fillStyle = ct.color; oc.textAlign = 'left';
-          oc.fillText(ct.label.padEnd(4), scopeX + 6, ry);
-          oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = txtCol;
-          oc.fillText(`θ${tSign(ct.theta)} φ${tSign(ct.phi)} R${rStr}`, scopeX + 50, ry);
-        });
+        const tSign = n => (n >= 0 ? '+' : '') + String(Math.abs(n)).padStart(3, '0');
+        const drawCol = (start, colX) => {
+          contacts.slice(start, start + 6).forEach((ct, i) => {
+            const ry = DY + 15 + i * rowH + 9;
+            const rStr = String(Math.round(ct.dist)).padStart(5, '0');
+            if (damaged && Math.random() < 0.4) {
+              oc.font = '10px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
+              oc.fillText(`${ct.label}  ---  ---  -----`, colX + 4, ry); return;
+            }
+            oc.font = 'bold 10px Share Tech Mono, monospace'; oc.fillStyle = ct.color; oc.textAlign = 'left';
+            oc.fillText(ct.label.padEnd(4), colX + 4, ry);
+            oc.font = '10px Share Tech Mono, monospace'; oc.fillStyle = txtCol;
+            oc.fillText(`θ${tSign(ct.theta)} φ${tSign(ct.phi)} R${rStr}`, colX + 34, ry);
+          });
+        };
+        drawCol(0, col1X);
+        drawCol(6, col2X);
+        oc.textAlign = 'left';
       };
 
       oc.textAlign = 'left';
@@ -1848,14 +1967,28 @@ const SectorView = (() => {
     oc.lineWidth = 1;
     oc.beginPath(); oc.moveTo(0, DY); oc.lineTo(W, DY); oc.stroke();
 
+    // Contact column backgrounds (drawn before scope so scope renders on top)
+    const colBg  = 'rgba(0,2,14,0.95)';
+    const colBdr = alertBorder ? 'rgba(255,200,0,0.40)' : 'rgba(0,80,180,0.55)';
+    oc.fillStyle = colBg; oc.fillRect(col1X, DY, colW, DH);
+    oc.fillRect(col2X, DY, colW, DH);
+    oc.strokeStyle = colBdr; oc.lineWidth = 1;
+    oc.strokeRect(col1X, DY, colW, DH);
+    oc.strokeRect(col2X, DY, colW, DH);
+    oc.font = '6px Share Tech Mono, monospace'; oc.fillStyle = colBdr; oc.textAlign = 'center';
+    oc.fillText('CONTACTS  1-6',  col1X + colW / 2, DY + 9);
+    oc.fillText('CONTACTS  7-12', col2X + colW / 2, DY + 9);
+    oc.textAlign = 'left';
+
     const lbC  = alertBorder ? 'rgba(255,200,0,0.90)' : 'rgba(0,200,255,0.80)';
     const valC = alertBorder ? '#ffdd00' : '#00e5ff';
 
-    // Zone widths
-    const Z1W = Math.floor(W * 0.12);  const Z1X = 0;
-    const Z2W = Math.floor(W * 0.37);  const Z2X = Z1W + 1;
-    const Z3W = Math.floor(W * 0.22);  const Z3X = Z2X + Z2W + 1;
-    const Z4W = Math.floor(W * 0.11);  const Z4X = Z3X + Z3W + 1;
+    // Zone widths — fit into indicator area left of contact columns
+    const indicW = col1X - 4;
+    const Z1W = Math.floor(indicW * 0.15);  const Z1X = 0;
+    const Z2W = Math.floor(indicW * 0.45);  const Z2X = Z1W + 1;
+    const Z3W = Math.floor(indicW * 0.26);  const Z3X = Z2X + Z2W + 1;
+    const Z4W = Math.floor(indicW * 0.14);  const Z4X = Z3X + Z3W + 1;
 
     // Zone dividers
     oc.strokeStyle = 'rgba(0,80,130,0.5)'; oc.lineWidth = 1;
@@ -1884,9 +2017,7 @@ const SectorView = (() => {
     // ── ZONE 1: FLIGHT ──
     _lbl('VELOCITY', Z1X + Z1W/2, DY + 10, 'center', lbC, 9);
     const actualVelocity = Math.round(_currentVelocity);
-    const dispSpeed = _glitch()
-      ? String(Math.floor(Math.random() * 999)).padStart(3, '0')
-      : actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
+    const dispSpeed = actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
     oc.font = 'bold 22px Orbitron, monospace';
     oc.fillStyle = actualVelocity === 0 ? 'rgba(0,180,255,0.4)' : valC;
     oc.textAlign = 'center';
@@ -1898,105 +2029,172 @@ const SectorView = (() => {
     const eBarX = Z1X + 8, eBarY = DY + 51, eBarW = Z1W - 16, eBarH = 8;
     oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(eBarX, eBarY, eBarW, eBarH);
     oc.fillStyle = eBarCol; oc.fillRect(eBarX, eBarY, eBarW * ePct, eBarH);
-    const dispEnergy = _glitch() ? '????' : String(Math.floor(_energy)).padStart(4,'0');
+    const dispEnergy = String(Math.floor(_energy)).padStart(4,'0');
     _lbl(dispEnergy, Z1X + Z1W/2, DY + 67, 'center', eBarCol, 9);
     _lbl(`K:${String(_kills).padStart(3,'0')}  T:${_targets > 0 ? String(_targets).padStart(2,'0') : '--'}`,
       Z1X + Z1W/2, DY + 80, 'center', lbC, 8);
 
     // ── ZONE 2: CANNONS ──
-    _lbl('CANNONS', Z2X + Z2W/2, DY + 11, 'center', lbC, 9);
     const CC = GameConfig.cannons;
-    const cannonDefs = [
-      { c: _cannon.fL,  label: 'LEFT',  x: Z2X },
-      { c: _cannon.fR,  label: 'RIGHT', x: Z2X + Math.floor(Z2W/3) },
-      { c: _cannon.aft, label: 'AFT',   x: Z2X + Math.floor(Z2W/3)*2 },
-    ];
-    const cgW    = Math.floor(Z2W / 3);
-    const bW     = 16, bGap = 12;
-    const bGrpW  = bW*3 + bGap*2;
 
-    cannonDefs.forEach(({ c, label, x }) => {
-      const grpCx   = x + cgW/2;
-      const bStartX = Math.floor(grpCx - bGrpW/2);
-      const dead     = c.hp <= 0;
-      _lbl(label, grpCx, DY + 22, 'center', dead ? 'rgba(180,50,50,0.7)' : lbC, 10);
+    // Header row: title + cooling bar on the same line
+    _lbl('CANNONS', Z2X + 4, DY + 22, 'left', lbC, 20);
+    const coolV   = _cannonCoolingRate;
+    const coolCol = coolV > 60 ? '#00ccff' : coolV > 30 ? '#ffaa00' : '#ff4400';
+    oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
+    oc.fillText('COOLING:', Z2X + 106, DY + 22);
+    const chdrBarX = Z2X + 192, chdrBarW = Math.max(0, Z2X + Z2W - chdrBarX - 4);
+    const chdrBarY = DY + 10, chdrBarH = 10;
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(chdrBarX, chdrBarY, chdrBarW, chdrBarH);
+    oc.fillStyle = coolCol; oc.fillRect(chdrBarX, chdrBarY, chdrBarW * (coolV/100), chdrBarH);
 
-      if (dead) {
-        oc.font = '9px Orbitron, monospace'; oc.fillStyle = '#662222'; oc.textAlign = 'center';
-        oc.fillText('OFFLINE', grpCx, DY + DH/2 + 6);
-        return;
-      }
+    // Three cannon sub-boxes
+    const cBoxGap    = 3, cBoxMargin = 3;
+    const cBoxW      = Math.floor((Z2W - cBoxMargin * 2 - cBoxGap * 2) / 3);
+    const cBoxTop    = DY + 28;
+    const cBoxH      = DH - 30;
+    const cBoxBot    = cBoxTop + cBoxH;
 
-      // CHRG bar
-      const chgV   = _corruptVal(c.charge);
+    // Internal Y positions: bar labels (12px) then cannon name (16px) at bottom
+    const cNameY   = cBoxBot - 4;
+    const cLblY    = cNameY - 19;
+    const cBarsTop = cBoxTop + 3;
+    const cBarsH   = Math.max(8, cLblY - 14 - cBarsTop); // end before label text top
+
+    [
+      { c: _cannon.fL,  label: 'LEFT',  idx: 0 },
+      { c: _cannon.fR,  label: 'RIGHT', idx: 1 },
+      { c: _cannon.aft, label: 'AFT',   idx: 2 },
+    ].forEach(({ c, label, idx }) => {
+      const bx  = Z2X + cBoxMargin + idx * (cBoxW + cBoxGap);
+      const bcx = bx + cBoxW / 2;
+      const dead = c.hp <= 0;
+
+      // Sub-box: red fill when dead, outline always
+      if (dead) { oc.fillStyle = 'rgba(140,0,0,0.40)'; oc.fillRect(bx, cBoxTop, cBoxW, cBoxH); }
+      oc.strokeStyle = dead ? 'rgba(200,30,30,0.7)' : 'rgba(0,80,130,0.6)';
+      oc.lineWidth = 1; oc.strokeRect(bx, cBoxTop, cBoxW, cBoxH);
+
+      // Cannon name at very bottom
+      _lbl(label, bcx, cNameY, 'center', dead ? 'rgba(220,80,80,0.9)' : lbC, 16);
+
+      if (dead) return;
+
+      // Divide box into 3 equal columns; center bar and label in each column
+      const thirdW = Math.floor(cBoxW / 3);
+      const barW   = Math.max(6, Math.floor(thirdW * 0.45));
+      const col0cx = bx + Math.floor(thirdW * 0.5);
+      const col1cx = bx + thirdW + Math.floor(thirdW * 0.5);
+      const col2cx = bx + thirdW * 2 + Math.floor(thirdW * 0.5);
+
+      // CHRG bar + label (first third)
+      const chgV   = c.charge;
       const chgCol = chgV >= 99 ? '#00ff88' : chgV > 40 ? '#ffdd00' : chgV > 5 ? '#ff8800' : '#333';
-      _vBar(chgV, 100, bStartX,            barTop, bW, barH - 16, chgCol);
-      _lbl('CHRG', bStartX + bW/2,            barBot, 'center', lbC, 8);
+      _vBar(chgV, 100, col0cx - Math.floor(barW/2), cBarsTop, barW, cBarsH, chgCol);
+      _lbl('CHRG', col0cx, cLblY, 'center', lbC, 12);
 
-      // TEMP bar (display capped at 120 for scale; anything above 100 = red zone)
+      // TEMP bar + label (second third)
       const tmpRaw = c.temp;
-      const tmpV   = _corruptVal(Math.min(tmpRaw, 120));
+      const tmpV   = Math.min(tmpRaw, 120);
       const tmpCol = tmpRaw > CC.tempDamageAt ? '#ff0000'
                    : tmpRaw > CC.tempNoChargeAt ? '#ff4400'
                    : tmpRaw > CC.tempSlowChargeAt ? '#ff9900' : '#00cc66';
-      _vBar(tmpV, 120, bStartX + bW + bGap,  barTop, bW, barH - 16, tmpCol);
-      _lbl('TEMP', bStartX + bW + bGap + bW/2, barBot, 'center', lbC, 8);
+      _vBar(tmpV, 120, col1cx - Math.floor(barW/2), cBarsTop, barW, cBarsH, tmpCol);
+      _lbl('TEMP', col1cx, cLblY, 'center', lbC, 12);
 
-      // HLTH bar
-      const hpV   = _corruptVal(c.hp);
-      const hpCol = hpV > 75 ? '#00e5ff' : hpV > 25 ? '#ffaa00' : '#ff3300';
-      _vBar(hpV, 100, bStartX + (bW + bGap)*2, barTop, bW, barH - 16, hpCol);
-      _lbl('HLTH', bStartX + (bW+bGap)*2 + bW/2, barBot, 'center', lbC, 8);
+      // HLTH bar + label (third column) — green from bottom, red from top
+      const hpFrac = Math.max(0, Math.min(1, c.hp / 100));
+      const hpBX   = col2cx - Math.floor(barW/2);
+      const hpRedH = Math.round((1 - hpFrac) * cBarsH);
+      const hpGrnH = Math.round(hpFrac * cBarsH);
+      oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(hpBX, cBarsTop, barW, cBarsH);
+      if (hpGrnH > 0) { oc.fillStyle = '#00ff88'; oc.fillRect(hpBX, cBarsTop + cBarsH - hpGrnH, barW, hpGrnH); }
+      if (hpRedH > 0) { oc.fillStyle = '#ff2200'; oc.fillRect(hpBX, cBarsTop, barW, hpRedH); }
+      _lbl('HLTH', col2cx, cLblY, 'center', lbC, 12);
     });
 
-    // Shared COOLING bar at the bottom of cannon zone
-    const coolV   = _glitch() ? Math.random()*100 : _cannonCoolingRate;
-    const coolCol = coolV > 60 ? '#00ccff' : coolV > 30 ? '#ffaa00' : '#ff4400';
-    const coolBarY = barBot + 4, coolBarH = 5;
-    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(Z2X + 6, coolBarY, Z2W - 12, coolBarH);
-    oc.fillStyle = coolCol; oc.fillRect(Z2X + 6, coolBarY, (Z2W - 12) * (coolV/100), coolBarH);
-    _lbl('COOLING', Z2X + Z2W/2, coolBarY + coolBarH + 9, 'center', lbC, 8);
+    // ── ZONE 3: VELOCITY + ENGINES ──
+    // Single header line: VELOCITY: 013  POWER: 5
+    const hdrY = DY + 26;
+    oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
+    oc.fillText('VELOCITY:', Z3X + 4, hdrY);
+    oc.font = 'bold 22px Orbitron, monospace';
+    oc.fillStyle = actualVelocity === 0 ? 'rgba(0,180,255,0.5)' : valC; oc.textAlign = 'left';
+    oc.fillText(dispSpeed, Z3X + 86, hdrY);
+    oc.font = '12px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
+    oc.fillText('POWER:', Z3X + 150, hdrY);
+    oc.font = 'bold 14px Orbitron, monospace'; oc.fillStyle = valC; oc.textAlign = 'left';
+    oc.fillText(String(_speed), Z3X + 196, hdrY);
 
-    // ── ZONE 3: ENGINES ──
-    _lbl('ENGINES', Z3X + Z3W/2, DY + 10, 'center', lbC, 9);
-    _lbl('THRUST', Z3X + Z3W/2, DY + 18, 'center', lbC, 8);
-    oc.font = 'bold 18px Orbitron, monospace';
-    oc.fillStyle = valC; oc.textAlign = 'center';
-    oc.fillText(String(_speed), Z3X + Z3W/2, DY + 32);
+    // Tri-color engine bars: height = power/9, red from top = damage, dull green = available capacity
+    const eNameY   = DY + DH - 4;
+    const eBarsBot = eNameY - 14;
+    const eBarsTop = DY + 34;
+    const eBarsH   = Math.max(10, eBarsBot - eBarsTop);
+    const engW     = Math.floor((Z3W - 16) / 4);
+    const powerFrac = _speed / 9;  // bar target height — power/9 always
 
-    const engLabelY = DY + DH - 6;             // pin labels to dashboard bottom
-    const engBarTop = DY + 37;                  // just below speed display
-    const engBarH   = Math.max(20, engLabelY - 9 - engBarTop); // fill to bottom
-    const engBarW   = Math.floor((Z3W - 16) / 4);
     _engines.forEach((eng, i) => {
-      const ex    = Z3X + 8 + engBarW * i;
-      const eHp   = _glitch() ? Math.random()*100 : eng.hp;
-      const eColE = eng.hp <= 0 ? 'rgba(60,10,10,0.4)' : eHp < 25 ? '#ff3300' : eHp < 75 ? '#ffaa00' : '#00ff88';
-      _vBar(eHp, 100, ex, engBarTop, engBarW - 4, engBarH, eColE);
-      _lbl(`E${i+1}`, ex + (engBarW-4)/2, engLabelY, 'center', lbC, 8);
+      const bx = Z3X + 8 + engW * i;
+      const bw = engW - 4;
+      const eHp    = eng.hp;
+      const hpFrac = Math.max(0, Math.min(1, eHp / 100));
+
+      const redH   = Math.round((1 - hpFrac) * eBarsH);                   // damaged (top)
+      const powerH = Math.round(Math.min(hpFrac, powerFrac) * eBarsH);    // power delivered (bottom)
+      const availH = eBarsH - redH;                                         // healthy zone
+
+      // 1: dark background
+      oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(bx, eBarsTop, bw, eBarsH);
+      // 2: dull green — available but unused healthy capacity
+      if (availH > 0) {
+        oc.fillStyle = 'rgba(0,255,120,0.22)';
+        oc.fillRect(bx, eBarsTop + redH, bw, availH);
+      }
+      // 3: bright green — power being delivered (from bottom)
+      if (powerH > 0) {
+        oc.fillStyle = '#00ff88';
+        oc.fillRect(bx, eBarsTop + eBarsH - powerH, bw, powerH);
+      }
+      // 4: red — damaged zone (top, over everything)
+      if (redH > 0) {
+        oc.fillStyle = '#ff2200';
+        oc.fillRect(bx, eBarsTop, bw, redH);
+      }
+
+      _lbl(`E${i+1}`, bx + bw/2, eNameY, 'center', lbC, 12);
     });
 
     // ── ZONE 4: SHIELDS ──
     _lbl('SHIELDS', Z4X + Z4W/2, DY + 11, 'center', lbC, 9);
-    const shBarW  = Math.floor((Z4W - 24) / 2);
-    const shBarX1 = Z4X + 8, shBarX2 = shBarX1 + shBarW + 8;
 
-    // HEALTH bar (shield system hp = ceiling/max charge possible)
-    const shHp    = _glitch() ? Math.random()*100 : _shieldCapacity;
-    const shHpCol = shHp > 75 ? '#00aaff' : shHp > 40 ? '#7766ff' : '#aa3366';
-    _vBar(shHp, 100, shBarX1, barTop, shBarW, barH - 16, shHpCol);
-    _lbl('HLTH', shBarX1 + shBarW/2, barBot, 'center', lbC, 8);
+    const shCapFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCapacity) / 400));
+    const shChgFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCharge)    / 400));
 
-    // CHARGE bar (current shield energy; capped by health ceiling)
-    const shChg    = _glitch() ? Math.random()*100 : _shieldCharge;
-    const shChgCol = shChg > 60 ? '#00ffcc' : shChg > 30 ? '#ffaa00' : '#ff3300';
-    // Background tinted by health ceiling
-    const shCapH = (barH-16) * (_shieldCapacity / 100);
-    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBarX2, barTop, shBarW, barH-16);
-    oc.fillStyle = 'rgba(0,50,100,0.35)'; oc.fillRect(shBarX2, barTop + (barH-16) - shCapH, shBarW, shCapH);
-    const shChgH = (barH-16) * (shChg / 100);
-    oc.fillStyle = shChgCol; oc.fillRect(shBarX2, barTop + (barH-16) - shChgH, shBarW, shChgH);
-    _lbl('CHRG', shBarX2 + shBarW/2, barBot, 'center', lbC, 8);
+    const shBH    = barH - 16;          // bar pixel height
+    const shBX    = Z4X + 6;            // x position
+    const shBW    = Z4W - 12;           // full-zone single bar
+    const shRedH  = Math.round((1 - shCapFrac) * shBH);   // damaged cap (top)
+    const shChgH  = Math.round(shChgFrac * shBH);          // current charge (bottom)
+    const shAvailH = shBH - shRedH;                        // rechargeable zone
+
+    // 1: dark background
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBX, barTop, shBW, shBH);
+    // 2: dull blue — uncharged but rechargeable capacity
+    if (shAvailH > 0) {
+      oc.fillStyle = 'rgba(0,60,130,0.50)';
+      oc.fillRect(shBX, barTop + shRedH, shBW, shAvailH);
+    }
+    // 3: bright blue — current charge (from bottom up)
+    if (shChgH > 0) {
+      oc.fillStyle = '#00aaff';
+      oc.fillRect(shBX, barTop + shBH - shChgH, shBW, shChgH);
+    }
+    // 4: red — damaged zone (top, drawn last)
+    if (shRedH > 0) {
+      oc.fillStyle = '#cc1100';
+      oc.fillRect(shBX, barTop, shBW, shRedH);
+    }
 
     // Draw contact list on top of everything (deferred — overlays dashboard)
     _postDraw();
@@ -2063,7 +2261,6 @@ const SectorView = (() => {
       _overlayCtx = _overlayCanvas.getContext('2d');
     }
     _overlayCanvas.width = W; _overlayCanvas.height = H;
-    par.style.position = 'relative';
     par.appendChild(_overlayCanvas);
   }
   function _rmOverlay() {
@@ -2120,9 +2317,11 @@ const SectorView = (() => {
     _sbShieldDmgCooldown = 0;
     _shieldImpacts      = [];
     _explosions         = [];
-    _resetCannons();
-    _resetSystems();
-    _resetEngines();
+    if (!_cannon)   _resetCannons();     // first entry only — damage persists across warps
+    if (!_systems)  _resetSystems();
+    if (!_engines)  _resetEngines();
+    if (!_computer) _resetComputer();
+    // _warpDriveHP starts at 100 at declaration and persists; reset only on dock
     _sectorType  = sector?.type        || 'void';
     _sectorQ     = sector?.q            ?? 0;
     _sectorR     = sector?.r            ?? 0;
@@ -2132,7 +2331,8 @@ const SectorView = (() => {
     // Spawn Zylon enemies if sector has them
     const zylonCount = sector?.zylons ?? 0;
     _targets = zylonCount;
-    if (zylonCount > 0) _redAlert = true;
+    // Red Alert only if Long Range Scanner is alive (scanner=0 = no detection on entry)
+    if (zylonCount > 0 && (!_computer || _computer.scanner > 0)) _redAlert = true;
 
     _initThree();
     _buildScene();
