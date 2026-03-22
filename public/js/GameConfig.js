@@ -114,6 +114,18 @@ const GameConfig = Object.freeze({
     /** Photon charges consumed per weapon burst. */
     photonPerShot: 1,
 
+    /** Energy (E:) consumed per cannon round fired. Front gun fires 2 rounds per trigger pull. */
+    energyPerShot: 20,
+
+    /** Always-on ship systems drain (life support, navigation). */
+    energyBasePerSec: 0.5,
+
+    /** Tracking computer drain per second when active. */
+    energyComputerPerSec: 0.5,
+
+    /** Engine energy multiplier — full throttle (64) costs this many E/s. */
+    energyEngineMultiplier: 5,
+
     /** Shield point drain per hit taken in combat. */
     shieldDrainPerHit: 15,
 

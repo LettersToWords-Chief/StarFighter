@@ -15,6 +15,7 @@
   let playerFuel  = GameConfig.player.maxFuel;
   let _mapOpen    = false;  // map overlay hidden at startup
   let _sectorLive = false;
+  let _warping    = false;  // true during warp transition — suppresses onExit map open
   const currentDifficulty = 'cadet';
 
   // Stardate
@@ -46,9 +47,8 @@
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
       if (playerFuel < fuelCost) { showAlert('INSUFFICIENT FUEL'); return; }
-      playerFuel = Math.max(0, playerFuel - fuelCost);
-      updateHUD();
-      _beginWarp(from, to);
+      // Fuel is NOT deducted yet — deduction happens during hyperspace (3 beeps at burst end)
+      _beginWarp(from, to, fuelCost);
     };
 
     // "◀ GALAXY MAP" button — exits the sector back to map-only mode
@@ -114,12 +114,27 @@
       sector,
       arrivalOffset: 0,
       onMapToggle: openMap,
-      onExit:      () => { _sectorLive = false; openMap(); },
+      onExit:      () => { _sectorLive = false; if (!_warping) openMap(); },
     });
   }
 
+  // ---- Hyperspace beep (electronic tonal blip) ----
+  function _beep(freq) {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'square';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+      osc.start(); osc.stop(ctx.currentTime + 0.14);
+    } catch(e) {}
+  }
+
   // ---- Warp sequence ----
-  function _beginWarp(from, to) {
+  function _beginWarp(from, to, fuelCost = 0) {
     const departureSpeed = _sectorLive ? Math.min(SectorView.speed, 9) : 0;
     const diffCfg = GameConfig.difficulty[currentDifficulty];
     const warpDrift = diffCfg.warpDrift ?? 0;
@@ -132,9 +147,9 @@
       SectorView.beginWarpCharge(warpDrift, ({ rx = 0, uy = 0 } = {}) => {
         if (sameSector) return; // overdrive — just decelerate, no burst
 
-        // Accuracy captured — now slam 99 → 999 before jumping
+        // Accuracy captured — now slam 99 → 99999 before jumping
         SectorView.beginWarpBurst(() => {
-          _sectorLive = false; SectorView.exit();
+          _warping = true; _sectorLive = false; SectorView.exit();
 
           const TOL = 0.04;
           const onTarget = Math.abs(rx) < TOL && Math.abs(uy) < TOL;
@@ -151,7 +166,20 @@
               z: Math.sin(angle) * offDist + (Math.random() - 0.5) * scatter,
             };
           }
-          _arriveFromWarp(to, onTarget, driftVec, arrivalOffset, departureSpeed);
+
+          // Three beeps during hyperspace — deduct 1/3 of fuel cost with each
+          const share = Math.ceil(fuelCost / 3);
+          const deductShare = () => {
+            playerFuel = Math.max(0, playerFuel - share);
+            SectorView.drainEnergy(share); // _energy persists across exit/enter
+            updateHUD();
+          };
+          _beep(1200); deductShare();
+          setTimeout(() => { _beep(1200); deductShare(); }, 120);
+          setTimeout(() => {
+            _beep(1200); deductShare();
+            setTimeout(() => _arriveFromWarp(to, onTarget, driftVec, arrivalOffset, departureSpeed), 200);
+          }, 240);
         });
       });
     } else {
@@ -160,6 +188,7 @@
   }
 
   function _arriveFromWarp(intendedTarget, onTarget, driftVec, arrivalOffset, departureSpeed = 0) {
+    _warping = false;
     let destination = intendedTarget;
     if (!onTarget) destination = _deflectedSector(intendedTarget, driftVec);
 
@@ -190,7 +219,7 @@
       arrivalVelocity: 99999,           // arrive at burst peak, deburst to WARP_VELOCITY
       throttleSpeed:   departureSpeed,  // target throttle to settle at
       onMapToggle:     openMap,
-      onExit:          () => { _sectorLive = false; openMap(); },
+      onExit:          () => { _sectorLive = false; if (!_warping) openMap(); },
     });
     // Arrive looking forward
     closeMap('front');

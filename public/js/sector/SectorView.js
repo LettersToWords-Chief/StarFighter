@@ -23,7 +23,10 @@ const SectorView = (() => {
   const TORPEDO_SPEED  = 600;  // units/sec
   const TORPEDO_LIFE   = 2.5;  // seconds (travels 1500 units max in sector of radius 1000)
   const TORPEDO_OFFSET = 1.0;  // horizontal spawn offset
-  const TORPEDO_ENERGY = 35;
+  const TORPEDO_ENERGY        = GameConfig.player.energyPerShot;
+  const ENERGY_BASE_DRAIN     = GameConfig.player.energyBasePerSec;
+  const ENERGY_COMPUTER_DRAIN = GameConfig.player.energyComputerPerSec;
+  const ENERGY_ENGINE_FACTOR  = GameConfig.player.energyEngineMultiplier;
   const TORPEDO_CD     = 0.28;
 
   // Force shield
@@ -69,6 +72,15 @@ const SectorView = (() => {
   let _energy  = 9999;
   let _kills   = 0;
   let _targets = 0;
+
+  // Energy telemetry
+  let _galacticClock      = 0;          // total seconds played (never resets)
+  let _energyTotalConsumed = 0;         // cumulative energy spent this session
+  let _energyHistory  = new Array(60).fill(0);  // ring buffer: E/sec for each of last 60 s
+  let _energyHistIdx  = 0;             // ring buffer write pointer
+  let _energySampleTimer = 0;          // time accumulated within the current 1-second window
+  let _energyRate     = 0;            // last completed second's consumption rate (E/s)
+  let _energyLastSec  = 9999;         // energy snapshot at start of each 1-second window
 
   // ---- Shield Capacitor ----
   // charge  : current energy stored (0-100)
@@ -852,6 +864,20 @@ const SectorView = (() => {
     _checkAsteroidCollision();
     if (_hitFlash  > 0) _hitFlash  -= dt;
     if (_fireFlash > 0) _fireFlash -= dt;
+
+    // ── Energy telemetry clock + ring buffer ──
+    _galacticClock     += dt;
+    _energySampleTimer += dt;
+    if (_energySampleTimer >= 1.0) {
+      const delta = Math.max(0, _energyLastSec - _energy); // ignore refuels (positive spikes)
+      _energyHistory[_energyHistIdx] = delta;
+      _energyRate        = delta;
+      _energyTotalConsumed += delta;
+      _energyHistIdx     = (_energyHistIdx + 1) % 60;
+      _energyLastSec     = _energy;   // reset baseline for next second
+      _energySampleTimer -= 1.0;
+    }
+
     _renderer.render(_scene, _camera);
     _drawHUD();
     if (_lrsOn) _drawLRS();
@@ -943,14 +969,37 @@ const SectorView = (() => {
     } else {
       _camera.quaternion.copy(_cameraQuat);
     }
-    // Energy drain proportional to velocity² — but cap at normal max speed so warp arrival
-    // doesn't drain the full reserve in the first frame (99999² / 9801 >> 9999)
-    const drainVel = Math.min(_currentVelocity, 99);
-    if (_energy > 0 && drainVel > 0) _energy = Math.max(0, _energy - (drainVel * drainVel / 9801) * dt);
-    // Shield recharge
-    if (_shieldsOn && _shieldCapacity > 0) {
-      _shieldCharge = Math.min(_shieldCapacity, _shieldCharge + _shieldRechargeRate * dt);
+    // Energy drain: accel → use current velocity²; decel → use power setting²
+    // Full throttle (64) = 1 E/s; capped at 64 during warp phases.
+    {
+      let drainVel;
+      if (!_warpCharging && !_warpBursting && !_warpDebursting) {
+        // Recompute power-setting target (same formula as throttle ramp above)
+        const powerTarget = _engines
+          ? _engines.reduce((sum, eng) => {
+              const engMaxIdx = Math.max(0, Math.floor(eng.hp / 100 * 9));
+              return sum + SPD_VALS[Math.min(_speed, engMaxIdx)] / 4;
+            }, 0)
+          : SPD_VALS[_speed];
+        // Accelerating: cost is how fast you're going; decelerating: cost is your power setting
+        drainVel = _currentVelocity < powerTarget ? _currentVelocity : powerTarget;
+      } else {
+        drainVel = Math.min(_currentVelocity, 64); // warp phases — just cap
+      }
+      drainVel = Math.min(drainVel, 64);
+      if (_energy > 0 && drainVel > 0)
+        _energy = Math.max(0, _energy - (drainVel * drainVel / 4096) * ENERGY_ENGINE_FACTOR * dt);
     }
+    // Shield recharge — costs energy equal to the charge restored
+    if (_shieldsOn && _shieldCapacity > 0) {
+      const prevCharge = _shieldCharge;
+      _shieldCharge = Math.min(_shieldCapacity, _shieldCharge + _shieldRechargeRate * dt);
+      _energy = Math.max(0, _energy - (_shieldCharge - prevCharge));
+    }
+    // Always-on ship systems (life support, navigation)
+    _energy = Math.max(0, _energy - ENERGY_BASE_DRAIN * dt);
+    // Tracking computer when active
+    if (_computerOn) _energy = Math.max(0, _energy - ENERGY_COMPUTER_DRAIN * dt);
   }
 
   function _updateZylons(dt) {
@@ -1606,10 +1655,10 @@ const SectorView = (() => {
     let _postDraw = () => {}; // contact-list rendered after dashboard so it overlays it
     // ---- Right-section geometry (scope + two contact columns) ----
     const scopeW = 180, scopeH = 140;
-    const colW = 190, colGap = 8, rightMargin = 8;
+    const colW = 95, colGap = 8, rightMargin = 8;
     const col2X = W - rightMargin - colW;
     const col1X = col2X - colGap - colW;
-    const scopeX = Math.round((col1X + col2X + colW) / 2 - scopeW / 2);
+    const scopeX = Math.round(col1X + colW / 2 - scopeW / 2);  // centered above col1
     const scopeY = DY - scopeH - Math.round(scopeH / 2); // bottom sits scopeH/2 above dashboard
 
     // Dashboard HP available for future degraded-display effects (no per-frame flicker)
@@ -1908,19 +1957,25 @@ const SectorView = (() => {
 
       // ---- Defer contact list draw so it renders on top of everything ----
       _postDraw = () => {
-        const tSign = n => (n >= 0 ? '+' : '') + String(Math.abs(n)).padStart(3, '0');
+        const rowH = Math.floor(DH / 6);  // 6 rows fill full column height, no header
         const drawCol = (start, colX) => {
           contacts.slice(start, start + 6).forEach((ct, i) => {
-            const ry = DY + 15 + i * rowH + 9;
-            const rStr = String(Math.round(ct.dist)).padStart(5, '0');
+            const ry = DY + (i + 1) * rowH - 4;  // bottom of each row slot
+            const rVal = Math.min(9999, Math.round(ct.dist));
+            const rStr = String(rVal).padStart(4, '0');
             if (damaged && Math.random() < 0.4) {
-              oc.font = '10px Share Tech Mono, monospace'; oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
-              oc.fillText(`${ct.label}  ---  ---  -----`, colX + 4, ry); return;
+              oc.font = 'bold 13px Share Tech Mono, monospace';
+              oc.fillStyle = 'rgba(255,80,0,0.5)'; oc.textAlign = 'left';
+              oc.fillText(`${ct.label}  ----`, colX + 5, ry); return;
             }
-            oc.font = 'bold 10px Share Tech Mono, monospace'; oc.fillStyle = ct.color; oc.textAlign = 'left';
-            oc.fillText(ct.label.padEnd(4), colX + 4, ry);
-            oc.font = '10px Share Tech Mono, monospace'; oc.fillStyle = txtCol;
-            oc.fillText(`θ${tSign(ct.theta)} φ${tSign(ct.phi)} R${rStr}`, colX + 34, ry);
+            // Label (type)
+            oc.font = 'bold 13px Share Tech Mono, monospace';
+            oc.fillStyle = ct.color; oc.textAlign = 'left';
+            oc.fillText(ct.label, colX + 5, ry);
+            // Range — right-aligned, bright white for readability
+            oc.font = '13px Share Tech Mono, monospace';
+            oc.fillStyle = '#ffffff'; oc.textAlign = 'right';
+            oc.fillText(rStr, colX + colW - 5, ry);
           });
         };
         drawCol(0, col1X);
@@ -1975,9 +2030,6 @@ const SectorView = (() => {
     oc.strokeStyle = colBdr; oc.lineWidth = 1;
     oc.strokeRect(col1X, DY, colW, DH);
     oc.strokeRect(col2X, DY, colW, DH);
-    oc.font = '6px Share Tech Mono, monospace'; oc.fillStyle = colBdr; oc.textAlign = 'center';
-    oc.fillText('CONTACTS  1-6',  col1X + colW / 2, DY + 9);
-    oc.fillText('CONTACTS  7-12', col2X + colW / 2, DY + 9);
     oc.textAlign = 'left';
 
     const lbC  = alertBorder ? 'rgba(255,200,0,0.90)' : 'rgba(0,200,255,0.80)';
@@ -1985,10 +2037,10 @@ const SectorView = (() => {
 
     // Zone widths — fit into indicator area left of contact columns
     const indicW = col1X - 4;
-    const Z1W = Math.floor(indicW * 0.15);  const Z1X = 0;
-    const Z2W = Math.floor(indicW * 0.45);  const Z2X = Z1W + 1;
-    const Z3W = Math.floor(indicW * 0.26);  const Z3X = Z2X + Z2W + 1;
-    const Z4W = Math.floor(indicW * 0.14);  const Z4X = Z3X + Z3W + 1;
+    const Z1W = Math.floor(indicW * 0.28);  const Z1X = 0;
+    const Z2W = Math.floor(indicW * 0.40);  const Z2X = Z1W + 1;
+    const Z3W = Math.floor(indicW * 0.21);  const Z3X = Z2X + Z2W + 1;
+    const Z4W = Math.floor(indicW * 0.11);  const Z4X = Z3X + Z3W + 1;
 
     // Zone dividers
     oc.strokeStyle = 'rgba(0,80,130,0.5)'; oc.lineWidth = 1;
@@ -2014,25 +2066,104 @@ const SectorView = (() => {
       oc.fillStyle = col; oc.fillRect(x, y + h - fillH, w, fillH);
     }
 
-    // ── ZONE 1: FLIGHT ──
-    _lbl('VELOCITY', Z1X + Z1W/2, DY + 10, 'center', lbC, 9);
-    const actualVelocity = Math.round(_currentVelocity);
-    const dispSpeed = actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
-    oc.font = 'bold 22px Orbitron, monospace';
-    oc.fillStyle = actualVelocity === 0 ? 'rgba(0,180,255,0.4)' : valC;
-    oc.textAlign = 'center';
-    oc.fillText(dispSpeed, Z1X + Z1W/2, DY + 38);
-
-    _lbl('ENERGY', Z1X + Z1W/2, DY + 47, 'center', lbC);
-    const ePct    = _energy / 9999;
+    // ── ZONE 1: ENERGY TELEMETRY ──
+    const ePct    = Math.max(0, Math.min(1, _energy / 9999));
     const eBarCol = ePct > 0.5 ? '#00e5ff' : ePct > 0.25 ? '#ffaa00' : '#ff3300';
-    const eBarX = Z1X + 8, eBarY = DY + 51, eBarW = Z1W - 16, eBarH = 8;
-    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(eBarX, eBarY, eBarW, eBarH);
-    oc.fillStyle = eBarCol; oc.fillRect(eBarX, eBarY, eBarW * ePct, eBarH);
-    const dispEnergy = String(Math.floor(_energy)).padStart(4,'0');
-    _lbl(dispEnergy, Z1X + Z1W/2, DY + 67, 'center', eBarCol, 9);
-    _lbl(`K:${String(_kills).padStart(3,'0')}  T:${_targets > 0 ? String(_targets).padStart(2,'0') : '--'}`,
-      Z1X + Z1W/2, DY + 80, 'center', lbC, 8);
+    const eDull   = ePct > 0.5 ? 'rgba(0,80,110,0.50)' : ePct > 0.25 ? 'rgba(110,65,0,0.50)' : 'rgba(110,15,0,0.50)';
+
+    // ── Row 1: ENERGY [====bar====] 9964  (16px, full-width row) ──
+    const eLblW = 62;   // px reserved for "ENERGY" label
+    const eNumW = 42;   // px reserved for 4-digit number
+    const bX = Z1X + eLblW + 4,  bW = Math.max(10, Z1W - eLblW - eNumW - 12);
+    const bH = 12, bY = DY + 6;
+    // Label
+    oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
+    oc.fillText('ENERGY', Z1X + 4, DY + 18);
+    // Bar: dull empty behind, bright fill on top
+    oc.fillStyle = eDull;    oc.fillRect(bX, bY, bW, bH);
+    oc.fillStyle = eBarCol;  oc.fillRect(bX, bY, bW * ePct, bH);
+    // Number right of bar
+    oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = eBarCol; oc.textAlign = 'right';
+    oc.fillText(String(Math.floor(_energy)), Z1X + Z1W - 4, DY + 18);
+
+    // ── Rows 2-4: Three-column rate block ──
+    {
+      const rate1s  = _energyRate;
+      const rate60s = _energyHistory.reduce((s, v) => s + v, 0) / 60;
+      const rateAll = _galacticClock > 1 ? _energyTotalConsumed / _galacticClock : 0;
+
+      const fmtRate = r => r < 0.05 ? '0.0' : r.toFixed(1);
+      const fmtTTE  = r => {
+        if (r <= 0) return '---';
+        const t = Math.floor(_energy / r);
+        if (t > 3600) return '>1hr';
+        if (t > 60)   return `${Math.floor(t / 60)}m`;
+        return `${t}s`;
+      };
+      const tteColor = r => {
+        if (r <= 0) return valC;
+        const t = _energy / r;
+        return t < 120 ? '#ff3300' : t < 300 ? '#ffaa00' : valC;
+      };
+
+      // Column geometry
+      const cW   = Math.floor(Z1W / 3);
+      const c1Cx = Z1X + Math.floor(cW / 2);
+      const c2Cx = Z1X + cW + Math.floor(cW / 2);
+      const c3Cx = Z1X + cW * 2 + Math.floor(cW / 2);
+      const divX1 = Z1X + cW, divX2 = Z1X + cW * 2;
+
+      // Vertical dividers spanning all three data rows
+      oc.strokeStyle = 'rgba(0,100,160,0.45)'; oc.lineWidth = 1;
+      oc.beginPath();
+      oc.moveTo(divX1, DY + 22); oc.lineTo(divX1, DY + 56);
+      oc.moveTo(divX2, DY + 22); oc.lineTo(divX2, DY + 56);
+      oc.stroke();
+
+      // Row 2: column headers (SECOND / MINUTE / ALL)
+      _lbl('SECOND', c1Cx, DY + 30, 'center', lbC,    10);
+      _lbl('MINUTE', c2Cx, DY + 30, 'center', lbC,    10);
+      _lbl('ALL',    c3Cx, DY + 30, 'center', lbC,    10);
+
+      // Row 3: rate values  "2.3 /s"
+      _lbl(`${fmtRate(rate1s)} /s`,  c1Cx, DY + 42, 'center', eBarCol, 12);
+      _lbl(`${fmtRate(rate60s)} /s`, c2Cx, DY + 42, 'center', eBarCol, 12);
+      _lbl(`${fmtRate(rateAll)} /s`, c3Cx, DY + 42, 'center', eBarCol, 12);
+
+      // Row 4: TTE values  "72m TTE"
+      _lbl(`${fmtTTE(rate1s)} TTE`,  c1Cx, DY + 54, 'center', tteColor(rate1s),  12);
+      _lbl(`${fmtTTE(rate60s)} TTE`, c2Cx, DY + 54, 'center', tteColor(rate60s), 12);
+      _lbl(`${fmtTTE(rateAll)} TTE`, c3Cx, DY + 54, 'center', tteColor(rateAll), 12);
+    }
+
+    // ── 60-second sparkline — FIXED scale (200 E/s ceiling) ──
+    {
+      const gX = Z1X + 4, gY = DY + 59, gW = Z1W - 8, gH = 26;
+      const GRAPH_MAX = 200;
+      const logMaxE   = Math.log1p(GRAPH_MAX);
+      oc.fillStyle = 'rgba(0,0,0,0.40)'; oc.fillRect(gX, gY, gW, gH);
+      const bw = Math.max(1, Math.floor(gW / 60));
+      for (let i = 0; i < 60; i++) {
+        const val = _energyHistory[(_energyHistIdx - 60 + i + 60) % 60];
+        if (val <= 0) continue;
+        const logFrac = Math.min(1, Math.log1p(val) / logMaxE);
+        const bh = Math.max(1, Math.round(logFrac * gH));
+        oc.fillStyle = logFrac < 0.33 ? '#00cc55' : logFrac < 0.67 ? '#ffaa00' : '#ff3300';
+        oc.fillRect(gX + i * bw, gY + gH - bh, bw - 1, bh);
+      }
+    }
+
+    // ── Bottom row: TOTAL ENERGY and CLOCK on same line (12px) ──
+    {
+      const tc = Math.floor(_galacticClock);
+      const hh = Math.floor(tc / 3600);
+      const mm = Math.floor((tc % 3600) / 60);
+      const ss = tc % 60;
+      const clockStr = `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+      _lbl(`TOTAL ENERGY: ${Math.floor(_energyTotalConsumed)}`, Z1X + 4,        DY + 98, 'left',  valC, 12);
+      _lbl(`CLOCK: ${clockStr}`,                                Z1X + Z1W - 4,  DY + 98, 'right', valC, 12);
+    }
+
 
     // ── ZONE 2: CANNONS ──
     const CC = GameConfig.cannons;
@@ -2116,6 +2247,8 @@ const SectorView = (() => {
     // ── ZONE 3: VELOCITY + ENGINES ──
     // Single header line: VELOCITY: 013  POWER: 5
     const hdrY = DY + 26;
+    const actualVelocity = Math.round(_currentVelocity);
+    const dispSpeed = actualVelocity > 999 ? '999' : String(actualVelocity).padStart(3, '0');
     oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
     oc.fillText('VELOCITY:', Z3X + 4, hdrY);
     oc.font = 'bold 22px Orbitron, monospace';
@@ -2295,8 +2428,8 @@ const SectorView = (() => {
     if (_plugMesh) _plugMesh.visible = false;
     _hitFlash    = 0;
     _asteroids   = [];
-    _energy      = 9999;
-    _kills       = 0;
+    // NOTE: _energy persists across warps — only refilled on dock
+    // NOTE: _kills suspended until Zylons are added
     _targets     = 0;
     _shieldsOn   = true;
     _computerOn  = true;
@@ -2510,7 +2643,11 @@ const SectorView = (() => {
     _warpChargeCallback = onComplete;
   }
 
-  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst,
+  function drainEnergy(amount) {
+    _energy = Math.max(0, _energy - amount);
+  }
+
+  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy,
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
            get speed()         { return _speed;         },
