@@ -19,12 +19,7 @@
 
       <!-- HUD overlay -->
       <div id="hud">
-        <div id="hud-left">
-          <div class="hud-panel">
-            <div class="hud-label">SECTOR</div>
-            <div class="hud-value" id="hud-sector">--</div>
-          </div>
-        </div>
+        <div id="hud-left"></div>
 
         <div id="hud-center">
           <div id="game-title">STAR FIGHTER</div>
@@ -33,12 +28,20 @@
 
         <div id="hud-right">
           <div class="hud-panel">
+            <div class="hud-label">SECTOR</div>
+            <div class="hud-value" id="hud-sector">--</div>
+          </div>
+          <div class="hud-panel">
             <div class="hud-label">WARP COST</div>
             <div class="hud-value" id="hud-warp-cost">--</div>
           </div>
           <div class="hud-panel">
             <div class="hud-label">STATUS</div>
             <div class="hud-value" id="hud-status">STANDBY</div>
+          </div>
+          <div class="hud-panel" id="hud-resources">
+            <div class="hud-label">RESOURCES</div>
+            <div id="hud-resources-body" style="color:rgba(160,204,238,0.5);font-size:10px;font-family:var(--font-mono);line-height:1.7;">—</div>
           </div>
         </div>
       </div>
@@ -54,7 +57,7 @@
       <div id="instructions">
         <span>HOVER</span> sector info &nbsp;|&nbsp;
         <span>CLICK</span> select target &nbsp;|&nbsp;
-        <span>ENTER</span> warp &nbsp;|&nbsp;
+        <span>H</span> warp &nbsp;|&nbsp;
         <span>ESC</span> cancel
       </div>
     </div>

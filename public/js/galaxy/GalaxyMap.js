@@ -252,40 +252,14 @@ class GalaxyMap {
   }
 
   _buildLanes() {
-    // Connect each starbase to its nearest 1–2 starbase neighbors
-    // Uses a simple minimum spanning tree approach
-    const sb = this.starbases;
-    const connected = new Set();
-    connected.add(sb[0].key);
+    // Hub-and-spoke: every outer starbase gets one direct lane to the capital.
+    // No daisy-chains — every delivery goes straight to/from the capital.
+    const capital = this.starbases.find(s => s.isCapital);
+    if (!capital) return;
     const laneIds = new Set();
-
-    while (connected.size < sb.length) {
-      let bestDist = Infinity, bestA = null, bestB = null;
-      for (const ak of connected) {
-        const a = this.starbases.find(s => s.key === ak);
-        for (const b of sb) {
-          if (connected.has(b.key)) continue;
-          const d = HexMath.distance(a, b);
-          if (d < bestDist) { bestDist = d; bestA = a; bestB = b; }
-        }
-      }
-      if (!bestA) break;
-      const lane = new CommerceLane(bestA, bestB);
-      if (!laneIds.has(lane.id)) {
-        this.lanes.push(lane);
-        laneIds.add(lane.id);
-      }
-      connected.add(bestB.key);
-    }
-
-    // Add a few extra redundant connections for interest
-    for (let i = 0; i < Math.floor(sb.length / 3); i++) {
-      const a = sb[Math.floor(Math.random() * sb.length)];
-      const b = sb[Math.floor(Math.random() * sb.length)];
-      if (a === b) continue;
-      const d = HexMath.distance(a, b);
-      if (d > 4) continue;
-      const lane = new CommerceLane(a, b);
+    for (const sb of this.starbases) {
+      if (sb.isCapital) continue;
+      const lane = new CommerceLane(capital, sb);
       if (!laneIds.has(lane.id)) {
         this.lanes.push(lane);
         laneIds.add(lane.id);
@@ -297,32 +271,26 @@ class GalaxyMap {
     this.supplyShips = [];
 
     for (const lane of this.lanes) {
-      // Generate up to 4 distinct shortest paths between the two starbases
-      const paths = HexMath.hexAlternatePaths(lane.from, lane.to, 4);
+      // Each lane is capital ↔ one outer base (hub-and-spoke).
+      const outerSb = lane.from.isCapital ? lane.to : lane.from;
+
+      // Use up to 2 alternate paths for visual variety
+      const paths = HexMath.hexAlternatePaths(lane.from, lane.to, 2);
       const d     = paths[0].length - 1;
       if (d < 1) continue;
 
-      // Inbound ships carry the outer base's produced resource toward Capital
-      // Outbound ships carry manufactured goods (fuel) back out
-      const outerSb = this.starbases.find(s =>
-        (s.q === lane.from.q && s.r === lane.from.r) ||
-        (s.q === lane.to.q   && s.r === lane.to.r)
-      );
-      const nonCapital = (outerSb && !outerSb.isCapital) ? outerSb : null;
-      const fwdResource = nonCapital?.produces?.key || 'fuel';
-      const revResource = 'fuel'; // outbound: manufactured goods
-
+      // Spawn d ships — one per hop — evenly spaced, alternating direction.
       for (let i = 0; i < d; i++) {
         const path    = paths[i % paths.length];
         const reverse = (i % 2 === 1);
-        const usePath = reverse ? [...path].reverse() : path;
         this.supplyShips.push(new SupplyShip({
-          path:         usePath,
-          startIndex:   Math.floor(i / 2),
-          forward:      true,
-          resource:     reverse ? revResource : fwdResource,
+          path,
+          startIndex:   i,          // one ship per hex = even spacing
+          forward:      !reverse,
+          resource:     outerSb.produces?.key || 'duranite',
           rechargeTime: GameConfig.supplyShip.rechargeTime,
           dockTime:     GameConfig.supplyShip.dockTime,
+          outerBase:    outerSb,
         }));
       }
     }
@@ -426,6 +394,8 @@ class GalaxyMap {
         if (!this._hasDragged && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
           this._hasDragged = true;
           c.style.cursor = 'grabbing';
+          this.hoveredHex = null;
+          this._hideTooltip();
         }
         if (this._hasDragged) {
           this.pan.x += dx;
@@ -458,11 +428,10 @@ class GalaxyMap {
       if (!this.hoveredHex) return;
       const k = HexMath.key(this.hoveredHex.q, this.hoveredHex.r);
       if (!this.hexes.has(k)) return;
-      if (HexMath.key(this.hoveredHex.q, this.hoveredHex.r) ===
-          HexMath.key(this.playerPos.q, this.playerPos.r)) return;
 
       this.targetPos = { ...this.hoveredHex };
       document.getElementById('hud-status').textContent = 'TARGET LOCKED';
+      this._updateResourcesPanel(this.hoveredHex);
     });
 
     c.addEventListener('mousedown', e => {
@@ -498,7 +467,11 @@ class GalaxyMap {
 
     window.addEventListener('keydown', e => {
       // H is owned by main.js — do not handle here
-      if (e.key === 'Escape') { this.targetPos = null; document.getElementById('hud-status').textContent = 'STANDBY'; }
+      if (e.key === 'Escape') {
+        this.targetPos = null;
+        document.getElementById('hud-status').textContent = 'STANDBY';
+        this._updateResourcesPanel(null);
+      }
     });
 
     window.addEventListener('resize', () => {
@@ -546,35 +519,82 @@ class GalaxyMap {
     let html = `<div class="tt-title">SECTOR ${k}</div>`;
     if (vis) {
       html += `TYPE: ${hd.type.toUpperCase()}<br>`;
-      html += `FUEL MOD: ×${hd.sectorMod}<br>`;
       if (sb) {
         const nameColor = sb.isCapital ? '#ffd700' : '#00b4ff';
         html += `<span style="color:${nameColor}">${sb.name.toUpperCase()}</span><br>`;
-        if (sb.isCapital) {
-          html += `<span style="color:rgba(255,215,0,0.7)">COMMAND — STORES ALL RESOURCES</span><br>`;
-        } else if (sb.produces) {
-          html += `<span style="color:${sb.produces.color}">▲ PRODUCES: ${sb.produces.label}</span><br>`;
-        }
         html += `SHIELDS: ${Math.round(sb.shields)}%`;
       }
     } else if (rev) {
-      html += `<span style="color:#4488aa">CHARTED — NO CURRENT INTEL</span>`;
+      html += `<span style="color:#4488aa">CHARTED</span>`;
     } else {
       html += `<span style="color:#333">UNKNOWN</span>`;
     }
 
     const baseCost = HexMath.fuelCost(this.playerPos, hex);
-    const mod      = this.hexes.get(HexMath.key(hex.q, hex.r))?.sectorMod ?? 1.0;
+    const mod      = hd?.sectorMod ?? 1.0;
     const cost     = Math.round(baseCost * mod);
-    const dist     = HexMath.euclideanDist(this.playerPos, hex).toFixed(1);
     const modStr   = mod !== 1.0 ? ` ×${mod}` : '';
-    html += `<br><span style="color:#00b4ff">WARP: ${cost}E${modStr} &nbsp;·&nbsp; DIST: ${dist}</span>`;
+    html += `<br><span style="color:#00b4ff">WARP: ${cost}E${modStr}</span>`;
 
     tt.innerHTML = html;
     tt.classList.remove('hidden');
     const pad = 12;
     tt.style.left = (mx + pad) + 'px';
     tt.style.top  = (my + pad) + 'px';
+  }
+
+  /** Populate the RESOURCES panel (right HUD) for a clicked hex. Pass null to clear. */
+  _updateResourcesPanel(hex) {
+    const el = document.getElementById('hud-resources-body');
+    if (!el) return;
+    if (!hex) { el.innerHTML = '—'; return; }
+
+    const k   = HexMath.key(hex.q, hex.r);
+    const sb  = this.starbases.find(s => s.q === hex.q && s.r === hex.r);
+    const vis = this.visible.has(k);
+
+    if (!vis || !sb) {
+      el.innerHTML = vis ? '<span style="color:#4488aa">No base</span>' : '<span style="color:#333">Unknown</span>';
+      return;
+    }
+
+    const fmt = (label, val, tgt, col) => {
+      const bar = Math.round((val / tgt) * 8);
+      const filled = '▮'.repeat(bar) + '▯'.repeat(8 - bar);
+      return `<span style="color:${col || 'rgba(0,180,255,0.75)'}">${label}</span>` +
+             `<span style="color:#ccc"> ${Math.floor(val)}/${tgt}</span>`;
+    };
+
+    const inv = sb.inventory;
+    const tgt = sb.target;
+    const rows = [];
+
+    if (sb.isCapital) {
+      rows.push(fmt('ENERGY',    inv.energy        ?? 0, tgt.energy,        '#ffcc00'));
+      rows.push(fmt('ENGINES',   inv.engineParts   ?? 0, tgt.engineParts,   '#00e5ff'));
+      rows.push(fmt('CANNONS',   inv.cannonParts   ?? 0, tgt.cannonParts,   '#00e5ff'));
+      rows.push(fmt('SHIELDS',   inv.shieldParts   ?? 0, tgt.shieldParts,   '#00e5ff'));
+      rows.push(fmt('COMPUTERS', inv.computerParts ?? 0, tgt.computerParts, '#00e5ff'));
+      rows.push(fmt('TORPEDOES', inv.torpedoes     ?? 0, tgt.torpedoes,     '#ff9900'));
+      rows.push(fmt('SPARE PTS', inv.spareParts    ?? 0, tgt.spareParts,    '#aaffaa'));
+      rows.push('<span style="color:rgba(0,180,255,0.4)">── RAWS ──</span>');
+      for (const [k, v] of Object.entries(sb.raws)) {
+        rows.push(`<span style="color:rgba(160,204,238,0.6)">${k.toUpperCase()}: ${Math.floor(v)}</span>`);
+      }
+    } else {
+      if (sb.produces) {
+        rows.push(`<span style="color:${sb.produces.color}">▲ ${sb.produces.label.toUpperCase()}</span>`);
+      }
+      rows.push(fmt('ENERGY',    inv.energy        ?? 0, tgt.energy,        '#ffcc00'));
+      rows.push(fmt('ENGINES',   inv.engineParts   ?? 0, tgt.engineParts,   '#00e5ff'));
+      rows.push(fmt('CANNONS',   inv.cannonParts   ?? 0, tgt.cannonParts,   '#00e5ff'));
+      rows.push(fmt('SHIELDS',   inv.shieldParts   ?? 0, tgt.shieldParts,   '#00e5ff'));
+      rows.push(fmt('COMPUTERS', inv.computerParts ?? 0, tgt.computerParts, '#00e5ff'));
+      rows.push(fmt('TORPEDOES', inv.torpedoes     ?? 0, tgt.torpedoes,     '#ff9900'));
+      rows.push(fmt('SPARE PTS', inv.spareParts    ?? 0, tgt.spareParts,    '#aaffaa'));
+    }
+
+    el.innerHTML = rows.join('<br>');
   }
 
   _hideTooltip() {
@@ -609,6 +629,11 @@ class GalaxyMap {
   }
 
   _updateSupplyShips(dt) {
+    // Tick all starbases (mining, maintenance, capital manufacturing)
+    for (const sb of this.starbases) {
+      sb.tick(dt);
+    }
+
     for (const ship of this.supplyShips) {
       ship.update(dt);
     }
@@ -668,14 +693,7 @@ class GalaxyMap {
       this._drawTarget(ctx);
     }
 
-    // Stardate (top-left, always visible)
-    if (this.getStardate) {
-      const sd = String(this.getStardate()).padStart(4, '0');
-      ctx.font = 'bold 11px Orbitron, monospace';
-      ctx.fillStyle = 'rgba(0,180,255,0.55)';
-      ctx.textAlign = 'left';
-      ctx.fillText(`STARDATE ${sd}`, 16, 22);
-    }
+
   }
 
   _drawBackground(ctx, w, h) {

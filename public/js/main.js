@@ -141,6 +141,7 @@
                      ? starbase.name.toUpperCase()
                      : `SECTOR ${pos.q},${pos.r}`,
       hasStarbase:   !!starbase,
+      starbase:      starbase || null,
       supplyShips:    galaxyMap.shipsInSector(pos.q, pos.r),
       allSupplyShips: galaxyMap.supplyShips,
     };

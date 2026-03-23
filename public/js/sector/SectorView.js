@@ -72,9 +72,11 @@ const SectorView = (() => {
   let _voidObjects = [];   // translucent fragments in void sectors — recycled as camera moves
 
   // Dashboard stats
-  let _energy  = 9999;
+  let _energy       = 9999;
+  let _torpedoCount = 200;   // current torpedo inventory
   let _kills   = 0;
   let _targets = 0;
+  let _currentStarbase = null;  // Starbase object for the sector we're in
 
   // Energy telemetry
   let _galacticClock      = 0;          // total seconds played (never resets)
@@ -552,14 +554,72 @@ const SectorView = (() => {
 
   // ---- Repair & Refuel ----
   function _repairAndRefuel() {
-    _resetSystems();
-    _resetEngines();
-    _resetWarpDrive();
-    _resetComputer();
-    _energy = 9999;
-    _shieldCapacity     = 400;
-    _shieldRechargeRate = 67;
-    _shieldCharge       = 400;
+    const sb  = _currentStarbase;
+    const cfg = GameConfig.player;
+    const log = [];  // collects messages about what was done / unavailable
+
+    // ── 1. ENERGY ──
+    if (sb) {
+      const needed  = cfg.maxFuel - _energy;
+      const avail   = sb.inventory.energy ?? 0;
+      const deliver = Math.min(needed, avail);
+      sb.inventory.energy = Math.max(0, avail - deliver);
+      _energy = Math.min(cfg.maxFuel, _energy + deliver);
+      if (deliver < needed) log.push(`LOW FUEL — ${Math.floor(sb.inventory.energy)} remaining`);
+    } else {
+      _energy = cfg.maxFuel;
+    }
+
+    // ── 2. TORPEDOES ──
+    if (sb) {
+      const needed  = cfg.maxTorpedoes - _torpedoCount;
+      const avail   = sb.inventory.torpedoes ?? 0;
+      const deliver = Math.min(needed, avail);
+      sb.inventory.torpedoes = Math.max(0, avail - deliver);
+      _torpedoCount = Math.min(cfg.maxTorpedoes, _torpedoCount + deliver);
+      if (deliver < needed && avail === 0) log.push('NO TORPEDOES in stock');
+    } else {
+      _torpedoCount = cfg.maxTorpedoes;
+    }
+
+    // ── 3. COMPONENT REPLACEMENT ──
+    // Processed in order — warp drive is FIRST so it always wins the engineParts
+    // pool when stock is limited.  Array order = replacement priority.
+    const compMap = [
+      { label: 'WARP DRIVE', hp: () => _warpDriveHP,  invKey: 'engineParts',
+        reset: () => _resetWarpDrive() },
+      { label: 'ENGINES',    hp: () => _systems.E,     invKey: 'engineParts',
+        reset: () => { _systems.E = 100; _resetEngines(); } },
+      { label: 'CANNONS',    hp: () => _systems.P,     invKey: 'cannonParts',
+        reset: () => { _systems.P = 100; _resetCannons(); } },
+      { label: 'SHIELDS',    hp: () => _systems.S,     invKey: 'shieldParts',
+        reset: () => { _systems.S = 100;
+          _shieldCapacity = 400; _shieldRechargeRate = 67; _shieldCharge = 400; } },
+      { label: 'COMPUTERS',  hp: () => _systems.C,     invKey: 'computerParts',
+        reset: () => { _systems.C = 100; _resetComputer(); } },
+    ];
+
+    for (const { label, hp, invKey, reset } of compMap) {
+      const curHP = hp();
+      if (curHP >= cfg.skipAt * 100) continue;       // > 90% — skip
+      if (curHP > cfg.replaceAt * 100) continue;     // 50–90% — not bad enough
+      if (sb) {
+        const avail = sb.inventory[invKey] ?? 0;
+        if (avail >= 1) {
+          sb.inventory[invKey] = avail - 1;
+          reset();
+        } else {
+          log.push(`NO ${label} PARTS`);
+        }
+      } else {
+        reset();
+      }
+    }
+
+    // ── 5. Log if anything was short ──
+    if (log.length && typeof showMessage === 'function') {
+      showMessage('DOCK REPORT', log.join(' | '));
+    }
   }
 
   // ---- Docking drone: orange plug mesh ----
@@ -1144,17 +1204,21 @@ const SectorView = (() => {
 
   // Aft cannon — always fires ship-backward (Space)
   function _fireAft() {
+    if (_torpedoCount <= 0) return;
     if (_energy <= 0 || _systems.P <= 0) return;
     const c = _cannon.aft;
     if (!_cannonReady(c)) return;
+    _torpedoCount--;
     _doFire(c, 0, true);
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
   }
 
   // Left front cannon only (left mouse button)
   function _fireLeft() {
+    if (_torpedoCount <= 0) return;
     if (_energy <= 0 || _systems.P <= 0) return;
     if (!_cannonReady(_cannon.fL)) return;
+    _torpedoCount--;
     _doFire(_cannon.fL, -TORPEDO_OFFSET, false);
     _fireFlash = 0.18;
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
@@ -1162,8 +1226,10 @@ const SectorView = (() => {
 
   // Right front cannon only (right mouse button)
   function _fireRight() {
+    if (_torpedoCount <= 0) return;
     if (_energy <= 0 || _systems.P <= 0) return;
     if (!_cannonReady(_cannon.fR)) return;
+    _torpedoCount--;
     _doFire(_cannon.fR, +TORPEDO_OFFSET, false);
     _fireFlash = 0.18;
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
@@ -2227,13 +2293,19 @@ const SectorView = (() => {
     // ── ZONE 2: CANNONS ──
     const CC = GameConfig.cannons;
 
-    // Header row: title + cooling bar on the same line
-    _lbl('CANNONS', Z2X + 4, DY + 22, 'left', lbC, 20);
+    // Header row: AMMO count snug after label, COOLING: pushed right
+    const ammoStr = String(_torpedoCount).padStart(3, '0');
+    oc.font = '20px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
+    oc.fillText('AMMO:', Z2X + 4, DY + 22);
+    const ammoLblW = oc.measureText('AMMO: ').width;   // measure with same font before switching
+    oc.font = 'bold 20px Share Tech Mono, monospace';
+    oc.fillStyle = _torpedoCount > 10 ? valC : _torpedoCount > 0 ? '#ffaa00' : '#ff3300';
+    oc.fillText(ammoStr, Z2X + 4 + ammoLblW, DY + 22);
     const coolV   = _cannonCoolingRate;
     const coolCol = coolV > 60 ? '#00ccff' : coolV > 30 ? '#ffaa00' : '#ff4400';
     oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
-    oc.fillText('COOLING:', Z2X + 106, DY + 22);
-    const chdrBarX = Z2X + 192, chdrBarW = Math.max(0, Z2X + Z2W - chdrBarX - 4);
+    oc.fillText('COOLING:', Z2X + 160, DY + 22);
+    const chdrBarX = Z2X + 232, chdrBarW = Math.max(0, Z2X + Z2W - chdrBarX - 4);
     const chdrBarY = DY + 10, chdrBarH = 10;
     oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(chdrBarX, chdrBarY, chdrBarW, chdrBarH);
     oc.fillStyle = coolCol; oc.fillRect(chdrBarX, chdrBarY, chdrBarW * (coolV/100), chdrBarH);
@@ -2519,6 +2591,7 @@ const SectorView = (() => {
     _sectorQ     = sector?.q            ?? 0;
     _sectorR     = sector?.r            ?? 0;
     _hasStarbase = !!sector?.hasStarbase;
+    _currentStarbase = sector?.starbase || null;
     _sectorName  = sector?.name        || `SECTOR ${sector?.q ?? '?'},${sector?.r ?? '?'}`;
 
     // Spawn Zylon enemies if sector has them

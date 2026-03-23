@@ -1,57 +1,256 @@
 /**
  * Starbase.js — Represents a single starbase on the galaxy map.
+ *
+ * Inventory system:
+ *   - Outer bases hold manufactured goods (shipped from capital) + raw materials (always replenished).
+ *   - Capital holds raw materials received from outer bases and manufactures finished goods.
+ *   - Each manufacturing recipe runs as an independent queue; queues compete for shared raws
+ *     using shortage-severity ordering (output farthest below target % wins access first).
  */
 
 class Starbase {
   /**
    * @param {object} opts
-   * @param {number} opts.q         — hex axial q
-   * @param {number} opts.r         — hex axial r
-   * @param {string} opts.name      — display name
-   * @param {boolean} opts.isCapital — true for the Home Base
-   * @param {number} opts.sensorRange — rings of visibility (0 = own hex only)
+   * @param {number}  opts.q
+   * @param {number}  opts.r
+   * @param {string}  opts.name
+   * @param {boolean} opts.isCapital
+   * @param {number}  opts.sensorRange
+   * @param {object|null} opts.produces  — { key, label, color } — raw resource this hex yields
    */
   constructor({ q, r, name, isCapital = false, sensorRange = 0, produces = null }) {
-    this.q = q;
-    this.r = r;
-    this.name = name;
-    this.isCapital = isCapital;
+    this.q          = q;
+    this.r          = r;
+    this.name       = name;
+    this.isCapital  = isCapital;
     this.sensorRange = sensorRange;
-    this.produces = produces;  // resource this base extracts/manufactures
+    this.produces   = produces;
 
     // Status
-    this.state = 'active'; // 'active' | 'dormant' | 'occupied'
-    this.shields = 100;    // 0–100
-    this.resources = 100;  // 0–100; drains during siege
+    this.state      = 'active'; // 'active' | 'dormant' | 'occupied'
+    this.shields    = 100;
+    this.underAttack     = false;
+    this.distressActive  = false;
 
     // Upgrade levels
-    this.sensorLevel = sensorRange;   // upgrade increases this
-    this.repairLevel = 1;
+    this.sensorLevel  = sensorRange;
+    this.repairLevel  = 1;
     this.stockpileLevel = 1;
 
-    // Distress
-    this.underAttack = false;
-    this.distressActive = false;
+    // ---- Inventory ----
+    // Outer bases: primed with 1 of each spare part — normal operating day, not day 1.
+    // Capital: starts at half its safety-stock targets.
+    const tgt = isCapital ? GameConfig.capital.target : GameConfig.starbase.outerTarget;
+    this.inventory = {
+      energy:        isCapital ? Math.floor(tgt.energy        / 2) : Math.floor(tgt.energy / 2),
+      engineParts:   isCapital ? Math.floor(tgt.engineParts   / 2) : 1,
+      cannonParts:   isCapital ? Math.floor(tgt.cannonParts   / 2) : 1,
+      shieldParts:   isCapital ? Math.floor(tgt.shieldParts   / 2) : 1,
+      computerParts: isCapital ? Math.floor(tgt.computerParts / 2) : 1,
+      torpedoes:     isCapital ? Math.floor(tgt.torpedoes     / 2) : 50,
+      spareParts:    isCapital ? Math.floor(tgt.spareParts    / 2) : 1,
+    };
+
+    // Raws: capital primed with 1 full delivery (2000 units) of each raw.
+    // Outer bases have infinite raws — they never run out.
+    const rawPrime = isCapital ? GameConfig.supplyShip.inboundRawAmount : 0;
+    this.raws = {
+      plasma:   rawPrime,
+      duranite: rawPrime,
+      organics: rawPrime,
+      isotopes: rawPrime,
+    };
+
+    // ---- Inventory targets ----
+    const cfg = GameConfig;
+    this.target = isCapital
+      ? { ...cfg.capital.target }
+      : { ...cfg.starbase.outerTarget };
+
+    // ---- Manufacturing (capital only) ----
+    // One queue object per recipe; they run in parallel.
+    this._mfgQueues = isCapital
+      ? GameConfig.capital.recipes.map(recipe => ({
+          recipe,
+          active:   false,   // true = cycle in progress
+          progress: 0,       // seconds elapsed in current cycle
+        }))
+      : null;
   }
 
-  get key() {
-    return HexMath.key(this.q, this.r);
-  }
+  // ------------------------------------------------------------------
+  get key() { return HexMath.key(this.q, this.r); }
 
-  /** Returns all sectors this starbase currently reveals. */
   visibleSectors() {
     return HexMath.hexesInRange(this.q, this.r, this.sensorLevel);
   }
 
-  /** Drain shields during siege. Returns true if still alive. */
+  // ------------------------------------------------------------------
+  // TICK METHODS (called every frame from GalaxyMap._updateSupplyShips)
+  // ------------------------------------------------------------------
+
+  /** Master tick — calls the right sub-ticks depending on base type. */
+  tick(dt) {
+    if (this.state !== 'active') return;
+    if (this.isCapital) {
+      this._capitalEnergyTick(dt);
+      this._manufacturingTick(dt);
+    } else {
+      this._maintenanceTick(dt);
+    }
+  }
+
+  /** Capital passively replenishes energy (plasma furnaces). */
+  _capitalEnergyTick(dt) {
+    const rate = GameConfig.capital.energyReplenishPerSec;
+    this.inventory.energy = Math.min(
+      this.target.energy,
+      this.inventory.energy + rate * dt
+    );
+  }
+
+  /** Outer bases drain energy and spare parts for maintenance. */
+  _maintenanceTick(dt) {
+    const cfg = GameConfig.starbase;
+    this.inventory.energy = Math.max(0,
+      this.inventory.energy - cfg.maintenanceEnergyPerSec * dt);
+    this.inventory.spareParts = Math.max(0,
+      this.inventory.spareParts - cfg.maintenancePartsPerSec * dt);
+  }
+
+  /**
+   * Capital manufacturing — runs all 6 queues in parallel.
+   *
+   * Shared-raw contention: before each tick we sort active queues by
+   * shortage severity (how far their output is below target, as a fraction).
+   * The most-needed output gets first pick of raws.
+   */
+  _manufacturingTick(dt) {
+    if (!this._mfgQueues) return;
+
+    // Sort queues by shortage severity (descending) so the most-needed
+    // output wins when raws are scarce.
+    const sorted = [...this._mfgQueues].sort((a, b) => {
+      const sevA = this._shortage(a.recipe.output);
+      const sevB = this._shortage(b.recipe.output);
+      return sevB - sevA;
+    });
+
+    for (const q of sorted) {
+      const { recipe } = q;
+      const tgt = this.target[recipe.output] ?? 0;
+
+      // Don't start a new cycle if already at or above target
+      if (!q.active && (this.inventory[recipe.output] ?? 0) >= tgt) continue;
+
+      // Start a new cycle: check + reserve inputs
+      if (!q.active) {
+        if (!this._canAfford(recipe.inputs)) continue;
+        this._consumeInputs(recipe.inputs);
+        q.active   = true;
+        q.progress = 0;
+      }
+
+      // Advance the cycle
+      q.progress += dt;
+      if (q.progress >= recipe.cycleSeconds) {
+        // Output one unit
+        this.inventory[recipe.output] = (this.inventory[recipe.output] ?? 0) + 1;
+        q.active   = false;
+        q.progress = 0;
+      }
+    }
+  }
+
+  /** Fraction by which an output item is below its target (0 = at target, 1 = empty). */
+  _shortage(key) {
+    const tgt = this.target[key] ?? 1;
+    const cur = this.inventory[key] ?? 0;
+    return Math.max(0, (tgt - cur) / tgt);
+  }
+
+  _canAfford(inputs) {
+    for (const [raw, amount] of Object.entries(inputs)) {
+      if ((this.raws[raw] ?? 0) < amount) return false;
+    }
+    return true;
+  }
+
+  _consumeInputs(inputs) {
+    for (const [raw, amount] of Object.entries(inputs)) {
+      this.raws[raw] = Math.max(0, (this.raws[raw] ?? 0) - amount);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // CARGO TRANSFER
+  // ------------------------------------------------------------------
+
+  /**
+   * Receive a cargo manifest from a docking supply ship.
+   * @param {object} manifest — { energy?, engineParts?, cannonParts?, ... }
+   */
+  receiveDelivery(manifest) {
+    for (const [key, amount] of Object.entries(manifest)) {
+      if (amount <= 0) continue;
+      if (key in this.inventory) {
+        this.inventory[key] = Math.min(
+          this.target[key] ?? Infinity,
+          (this.inventory[key] ?? 0) + amount
+        );
+      } else if (key in this.raws) {
+        // Raw material delivery to capital
+        this.raws[key] = (this.raws[key] ?? 0) + amount;
+      }
+    }
+  }
+
+  /**
+   * Build a cargo manifest for a departing supply ship.
+   * Outbound (capital → outer base): fill ship slots with what the destination needs most.
+   * Inbound (outer base → capital): always return 2000 units of this base's raw material.
+   *
+   * @param {'outbound'|'inbound'} direction
+   * @param {Starbase|null} destination — needed for outbound to know what to prioritise
+   * @returns {object} manifest
+   */
+  buildDepartureCargo(direction, destination = null) {
+    if (direction === 'inbound') {
+      // Outer base → capital: infinite raw supply
+      const rawKey = this.produces?.key ?? 'duranite';
+      return { [rawKey]: GameConfig.supplyShip.inboundRawAmount };
+    }
+
+    // Outbound (capital → outer base): load template, keeping only what ship has space for
+    const slots   = GameConfig.supplyShip.outboundCargo;
+    const manifest = {};
+    for (const [key, capacity] of Object.entries(slots)) {
+      const onHand = this.inventory[key] ?? 0;
+      const load   = Math.min(capacity, onHand);
+      if (load > 0) {
+        this.inventory[key] = onHand - load;
+        manifest[key] = load;
+      }
+    }
+
+    // Also include energy delivery (remaining capacity after jump fuel reserved)
+    // Ship keeps energy for the round trip; remainder is delivered
+    // This is tracked on the ship itself — not loaded from starbase inventory directly
+    return manifest;
+  }
+
+  // ------------------------------------------------------------------
+  // COMBAT
+  // ------------------------------------------------------------------
+
   siegeTick(deltaSeconds) {
     if (this.state !== 'active') return false;
-    const drainRate = 5 * deltaSeconds; // 5% per second under siege
-    this.resources = Math.max(0, this.resources - drainRate * 0.3);
-    this.shields   = Math.max(0, this.shields   - drainRate);
+    const drainRate = 5 * deltaSeconds;
+    this.inventory.energy  = Math.max(0, (this.inventory.energy ?? 0) - drainRate * 20);
+    this.shields           = Math.max(0, this.shields - drainRate);
     if (this.shields <= 0) {
-      this.state = 'dormant';
-      this.underAttack = false;
+      this.state          = 'dormant';
+      this.underAttack    = false;
       this.distressActive = false;
       return false;
     }
@@ -59,10 +258,36 @@ class Starbase {
     return true;
   }
 
-  /** Attempt repair while docked (per second). */
   repairTick(deltaSeconds) {
     const rate = 10 * this.repairLevel * deltaSeconds;
-    this.shields   = Math.min(100, this.shields   + rate);
-    this.resources = Math.min(100, this.resources + rate * 0.5);
+    this.shields = Math.min(100, this.shields + rate);
+  }
+
+  // ------------------------------------------------------------------
+  // INVENTORY SUMMARY (for tooltip / UI)
+  // ------------------------------------------------------------------
+
+  /** Returns a human-readable inventory snapshot for the tooltip. */
+  inventorySummary() {
+    const inv = this.inventory;
+    const lines = [];
+    const fmt = (label, val, tgt) =>
+      `${label}: ${Math.floor(val)} / ${tgt}`;
+
+    lines.push(fmt('ENERGY',    inv.energy        ?? 0, this.target.energy));
+    lines.push(fmt('ENGINES',   inv.engineParts   ?? 0, this.target.engineParts));
+    lines.push(fmt('CANNONS',   inv.cannonParts   ?? 0, this.target.cannonParts));
+    lines.push(fmt('SHIELDS',   inv.shieldParts   ?? 0, this.target.shieldParts));
+    lines.push(fmt('COMPUTERS', inv.computerParts ?? 0, this.target.computerParts));
+    lines.push(fmt('TORPEDOES', inv.torpedoes     ?? 0, this.target.torpedoes));
+    lines.push(fmt('SPARE PTS', inv.spareParts    ?? 0, this.target.spareParts));
+
+    if (this.isCapital) {
+      lines.push('--- RAWS ---');
+      for (const [k, v] of Object.entries(this.raws)) {
+        lines.push(`${k.toUpperCase()}: ${Math.floor(v)}`);
+      }
+    }
+    return lines;
   }
 }
