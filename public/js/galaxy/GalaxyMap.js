@@ -269,12 +269,14 @@ class GalaxyMap {
 
   _spawnSupplyShips() {
     this.supplyShips = [];
+    const capital = this.starbases.find(s => s.isCapital);
 
     for (const lane of this.lanes) {
       // Each lane is capital ↔ one outer base (hub-and-spoke).
-      const outerSb = lane.from.isCapital ? lane.to : lane.from;
+      // lane.from is always the capital (set in _buildLanes).
+      const outerSb = lane.to;
 
-      // Use up to 2 alternate paths for visual variety
+      // Use up to 2 alternate paths — path always runs capital→outer (path[0] = capital)
       const paths = HexMath.hexAlternatePaths(lane.from, lane.to, 2);
       const d     = paths[0].length - 1;
       if (d < 1) continue;
@@ -285,11 +287,12 @@ class GalaxyMap {
         const reverse = (i % 2 === 1);
         this.supplyShips.push(new SupplyShip({
           path,
-          startIndex:   i,          // one ship per hex = even spacing
+          startIndex:   i,
           forward:      !reverse,
           resource:     outerSb.produces?.key || 'duranite',
           rechargeTime: GameConfig.supplyShip.rechargeTime,
           dockTime:     GameConfig.supplyShip.dockTime,
+          capital,
           outerBase:    outerSb,
         }));
       }

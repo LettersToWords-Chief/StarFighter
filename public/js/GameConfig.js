@@ -20,11 +20,11 @@ const GameConfig = Object.freeze({
     energyCapacity: 3000,
 
     /** Energy consumed per one-hex jump. */
-    energyPerJump: 100,
+    energyPerJump: 110,
 
     /** Cargo slots per outbound leg (capital → outer base). */
     outboundCargo: Object.freeze({
-      spareParts:    3,   // generic ship-repair parts
+      spareParts:    3,
       engineParts:   1,
       cannonParts:   1,
       shieldParts:   1,
@@ -78,7 +78,7 @@ const GameConfig = Object.freeze({
       cannonParts:   3,
       shieldParts:   2,
       computerParts: 2,
-      torpedoes:     100,
+      torpedoes:     200,
       spareParts:    20,
     }),
 
@@ -86,8 +86,8 @@ const GameConfig = Object.freeze({
      * Passive maintenance drain per second at each outer base.
      * Represents life support, navigation, point defence.
      */
-    maintenanceEnergyPerSec: 10,     // ~600 per minute
-    maintenancePartsPerSec:  0.005,  // ~0.3 parts per minute
+    maintenanceEnergyPerSec: 0,
+    maintenancePartsPerSec:  0,
   },
 
   // =========================================================
@@ -101,12 +101,32 @@ const GameConfig = Object.freeze({
       cannonParts:   6,
       shieldParts:   4,
       computerParts: 4,
-      torpedoes:     200,
+      torpedoes:     300,
       spareParts:    40,
     }),
 
-    /** Passive energy replenishment at the capital (units/sec). */
-    energyReplenishPerSec: 167,  // ≈ 10 000 per minute
+    /**
+     * Strategic reserve — the minimum the capital keeps for player repairs.
+     * buildDepartureCargo will never ship quantities that would drop below these.
+     */
+    strategicReserve: Object.freeze({
+      energy:        10000,
+      engineParts:   4,
+      cannonParts:   3,
+      shieldParts:   1,
+      computerParts: 1,
+      torpedoes:     200,
+      spareParts:    10,
+    }),
+
+    /** Plasma harvested per second from the capital's nebula sector (feeds manufacturing). */
+    plasmaHarvestPerSec: 2.8,
+
+    /** Cap on raw plasma stockpile at the capital (prevents unbounded accumulation). */
+    plasmaRawCap: 500,
+
+    /** Continuous energy replenishment — ZEROED; energy is now batch-manufactured from plasma. */
+    energyReplenishPerSec: 0,
 
     /**
      * Manufacturing recipes.
@@ -145,6 +165,13 @@ const GameConfig = Object.freeze({
         output: 'spareParts',
         inputs: { duranite: 100, organics: 100, isotopes: 100 },
         cycleSeconds: 60,
+      },
+      {
+        // Energy batch: 100 plasma + 60 s = 10 000 energy
+        output: 'energy',
+        inputs: { plasma: 100 },
+        cycleSeconds: 60,
+        amount: 10000,   // units produced per completed cycle
       },
     ]),
   },

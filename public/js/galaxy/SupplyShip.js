@@ -17,16 +17,20 @@
 class SupplyShip {
   /**
    * @param {object} opts
-   * @param {Array}  opts.path         — [{q,r}, ...] hex path from A to B
-   * @param {number} opts.startIndex   — which hex in path to start on (for pipeline spacing)
-   * @param {boolean} opts.forward     — initial travel direction
-   * @param {string} opts.resource     — resource type being carried
-   * @param {number} opts.rechargeTime — idle cooldown seconds (base)
-   * @param {number} opts.dockTime     — seconds to spend docked
+   * @param {Array}   opts.path         — [{q,r}, ...] hex path; path[0] = capital end
+   * @param {number}  opts.startIndex   — which hex in path to start on
+   * @param {boolean} opts.forward      — initial travel direction
+   * @param {string}  opts.resource     — raw resource this lane carries (inbound leg)
+   * @param {number}  opts.rechargeTime — idle cooldown seconds
+   * @param {number}  opts.dockTime     — seconds docked at each endpoint
+   * @param {Starbase} opts.capital     — the capital starbase (path[0] end)
+   * @param {Starbase} opts.outerBase   — the outer starbase (path[last] end)
    */
   constructor({ path, startIndex = 0, forward = true, resource = 'fuel',
                 rechargeTime = GameConfig.supplyShip.rechargeTime,
-                dockTime     = GameConfig.supplyShip.dockTime }) {
+                dockTime     = GameConfig.supplyShip.dockTime,
+                capital      = null,
+                outerBase    = null }) {
     this.path         = path;
     this.pathIndex    = startIndex;
     this.forward      = forward;
@@ -35,9 +39,15 @@ class SupplyShip {
     this.dockTime     = dockTime;
     this.fuel         = GameConfig.supplyShip.fuelCapacity;
 
+    // Cargo endpoints
+    this.capital   = capital;
+    this.outerBase = outerBase;
+
+    // Current cargo manifest — filled on each dock
+    this.cargo = {};
+
     // State: 'recharge' | 'departing' | 'docked'
     this.state      = 'recharge';
-    // Stagger start times so a full pipeline of ships is evenly spaced
     this.stateTimer = rechargeTime * (startIndex / Math.max(path.length - 1, 1));
 
     this.health      = 100;
@@ -45,8 +55,8 @@ class SupplyShip {
 
     // Visual
     this.flashPhase  = Math.random() * Math.PI * 2;
-    this.warpFlash   = 0;   // 0→1 burst intensity, fades quickly
-    this.departFlash = 0;   // 0→1 first-flash intensity when drive engages
+    this.warpFlash   = 0;
+    this.departFlash = 0;
   }
 
   // ---- Computed state ----
@@ -124,6 +134,7 @@ class SupplyShip {
       if (this.isAtEndpoint) {
         this.state      = 'docked';
         this.stateTimer = this.dockTime;
+        this._handleDock();
       } else {
         this.forward    = !this.forward;
         this.state      = 'recharge';
@@ -131,6 +142,9 @@ class SupplyShip {
       }
       return;
     }
+
+    // Consume 110E of fuel per jump (100 warp + 10 for in-sector maneuvering)
+    this.fuel = Math.max(0, this.fuel - (GameConfig.supplyShip.energyPerJump ?? 110));
 
     this.pathIndex = next;
     this.warpFlash = 1.0;
@@ -140,6 +154,56 @@ class SupplyShip {
     if (this.isAtEndpoint) {
       this.state      = 'docked';
       this.stateTimer = this.dockTime;
+      this._handleDock();
+    }
+  }
+
+  /**
+   * Called whenever the ship enters docked state at an endpoint.
+   * Delivers current cargo to the docking starbase, then loads return cargo.
+   *
+   * path[0]          = capital end  (pathIndex === 0)
+   * path[last index] = outer base end
+   */
+  _handleDock() {
+    const atCapital   = this.pathIndex === 0;
+    const routeHops   = this.path.length - 1;       // full one-way distance
+    const fuelPerHop  = GameConfig.supplyShip.energyPerJump ?? 100;
+    const returnCost  = routeHops * fuelPerHop;     // fuel needed to get back
+
+    if (atCapital && this.capital) {
+      // ── Arrived at capital: deliver raws, load manufactured goods, refuel ──
+      if (Object.keys(this.cargo).length) {
+        this.capital.receiveDelivery(this.cargo);
+      }
+      this.cargo = this.capital.buildDepartureCargo('outbound');
+
+      // Refuel from capital energy stock (respect strategic reserve)
+      const reserve  = GameConfig.capital.strategicReserve.energy ?? 10000;
+      const capEnergy = this.capital.inventory.energy ?? 0;
+      const available = Math.max(0, capEnergy - reserve);
+      const needed    = GameConfig.supplyShip.fuelCapacity - this.fuel;
+      const refuel    = Math.min(needed, available);
+      this.capital.inventory.energy = capEnergy - refuel;
+      this.fuel += refuel;
+
+    } else if (!atCapital && this.outerBase) {
+      // ── Arrived at outer base: deliver goods + surplus fuel, load raws ──
+      if (Object.keys(this.cargo).length) {
+        this.outerBase.receiveDelivery(this.cargo);
+      }
+
+      // Deliver surplus fuel (keep only what's needed for the return trip)
+      const surplus = Math.max(0, this.fuel - returnCost);
+      if (surplus > 0 && this.outerBase.inventory) {
+        this.outerBase.inventory.energy = Math.min(
+          this.outerBase.target?.energy ?? Infinity,
+          (this.outerBase.inventory.energy ?? 0) + surplus
+        );
+        this.fuel -= surplus;
+      }
+
+      this.cargo = this.outerBase.buildDepartureCargo('inbound');
     }
   }
 

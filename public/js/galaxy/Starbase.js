@@ -93,19 +93,19 @@ class Starbase {
   tick(dt) {
     if (this.state !== 'active') return;
     if (this.isCapital) {
-      this._capitalEnergyTick(dt);
+      this._capitalPlasmaTick(dt);
       this._manufacturingTick(dt);
     } else {
       this._maintenanceTick(dt);
     }
   }
 
-  /** Capital passively replenishes energy (plasma furnaces). */
-  _capitalEnergyTick(dt) {
-    const rate = GameConfig.capital.energyReplenishPerSec;
-    this.inventory.energy = Math.min(
-      this.target.energy,
-      this.inventory.energy + rate * dt
+  /** Capital passively harvests plasma from its nebula sector. */
+  _capitalPlasmaTick(dt) {
+    const cfg = GameConfig.capital;
+    this.raws.plasma = Math.min(
+      cfg.plasmaRawCap ?? 500,
+      (this.raws.plasma ?? 0) + cfg.plasmaHarvestPerSec * dt
     );
   }
 
@@ -154,8 +154,12 @@ class Starbase {
       // Advance the cycle
       q.progress += dt;
       if (q.progress >= recipe.cycleSeconds) {
-        // Output one unit
-        this.inventory[recipe.output] = (this.inventory[recipe.output] ?? 0) + 1;
+        // Output recipe.amount units (defaults to 1 for parts, 10000 for energy)
+        const amount = recipe.amount ?? 1;
+        this.inventory[recipe.output] = Math.min(
+          this.target[recipe.output] ?? Infinity,
+          (this.inventory[recipe.output] ?? 0) + amount
+        );
         q.active   = false;
         q.progress = 0;
       }
@@ -221,21 +225,21 @@ class Starbase {
       return { [rawKey]: GameConfig.supplyShip.inboundRawAmount };
     }
 
-    // Outbound (capital → outer base): load template, keeping only what ship has space for
-    const slots   = GameConfig.supplyShip.outboundCargo;
+    // Outbound (capital → outer base): load template, keeping only what's above strategic reserve
+    const slots    = GameConfig.supplyShip.outboundCargo;
+    const reserve  = GameConfig.capital.strategicReserve;
     const manifest = {};
     for (const [key, capacity] of Object.entries(slots)) {
-      const onHand = this.inventory[key] ?? 0;
-      const load   = Math.min(capacity, onHand);
+      const onHand    = this.inventory[key] ?? 0;
+      const floor     = reserve[key] ?? 0;          // never ship below this
+      const available = Math.max(0, onHand - floor);
+      const load      = Math.min(capacity, available);
       if (load > 0) {
         this.inventory[key] = onHand - load;
         manifest[key] = load;
       }
     }
 
-    // Also include energy delivery (remaining capacity after jump fuel reserved)
-    // Ship keeps energy for the round trip; remainder is delivered
-    // This is tracked on the ship itself — not loaded from starbase inventory directly
     return manifest;
   }
 
