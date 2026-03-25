@@ -12,6 +12,10 @@
 
 const GameConfig = Object.freeze({
 
+  // Set true to observe Zylon AI in real-time (no fast-forward, units visible on map)
+  testMode: true,
+
+
   // =========================================================
   // SUPPLY SHIP (cargo ship NPC)
   // =========================================================
@@ -232,6 +236,55 @@ const GameConfig = Object.freeze({
 
     /** Shield drain per second on a starbase under active siege. */
     starbaseShieldDrainPerSec: 5,
+  },
+
+  // =========================================================
+  // ZYLON AI
+  // =========================================================
+  zylon: {
+    /** Seconds between each Seeker one-hex galaxy move (normal gameplay). */
+    seekerMoveIntervalSec:       45,
+
+    /** Seconds between Seeker moves when testMode is true (fast, observable). */
+    seekerMoveIntervalSecTest:    3,
+
+    /** Seconds to produce one unit/pair (Seeker, Warrior, or sub-Spawner). */
+    spawnerSpawnIntervalSec:     60,
+
+    /** Test-mode spawn interval — proportional to move interval (60s:45s ≈ 4s:3s). */
+    spawnerSpawnIntervalSecTest:  4,
+
+    /** Visual delay (seconds) after a Warrior is dispatched before it "arrives". */
+    warriorWarpDelaySec:          5,
+
+    /** Seconds between warpedo shots fired at the starbase. */
+    warpedoFireIntervalSec:       5,
+
+    /** Shield points drained per warpedo hit on the starbase. */
+    warpedoShieldDamage:          8,
+
+    /** Starbase energy cost per warpedo hit (shields burn energy to recharge). */
+    warpedoEnergyDamage:        200,
+
+    /** Sector-view distance from starbase where Beacon is placed (units). */
+    beaconPlacementUnits:       750,
+
+    /** Seekers attack anything entering within this range of their Beacon. */
+    seekerAttackRangeUnits:     250,
+
+    /** Seekers chase targets up to this distance from the Beacon. */
+    seekerChaseRangeUnits:      500,
+
+    /** Warrior hp — hits required to destroy one. */
+    warriorHp:                    3,
+
+    /** Warrior pairs dispatched per new starbase Beacon. */
+    warriorPairsPerBeacon:        2,
+
+    /** Lifetime production caps per Spawner. */
+    maxSeekerPairsPerSpawner:    12,
+    maxWarriorPairsPerSpawner:   12,
+    maxSubSpawnersPerSpawner:     2,
   },
 
   // =========================================================

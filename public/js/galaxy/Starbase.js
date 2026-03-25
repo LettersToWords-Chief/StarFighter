@@ -262,6 +262,39 @@ class Starbase {
     return true;
   }
 
+  /**
+   * Called by ZylonWarrior on each warpedo impact.
+   * Drains energy; when energy hits 0 shields cannot recharge → shields fail.
+   */
+  warpedoHit(shieldDamage, energyDamage) {
+    if (this.state !== 'active' && this.state !== 'underAssault') return;
+    this.state       = 'underAssault';
+    this.underAttack = true;
+
+    // Energy absorbs the hit cost first
+    this.inventory.energy = Math.max(0, (this.inventory.energy ?? 0) - energyDamage);
+
+    // Shields drain; rate is faster when energy is low (can't recharge as fast)
+    this.shields = Math.max(0, this.shields - shieldDamage);
+
+    this.distressActive = this.shields < 40 || (this.inventory.energy ?? 0) < 5000;
+
+    // When energy is exhausted, shields fail permanently
+    if ((this.inventory.energy ?? 0) <= 0) {
+      this._onShieldsFailed();
+    }
+  }
+
+  /** Shields have failed — starbase is now vulnerable; Zylons will summon a Spawner. */
+  _onShieldsFailed() {
+    this.shields    = 0;
+    this.state      = 'shieldsFailed';
+    this.underAttack = true;
+    this.distressActive = true;
+    // Galaxy map listens for this via onStarbaseFallen callback
+    if (this.onShieldsFailed) this.onShieldsFailed(this);
+  }
+
   repairTick(deltaSeconds) {
     const rate = 10 * this.repairLevel * deltaSeconds;
     this.shields = Math.min(100, this.shields + rate);

@@ -36,6 +36,17 @@ class GalaxyMap {
     this.playerPos    = { q: 0, r: 0 }; // current player sector
     this.targetPos    = null;            // selected warp target
 
+    // Zylon units
+    this.zylonSpawners = [];
+    this.zylonSeekers  = [];
+    this.zylonWarriors = [];
+    this.zylonBeacons  = [];
+    this.redAlert      = false;   // true once first starbase Beacon is placed
+
+    // Callbacks
+    this.onRedAlert    = null;    // () => void — fired once at game start
+    this.onWarpedoHit  = null;    // (starbase) => void — fired each hit
+
     // Fog of war
     this.revealed = new Set();  // known sectors (ever visited or in sensor range)
     this.visible  = new Set();  // currently live sensor coverage
@@ -89,6 +100,8 @@ class GalaxyMap {
     this._placeStarbases(outerBases, resourceHexes);
     this._buildLanes();
     this._spawnSupplyShips();
+    this._placeZylonSpawner();      // ← Zylon init
+    if (!GameConfig.testMode) this._fastForwardZylons(); // skip in test mode — observe in real-time
     this._updateVisibility();
     this._centerOrigin();
   }
@@ -620,6 +633,7 @@ class GalaxyMap {
         lastTime = now;
         // Always update ships regardless of map visibility
         this._updateSupplyShips(dt);
+        this._updateZylons(dt);
 
         // Skip draw when canvas has no size (map overlay hidden)
         if (this.canvas.width === 0 || this.canvas.height === 0) return;
@@ -643,6 +657,116 @@ class GalaxyMap {
     // Recompute visibility every frame — ships move, so fog must stay current
     this._updateVisibility();
   }
+
+  // =========================================================
+  // ZYLON SYSTEM
+  // =========================================================
+
+  /** Place the initial Spawner on the resource prospect hex farthest from all player starbases. */
+  _placeZylonSpawner() {
+    if (!this.zylonProspects || this.zylonProspects.length === 0) return;
+
+    // Score each prospect: farthest = highest minimum distance to any starbase
+    let best = null;
+    let bestScore = -1;
+    for (const pos of this.zylonProspects) {
+      const minDist = Math.min(
+        ...this.starbases.map(sb => HexMath.distance(pos, { q: sb.q, r: sb.r }))
+      );
+      if (minDist > bestScore) {
+        bestScore = minDist;
+        best = pos;
+      }
+    }
+    if (!best) return;
+
+    const spawner = new ZylonSpawner({ q: best.q, r: best.r, galaxy: this });
+    this.zylonSpawners.push(spawner);
+  }
+
+  /**
+   * Fast-forward the Zylon AI synchronously (no rendering) until the first
+   * starbase Beacon is placed. This ensures Red Alert fires on frame 1.
+   */
+  _fastForwardZylons() {
+    const step = GameConfig.zylon.seekerMoveIntervalSec;
+    const MAX_STEPS = 500; // safety cap (~375 simulated minutes)
+    let steps = 0;
+    while (
+      !this.zylonBeacons.some(b => b.active && b.type === 'starbase') &&
+      steps < MAX_STEPS
+    ) {
+      this._updateZylons(step);
+      steps++;
+    }
+    if (this.zylonBeacons.some(b => b.active && b.type === 'starbase')) {
+      this.redAlert = true;
+      if (this.onRedAlert) this.onRedAlert();
+    }
+  }
+
+  /** Tick all Zylon units. Called every frame (and during fast-forward). */
+  _updateZylons(dt) {
+    // Test mode: freeze the moment a starbase beacon is placed (game-start state)
+    if (GameConfig.testMode && !this._testFrozen) {
+      if (this.zylonBeacons.some(b => b.active && b.type === 'starbase')) {
+        this._testFrozen = true;
+        console.log('[TEST MODE] Red Alert condition reached — AI frozen.');
+        return;
+      }
+    }
+    if (this._testFrozen) return;
+
+    for (const spawner of this.zylonSpawners) {
+      spawner.tick(dt, this);
+    }
+    for (const seeker of this.zylonSeekers) {
+      seeker.tick(dt, this);
+    }
+    for (const warrior of this.zylonWarriors) {
+      warrior.tick(dt, this);
+    }
+    for (const beacon of this.zylonBeacons) {
+      beacon.tick(dt);
+    }
+    // Clean up dead units
+    this.zylonSpawners = this.zylonSpawners.filter(s => s.alive);
+    this.zylonSeekers  = this.zylonSeekers.filter(s => s.alive);
+    this.zylonWarriors = this.zylonWarriors.filter(w => w.alive);
+    this.zylonBeacons  = this.zylonBeacons.filter(b => b.active);
+  }
+
+  /** Called by ZylonWarrior when it arrives at its beacon sector. */
+  _onWarriorArrived(warrior) {
+    // Notify any listening SectorView if the player is in this sector
+    if (this.onWarriorArrived) this.onWarriorArrived(warrior);
+  }
+
+  /** Called by ZylonWarrior each time it fires at a starbase. */
+  _onWarpedoFired(warrior, starbase) {
+    if (this.onWarpedoFired) this.onWarpedoFired(warrior, starbase);
+  }
+
+  /** Called by ZylonSpawner when it creates a new sub-Spawner. */
+  _onSubSpawnerCreated(spawner) {
+    // Already pushed into this.zylonSpawners by the parent — nothing extra needed
+  }
+
+  /** Returns all Zylon Seekers currently in the given galaxy sector. */
+  seekersInSector(q, r) {
+    return this.zylonSeekers.filter(s => s.q === q && s.r === r && s.alive);
+  }
+
+  /** Returns all Zylon Warriors currently in the given galaxy sector. */
+  warriorsInSector(q, r) {
+    return this.zylonWarriors.filter(w => w.q === w.q && w.r === r && w.alive && w.state !== 'WARPING');
+  }
+
+  /** Returns all Beacons in the given galaxy sector. */
+  beaconsInSector(q, r) {
+    return this.zylonBeacons.filter(b => b.q === q && b.r === r && b.active);
+  }
+
 
   _resizeCanvas() {
     const c = this.canvas;
@@ -696,7 +820,25 @@ class GalaxyMap {
       this._drawTarget(ctx);
     }
 
-
+    // Zylon units (always drawn in test mode, regardless of fog)
+    if (GameConfig.testMode) {
+      this._drawZylons(ctx);
+      // Frozen banner
+      if (this._testFrozen) {
+        const { width, height } = this.canvas;
+        ctx.save();
+        ctx.fillStyle = 'rgba(255, 40, 40, 0.18)';
+        ctx.fillRect(0, 0, width, height);
+        ctx.font        = 'bold 22px Orbitron, sans-serif';
+        ctx.fillStyle   = '#ff4444';
+        ctx.textAlign   = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = '#ff0000';
+        ctx.shadowBlur  = 18;
+        ctx.fillText('⚠ GAME START STATE — AI FROZEN', width / 2, 38);
+        ctx.restore();
+      }
+    }
   }
 
   _drawBackground(ctx, w, h) {
@@ -1015,6 +1157,115 @@ class GalaxyMap {
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+  }
+
+  /** TEST MODE — draw all Zylon units on the map regardless of fog of war. */
+  _drawZylons(ctx) {
+    const t = Date.now() * 0.003;
+
+    // Clock-angle for each facing index (0=12, 1=2, 2=4, 3=6, 4=8, 5=10 o'clock)
+    // In canvas radians: 12 o'clock = -π/2, then +60° per step
+    const FACING_ANGLE = [
+      -Math.PI / 2,         // 0 = 12 o'clock
+      -Math.PI / 2 + Math.PI / 3,  // 1 = 2 o'clock
+      -Math.PI / 2 + 2 * Math.PI / 3, // 2 = 4 o'clock
+       Math.PI / 2,         // 3 = 6 o'clock
+       Math.PI / 2 + Math.PI / 3,  // 4 = 8 o'clock
+       Math.PI / 2 + 2 * Math.PI / 3, // 5 = 10 o'clock
+    ];
+
+    const label = (ctx, text, x, y, color) => {
+      ctx.save();
+      ctx.font        = `${Math.max(7, 7 * this.zoom)}px Share Tech Mono, monospace`;
+      ctx.fillStyle   = color;
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'top';
+      ctx.globalAlpha = 0.9;
+      ctx.fillText(text, x, y);
+      ctx.restore();
+    };
+
+    // ── Spawners ──────────────────────────────────────────
+    for (const sp of this.zylonSpawners) {
+      if (!sp.alive) continue;
+      const sc = this._hexToScreen(sp.q, sp.r);
+      const pulse = 0.6 + 0.4 * Math.sin(t * 1.5 + sp.q);
+      ctx.save();
+      ctx.globalAlpha = 0.85 * pulse;
+      ctx.font        = `${Math.max(14, 14 * this.zoom)}px monospace`;
+      ctx.fillStyle   = '#ff8800';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('✦', sc.x, sc.y);
+      ctx.restore();
+      label(ctx, 'SPAWNER', sc.x, sc.y + 10 * this.zoom, '#ff8800');
+    }
+
+    // ── Seekers ───────────────────────────────────────────
+    for (const sk of this.zylonSeekers) {
+      if (!sk.alive) continue;
+      const sc    = this._hexToScreen(sk.q, sk.r);
+      const angle = FACING_ANGLE[sk.facing] ?? 0;
+      const sz    = Math.max(6, 7 * this.zoom);
+      const pulse = 0.7 + 0.3 * Math.sin(t * 2 + sk.q + sk.r);
+
+      ctx.save();
+      ctx.globalAlpha = 0.9 * pulse;
+      ctx.translate(sc.x, sc.y);
+      ctx.rotate(angle);
+
+      // Arrowhead pointing in facing direction
+      ctx.fillStyle   = '#00ffee';
+      ctx.strokeStyle = '#00b4cc';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -sz);          // tip
+      ctx.lineTo(sz * 0.55,  sz * 0.7);
+      ctx.lineTo(0, sz * 0.3);
+      ctx.lineTo(-sz * 0.55, sz * 0.7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      const stateAbbr = sk.state === 'GUARDING' ? 'GRD' : sk.state === 'FOLLOWING' ? 'FOL' : sk.state === 'FALLBACK' ? 'FBK' : 'SKR';
+      label(ctx, `${stateAbbr} f${sk.facing}`, sc.x, sc.y + 9 * this.zoom, '#00ffee');
+    }
+
+    // ── Beacons ───────────────────────────────────────────
+    for (const bc of this.zylonBeacons) {
+      if (!bc.active) continue;
+      const sc    = this._hexToScreen(bc.q, bc.r);
+      const pulse = 0.5 + 0.5 * Math.sin(t * 3 + bc.q);
+      const color = bc.type === 'starbase' ? '#ff3a3a' : '#ff9900';
+
+      ctx.save();
+      ctx.globalAlpha = 0.85 * pulse;
+      ctx.font        = `${Math.max(12, 12 * this.zoom)}px monospace`;
+      ctx.fillStyle   = color;
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('◆', sc.x, sc.y - 5 * this.zoom);
+      ctx.restore();
+      label(ctx, 'BCN ' + bc.type.toUpperCase(), sc.x, sc.y + 6 * this.zoom, color);
+    }
+
+    // ── Warriors ──────────────────────────────────────────
+    for (const wr of this.zylonWarriors) {
+      if (!wr.alive || wr.state === 'WARPING') continue;
+      const sc    = this._hexToScreen(wr.q, wr.r);
+      const pulse = 0.6 + 0.4 * Math.sin(t * 2.5 + wr.q);
+
+      ctx.save();
+      ctx.globalAlpha = 0.9 * pulse;
+      ctx.font        = `${Math.max(12, 12 * this.zoom)}px monospace`;
+      ctx.fillStyle   = '#ff44ff';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('★', sc.x, sc.y + 14 * this.zoom);
+      ctx.restore();
+      label(ctx, 'WRR', sc.x, sc.y + 22 * this.zoom, '#ff44ff');
+    }
   }
 
   _drawTarget(ctx) {
