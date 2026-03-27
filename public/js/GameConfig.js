@@ -52,13 +52,30 @@ const GameConfig = Object.freeze({
     spawnOffset: 90,
 
     /** Seconds docked at starbase (covers drone exchange). */
-    dockTime: 10,
+    dockTime: 30,
 
     /** Legacy fuel capacity reference (used by SupplyShip internal tracking). */
     fuelCapacity: 3000,
 
     /** Generic spare parts required to build a replacement cargo ship. */
     replacementCost: 10,
+
+    /** Maximum hull HP for a cargo ship. */
+    maxHealth: 1000,
+
+    /** Hull damage dealt by one torpedo hit. */
+    torpedoDamage: 100,
+
+    /** HP restored per spare part consumed during docked repair. */
+    repairCostPerPart: 100,
+
+    /** Recipe to commission a new ship at the Capital. */
+    buildRecipe: Object.freeze({
+      spareParts:    10,
+      engineParts:   2,
+      computerParts: 1,
+      buildSeconds:  60,
+    }),
 
     /** HP threshold — replace component at dock if HP ≤ this fraction. */
     replaceThreshold: 0.50,
@@ -256,6 +273,12 @@ const GameConfig = Object.freeze({
 
     /** Visual delay (seconds) after a Warrior is dispatched before it "arrives". */
     warriorWarpDelaySec:          5,
+
+    /** Energy the player must transfer to kickstart a dormant starbase (fully restores shields). */
+    starbaseKickstartEnergy:   1000,
+
+    /** Test-mode outer base starting energy — low so player can drain shields with cannons. */
+    testMode_starbaseEnergy:   2000,
 
     /** Seconds between warpedo shots fired at the starbase. */
     warpedoFireIntervalSec:       5,

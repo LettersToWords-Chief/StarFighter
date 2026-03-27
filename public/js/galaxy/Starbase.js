@@ -27,10 +27,11 @@ class Starbase {
     this.produces   = produces;
 
     // Status
-    this.state      = 'active'; // 'active' | 'dormant' | 'occupied'
-    this.shields    = 100;
-    this.underAttack     = false;
-    this.distressActive  = false;
+    this.state      = 'active'; // 'active' | 'dormant'
+    this.shieldCharge     = 1000;  // 0–1000 energy pool; shields display = shieldCharge / 10
+    this.shields          = 100;   // 0–100 display (derived from shieldCharge)
+    this.underAttack      = false;
+    this.distressActive   = false;
 
     // Upgrade levels
     this.sensorLevel  = sensorRange;
@@ -42,7 +43,9 @@ class Starbase {
     // Capital: starts at half its safety-stock targets.
     const tgt = isCapital ? GameConfig.capital.target : GameConfig.starbase.outerTarget;
     this.inventory = {
-      energy:        isCapital ? Math.floor(tgt.energy        / 2) : Math.floor(tgt.energy / 2),
+      energy:        isCapital
+        ? Math.floor(tgt.energy / 2)
+        : (GameConfig.testMode ? GameConfig.zylon.testMode_starbaseEnergy : Math.floor(tgt.energy / 2)),
       engineParts:   isCapital ? Math.floor(tgt.engineParts   / 2) : 1,
       cannonParts:   isCapital ? Math.floor(tgt.cannonParts   / 2) : 1,
       shieldParts:   isCapital ? Math.floor(tgt.shieldParts   / 2) : 1,
@@ -91,12 +94,16 @@ class Starbase {
 
   /** Master tick — calls the right sub-ticks depending on base type. */
   tick(dt) {
-    if (this.state !== 'active') return;
     if (this.isCapital) {
+      if (this.state !== 'active') return;
       this._capitalPlasmaTick(dt);
       this._manufacturingTick(dt);
-    } else {
+    } else if (this.state === 'active') {
       this._maintenanceTick(dt);
+      this._shieldRechargeTick(dt);
+    } else if (this.state === 'dormant') {
+      // Even when dormant, recharge shields from any available energy
+      this._shieldRechargeTick(dt);
     }
   }
 
@@ -113,9 +120,44 @@ class Starbase {
   _maintenanceTick(dt) {
     const cfg = GameConfig.starbase;
     this.inventory.energy = Math.max(0,
-      this.inventory.energy - cfg.maintenanceEnergyPerSec * dt);
+      (this.inventory.energy ?? 0) - (cfg.maintenanceEnergyPerSec ?? 0) * dt);
     this.inventory.spareParts = Math.max(0,
-      this.inventory.spareParts - cfg.maintenancePartsPerSec * dt);
+      (this.inventory.spareParts ?? 0) - (cfg.maintenancePartsPerSec ?? 0) * dt);
+  }
+
+  /**
+   * Recharge shield buffer from starbase energy.
+   * Rate: 100 shield/sec = 100 energy/sec drained from inventory.
+   * If energy is exhausted, shields cannot recharge.
+   * If shields reach 0, the base goes dormant.
+   */
+  _shieldRechargeTick(dt) {
+    const energyOn  = (this.inventory.energy ?? 0) >= 1;
+    const shieldsOn = this.shieldCharge >= 1;
+
+    // Hold shields at full only while actively online
+    if (energyOn && this.state === 'active') this.shieldCharge = 1000;
+
+    this.shields        = Math.round(this.shieldCharge / 10);
+    this.distressActive = !energyOn;
+
+    // Dormant base: energy restored from outside — reactivate
+    if (this.state === 'dormant') {
+      if (energyOn) {
+        this.shieldCharge   = 1000;
+        this.shields        = 100;
+        this.state          = 'active';
+        this.underAttack    = false;
+        this.distressActive = false;
+        if (this.onRestored) this.onRestored(this);
+      }
+      return;
+    }
+
+    // Active base: energy AND shields both gone → dormant
+    if (this.state === 'active' && !energyOn && !shieldsOn) {
+      this._onShieldsFailed();
+    }
   }
 
   /**
@@ -285,14 +327,45 @@ class Starbase {
     }
   }
 
-  /** Shields have failed — starbase is now vulnerable; Zylons will summon a Spawner. */
-  _onShieldsFailed() {
-    this.shields    = 0;
-    this.state      = 'shieldsFailed';
+  /**
+   * Called by SectorView when a player photon round hits the starbase shield.
+   * Each hit drains 100 shield charge. If drained completely, base goes dormant.
+   */
+  hitByPhoton() {
+    if (this.state !== 'active') return;
     this.underAttack = true;
-    this.distressActive = true;
-    // Galaxy map listens for this via onStarbaseFallen callback
+    // Drain energy first; overflow spills into shieldCharge
+    const energy  = this.inventory.energy ?? 0;
+    const damage  = 500;
+    const eHit    = Math.min(energy, damage);
+    const sHit    = damage - eHit;           // overflow once energy is depleted
+    this.inventory.energy = Math.max(0, energy - eHit);
+    this.shieldCharge     = Math.max(0, this.shieldCharge - sHit);
+  }
+
+  /** Shields have failed — starbase goes dormant; must be kickstarted by the player. */
+  _onShieldsFailed() {
+    this.shieldCharge    = 0;
+    this.shields         = 0;
+    this.inventory.energy = 0;
+    this.state           = 'dormant';
+    this.underAttack     = false;
+    this.distressActive  = false;
     if (this.onShieldsFailed) this.onShieldsFailed(this);
+  }
+
+  /**
+   * Player transfers energy to restart the starbase.
+   * Fully restores shields and returns to active state.
+   */
+  kickstart() {
+    // Player transfers kickstart energy to the base, restoring power and shields
+    this.inventory.energy = GameConfig.zylon.starbaseKickstartEnergy;
+    this.shieldCharge     = 1000;
+    this.shields          = 100;
+    this.state            = 'active';
+    this.underAttack      = false;
+    this.distressActive   = false;
   }
 
   repairTick(deltaSeconds) {

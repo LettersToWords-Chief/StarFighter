@@ -49,7 +49,7 @@
              </div>`
           ).join('');
     }
-    return { send, getLog, _renderLog };
+    return { send, getLog, _renderLog, clockStr: _clockStr };
   })();
 
   // Stardate
@@ -245,6 +245,7 @@
                      ? starbase.name.toUpperCase()
                      : `SECTOR ${destination.q},${destination.r}`,
       hasStarbase:   !!starbase,
+      starbase:      starbase || null,
       supplyShips:    galaxyMap.shipsInSector(destination.q, destination.r),
       allSupplyShips: galaxyMap.supplyShips,
     };

@@ -251,6 +251,9 @@ class GalaxyMap {
         sensorRange: 0,
         produces: res,
       });
+      // Wire shield-failure and restore callbacks so galaxy map can react
+      sb.onShieldsFailed = (fallen) => this._onStarbaseFallen(fallen);
+      sb.onRestored      = (sb)     => this._onStarbaseRestored(sb);
       this.starbases.push(sb);
     }
 
@@ -736,15 +739,27 @@ class GalaxyMap {
     this.zylonBeacons  = this.zylonBeacons.filter(b => b.active);
   }
 
-  /** Called by ZylonWarrior when it arrives at its beacon sector. */
+  /** Called when a Warrior arrives at its beacon sector. */
   _onWarriorArrived(warrior) {
-    // Notify any listening SectorView if the player is in this sector
     if (this.onWarriorArrived) this.onWarriorArrived(warrior);
   }
 
-  /** Called by ZylonWarrior each time it fires at a starbase. */
+  /** Called when a Warrior fires at a starbase. */
   _onWarpedoFired(warrior, starbase) {
     if (this.onWarpedoFired) this.onWarpedoFired(warrior, starbase);
+  }
+
+  /** Called when a starbase's shields fail and it goes dormant. */
+  _onStarbaseFallen(sb) {
+    console.log(`[GalaxyMap] Starbase ${sb.name} has gone DORMANT.`);
+    const k = HexMath.key(sb.q, sb.r);
+    this.revealed.add(k);
+  }
+
+  /** Called when a dormant starbase auto-reactivates from supply ship fuel. */
+  _onStarbaseRestored(sb) {
+    console.log(`[GalaxyMap] Starbase ${sb.name} RESTORED.`);
+    if (this.onStarbaseRestored) this.onStarbaseRestored(sb);
   }
 
   /** Called by ZylonSpawner when it creates a new sub-Spawner. */
@@ -979,10 +994,64 @@ class GalaxyMap {
 
   _drawStarbase(ctx, sb) {
     if (!this.visible.has(sb.key) && !this.revealed.has(sb.key)) return;
-    const sc = this._hexToScreen(sb.q, sb.r);
+    const sc  = this._hexToScreen(sb.q, sb.r);
     const vis = this.visible.has(sb.key);
-    const alpha = vis ? 1.0 : 0.4;
 
+    // ── DORMANT starbase: red ✖ marker ────────────────────
+    if (sb.state === 'dormant') {
+      const alpha = vis ? 1.0 : 0.5;
+      const pulse = 0.6 + 0.4 * Math.sin(Date.now() * 0.004 + sb.q);
+      ctx.save();
+      ctx.globalAlpha = alpha * pulse;
+
+      // Red glow
+      if (vis) {
+        const grd = ctx.createRadialGradient(sc.x, sc.y, 0, sc.x, sc.y, 28);
+        grd.addColorStop(0, 'rgba(255,40,40,0.35)');
+        grd.addColorStop(1, 'rgba(255,40,40,0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(sc.x, sc.y, 28, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Dark diamond
+      const sz = sb.isCapital ? 10 : 7;
+      ctx.strokeStyle = '#ff2222';
+      ctx.fillStyle   = 'rgba(80,0,0,0.5)';
+      ctx.lineWidth   = sb.isCapital ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sc.x,      sc.y - sz);
+      ctx.lineTo(sc.x + sz, sc.y);
+      ctx.lineTo(sc.x,      sc.y + sz);
+      ctx.lineTo(sc.x - sz, sc.y);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+
+      // ✖ cross
+      const cr = sz * 0.45;
+      ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sc.x - cr, sc.y - cr); ctx.lineTo(sc.x + cr, sc.y + cr);
+      ctx.moveTo(sc.x + cr, sc.y - cr); ctx.lineTo(sc.x - cr, sc.y + cr);
+      ctx.stroke();
+
+      // Label
+      ctx.globalAlpha = alpha;
+      ctx.font = '9px Orbitron, sans-serif';
+      ctx.fillStyle = '#ff4444';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(sb.name.toUpperCase(), sc.x, sc.y + sz + 14);
+      ctx.font = '7px Share Tech Mono, monospace';
+      ctx.fillStyle = 'rgba(255,80,80,0.8)';
+      ctx.fillText('DORMANT', sc.x, sc.y + sz + 26);
+
+      ctx.restore();
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      return;
+    }
+
+    // ── ACTIVE starbase: normal blue rendering ─────────────
+
+    const alpha     = vis ? 1.0 : 0.4;
     const baseColor = sb.isCapital ? '#ffd700' : '#00b4ff';
     const glowColor = sb.isCapital ? 'rgba(255,215,0,' : 'rgba(0,180,255,';
 

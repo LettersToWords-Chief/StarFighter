@@ -50,7 +50,8 @@ class SupplyShip {
     this.state      = 'recharge';
     this.stateTimer = rechargeTime * (startIndex / Math.max(path.length - 1, 1));
 
-    this.health      = 100;
+    this.health      = GameConfig.supplyShip.maxHealth; // 1000 HP
+    this.destroyed   = false;
     this.underAttack = false;
 
     // Visual
@@ -70,12 +71,13 @@ class SupplyShip {
   }
 
   get rechargeTime() {
-    return this.baseRecharge * (1 + (1 - this.health / 100) * 1.5);
+    const healthFrac = this.health / (GameConfig.supplyShip.maxHealth ?? 1000);
+    return this.baseRecharge * (1 + (1 - healthFrac) * 1.5);
   }
 
   get colorState() {
-    if (this.underAttack || this.health < 25) return 'critical';
-    if (this.health < 60)                     return 'damaged';
+    if (this.underAttack || this.health < 250) return 'critical';
+    if (this.health < 600)                     return 'damaged';
     return 'normal';
   }
 
@@ -100,6 +102,31 @@ class SupplyShip {
     if (this.state === 'docked') {
       this.stateTimer -= dt;
       if (this.stateTimer <= 0) {
+        // Dock complete: drone has returned — apply pending fuel AND repair
+        if (this._pendingFuelDelivery > 0 && this.outerBase?.inventory) {
+          this.outerBase.inventory.energy = Math.min(
+            this.outerBase.target?.energy ?? Infinity,
+            (this.outerBase.inventory.energy ?? 0) + this._pendingFuelDelivery
+          );
+          this._pendingFuelDelivery = 0;
+        }
+        // Apply pending repair (out-of-sector: no drone animation, apply here)
+        if (this._pendingRepairHp > 0) {
+          this.health = Math.min(GameConfig.supplyShip.maxHealth, this.health + this._pendingRepairHp);
+          this._pendingRepairHp = 0;
+          if (GameConfig.testMode) {
+            const sid = this.outerBase?.name || this.resource || 'CARGO';
+            const clk = window.SubspaceComm?.clockStr?.() || '?';
+            window.SubspaceComm?.send('CARGO RPR', clk, `[${sid}]  HP: ${this.health}/1000`);
+          }
+        }
+
+        // Load raws for return trip (only from active base)
+        if (this.outerBase?.state === 'active') {
+          this.cargo = this.outerBase.buildDepartureCargo('inbound');
+        } else {
+          this.cargo = {};
+        }
         this.forward    = !this.forward;
         this.state      = 'recharge';
         this.stateTimer = this.rechargeTime;
@@ -166,20 +193,49 @@ class SupplyShip {
    * path[last index] = outer base end
    */
   _handleDock() {
+    if (this.destroyed) return; // destroyed ships don't dock
+
+    // ── Parts for repair are loaded onto the drone at dock time ──
+    // Applied when the drone returns (in SectorView) or at dock-end (out-of-sector).
+    const SS   = GameConfig.supplyShip;
+    const maxH = SS.maxHealth;
+    this._pendingRepairHp = 0;
+    if (this.health < maxH) {
+      const atCap = this.pathIndex === 0;
+      const base  = atCap ? this.capital : this.outerBase;
+      const inv   = base?.inventory;
+      if (inv) {
+        const hpNeeded  = maxH - this.health;
+        const partsNeed = Math.ceil(hpNeeded / SS.repairCostPerPart);
+        const partsHave = Math.floor(inv.spareParts ?? 0);
+        const partsUsed = Math.min(partsNeed, partsHave);
+        if (partsUsed > 0) {
+          inv.spareParts       = partsHave - partsUsed; // parts leave base on the drone
+          this._pendingRepairHp = partsUsed * SS.repairCostPerPart;
+        }
+      }
+    }
+
     const atCapital   = this.pathIndex === 0;
-    const routeHops   = this.path.length - 1;       // full one-way distance
+    const routeHops   = this.path.length - 1;
     const fuelPerHop  = GameConfig.supplyShip.energyPerJump ?? 100;
-    const returnCost  = routeHops * fuelPerHop;     // fuel needed to get back
+    const returnCost  = routeHops * fuelPerHop;
 
     if (atCapital && this.capital) {
-      // ── Arrived at capital: deliver raws, load manufactured goods, refuel ──
+      // ── Arrived at capital: deliver raws, refuel ──
       if (Object.keys(this.cargo).length) {
         this.capital.receiveDelivery(this.cargo);
       }
-      this.cargo = this.capital.buildDepartureCargo('outbound');
+
+      // Only load outbound cargo if the outer base is still active
+      if (this.outerBase?.state === 'active') {
+        this.cargo = this.capital.buildDepartureCargo('outbound');
+      } else {
+        this.cargo = {}; // outer base dormant — idle at capital, carry nothing out
+      }
 
       // Refuel from capital energy stock (respect strategic reserve)
-      const reserve  = GameConfig.capital.strategicReserve.energy ?? 10000;
+      const reserve   = GameConfig.capital.strategicReserve.energy ?? 10000;
       const capEnergy = this.capital.inventory.energy ?? 0;
       const available = Math.max(0, capEnergy - reserve);
       const needed    = GameConfig.supplyShip.fuelCapacity - this.fuel;
@@ -188,22 +244,23 @@ class SupplyShip {
       this.fuel += refuel;
 
     } else if (!atCapital && this.outerBase) {
-      // ── Arrived at outer base: deliver goods + surplus fuel, load raws ──
-      if (Object.keys(this.cargo).length) {
+      const baseActive = this.outerBase.state === 'active';
+
+      // Deliver manufactured cargo on arrival (active bases only)
+      if (baseActive && Object.keys(this.cargo).length) {
         this.outerBase.receiveDelivery(this.cargo);
       }
+      this.cargo = {};
 
-      // Deliver surplus fuel (keep only what's needed for the return trip)
+      // Store fuel surplus as pending — applied at dock end (drone return)
       const surplus = Math.max(0, this.fuel - returnCost);
-      if (surplus > 0 && this.outerBase.inventory) {
-        this.outerBase.inventory.energy = Math.min(
-          this.outerBase.target?.energy ?? Infinity,
-          (this.outerBase.inventory.energy ?? 0) + surplus
-        );
+      if (surplus > 0) {
+        this._pendingFuelDelivery = surplus;
         this.fuel -= surplus;
+      } else {
+        this._pendingFuelDelivery = 0;
       }
-
-      this.cargo = this.outerBase.buildDepartureCargo('inbound');
+      // Note: raws are loaded at dock END (see update() stateTimer <= 0 above)
     }
   }
 

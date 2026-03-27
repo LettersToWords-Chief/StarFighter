@@ -208,6 +208,9 @@ const SectorView = (() => {
   // Camera-local attach point: lower-right as if docking with ship belly
   const PLUG_CAM_LOCAL = new THREE.Vector3(1.8, -1.2, -2.8);
   let _dockState  = 'idle'; // 'idle'|'outbound'|'connected'|'returning'|'done'
+  let _dockIsKickstart       = false;
+  let _kickstartPending       = false;
+  let _starbaseDormantNotified = false; // fires sector alert once when SB goes dormant
   let _plugMesh   = null;
   let _plugEndPos = new THREE.Vector3(); // world-space attach point (lower-right of view)
   let _connectTimer = 0;
@@ -248,6 +251,8 @@ const SectorView = (() => {
           _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
           _plugMesh.position.copy(SB_POS);
           _plugMesh.visible = true;
+          // Choose dock type based on starbase state
+          _dockIsKickstart = (_currentStarbase?.state === 'dormant');
           _dockState = 'outbound';
         }
       }
@@ -685,7 +690,7 @@ const SectorView = (() => {
     _sbShieldDmgCooldown = Math.max(0, _sbShieldDmgCooldown - dt);
 
     // Health-driven base color (cyan → orange → red)
-    const sbHP = 100; // placeholder until Zylon attacks are wired in
+    const sbHP = _currentStarbase ? Math.round(_currentStarbase.shieldCharge / 10) : 100;
     const healthT = sbHP / 100;
     const baseCol = healthT > 0.5
       ? new THREE.Color().lerpColors(new THREE.Color(0xff8800), new THREE.Color(0x00aaff), (healthT - 0.5) * 2)
@@ -705,23 +710,64 @@ const SectorView = (() => {
     outer.material.opacity = 0.025 * healthT + _sbShieldFlash * 0.08;
 
     inner.visible = outer.visible = sbHP > 0;
-    if (sbHP <= 0) return;
+    if (sbHP <= 0) {
+      // Shields depleted — hide bubble, but still enforce hull solidity below
+    } else {
+      // Shield bubble collision — only when shields are charged
+      if (!_warpDebursting) {
+        const dist = _camera.position.distanceTo(SB_POS);
+        if (dist < SHIELD_R) {
+          const pushDir = _camera.position.clone().sub(SB_POS);
+          if (pushDir.lengthSq() < 0.001) pushDir.set(0, 0, 1);
+          pushDir.normalize();
+          _camera.position.copy(SB_POS).addScaledVector(pushDir, SHIELD_R + 1);
+          if (_sbShieldDmgCooldown <= 0) {
+            _applyPlayerHit(SHIELD_DAMAGE);
+            _sbShieldFlash       = 1.0;
+            _sbShieldDmgCooldown = SHIELD_CD;
+          }
+        }
+      }
+    }
 
-    // Player collision — suppressed during warp arrival decel so player warps through shield
-    if (_warpDebursting) return;
-    const dist = _camera.position.distanceTo(SB_POS);
-    if (dist < SHIELD_R) {
-      // Push camera to shield surface
-      const pushDir = _camera.position.clone().sub(SB_POS);
-      if (pushDir.lengthSq() < 0.001) pushDir.set(0, 0, 1);
-      pushDir.normalize();
-      _camera.position.copy(SB_POS).addScaledVector(pushDir, SHIELD_R + 1);
+    // ── Physical structure collision (when shields are down or always for the hull) ──
+    if (!_warpDebursting) {
+      const rel   = _camera.position.clone().sub(SB_POS); // player relative to base center
+      const HUB_R = 26;   // octahedron (~21u) + player body (~5u)
+      const RING_MAJOR = 47.5;  // torus major radius (ring centre-line)
+      const RING_TUBE  = 7;     // torus tube radius (2u ring + 5u player)
+      const shieldsDown = (_currentStarbase?.shieldCharge ?? 1000) < 1;
 
-      // Damage player (rate-limited)
-      if (_sbShieldDmgCooldown <= 0) {
-        _applyPlayerHit(SHIELD_DAMAGE);
-        _sbShieldFlash       = 1.0;
-        _sbShieldDmgCooldown = SHIELD_CD;
+      // ── Hub (central diamond) ──
+      const hubDist = rel.length();
+      if (hubDist < HUB_R) {
+        const pushDir = hubDist > 0.001 ? rel.clone().normalize() : new THREE.Vector3(0, 0, 1);
+        _camera.position.copy(SB_POS).addScaledVector(pushDir, HUB_R + 1);
+        if (shieldsDown && _sbShieldDmgCooldown <= 0) {
+          _applyPlayerHit(SHIELD_DAMAGE);
+          _sbShieldDmgCooldown = SHIELD_CD;
+        }
+      }
+
+      // ── Ring (torus in XZ plane) ──
+      // Nearest point on ring centre-line: project onto XZ, scale to RING_MAJOR
+      const flatX = rel.x, flatZ = rel.z;
+      const flatDist = Math.sqrt(flatX * flatX + flatZ * flatZ);
+      if (flatDist > 0.001) {
+        // Point on ring centreline closest to player
+        const cx = (flatX / flatDist) * RING_MAJOR + SB_POS.x;
+        const cy = SB_POS.y;
+        const cz = (flatZ / flatDist) * RING_MAJOR + SB_POS.z;
+        const toRing = _camera.position.clone().sub(new THREE.Vector3(cx, cy, cz));
+        const ringDist = toRing.length();
+        if (ringDist < RING_TUBE) {
+          const pushDir = ringDist > 0.001 ? toRing.clone().normalize() : new THREE.Vector3(0, 1, 0);
+          _camera.position.copy(new THREE.Vector3(cx, cy, cz)).addScaledVector(pushDir, RING_TUBE + 1);
+          if (shieldsDown && _sbShieldDmgCooldown <= 0) {
+            _applyPlayerHit(SHIELD_DAMAGE);
+            _sbShieldDmgCooldown = SHIELD_CD;
+          }
+        }
       }
     }
   }
@@ -757,7 +803,21 @@ const SectorView = (() => {
       _plugMesh.position.copy(_plugEndPos);
       _connectTimer -= dt;
       if (_connectTimer <= 0) {
-        _repairAndRefuel();
+        if (_dockIsKickstart) {
+          // Deduct energy from player now — starbase receives it when drone returns
+          const needed = GameConfig.zylon.starbaseKickstartEnergy;
+          if (_energy >= needed && _currentStarbase) {
+            _energy -= needed;
+            _kickstartPending = true;
+          } else {
+            if (typeof showMessage === 'function') {
+              showMessage('DOCK FAILED', `INSUFFICIENT ENERGY — NEED ${needed}E`);
+            }
+            _kickstartPending = false;
+          }
+        } else {
+          _repairAndRefuel();
+        }
         _dockState = 'returning';
       }
 
@@ -766,6 +826,14 @@ const SectorView = (() => {
       if (toSB.length() < 1) {
         _plugMesh.position.copy(SB_POS);
         _plugMesh.visible = false;
+        // If kickstart was pending, apply it now that the drone has returned
+        if (_kickstartPending && _currentStarbase) {
+          _currentStarbase.kickstart();
+          _kickstartPending = false;
+          if (typeof showMessage === 'function') {
+            showMessage('STARBASE RESTORED', `${_currentStarbase.name.toUpperCase()} BACK ONLINE`);
+          }
+        }
         _dockState = 'done';
       } else {
         _plugMesh.position.addScaledVector(toSB.normalize(), DRONE_SPEED * dt);
@@ -919,8 +987,39 @@ const SectorView = (() => {
     _updateCannons(dt);
     _updateCargoDrones(dt);
     _updateZylons(dt);
+    // Tick the current starbase so its shield recharge drains energy in real-time
+    if (_currentStarbase && !_currentStarbase.isCapital) {
+      _currentStarbase.tick(dt);
+    }
+    // One-shot dormant notification when starbase transitions while player is in sector
+    if (_hasStarbase && _currentStarbase && !_starbaseDormantNotified
+        && _currentStarbase.state === 'dormant') {
+      _starbaseDormantNotified = true;
+      _sbShieldMeshes.forEach(m => { m.visible = false; });
+      // Purge any in-flight shield impact animations immediately
+      for (const imp of _shieldImpacts) {
+        _scene?.remove(imp.ring);
+        _scene?.remove(imp.light);
+      }
+      _shieldImpacts.length = 0;
+      if (typeof showMessage === 'function') {
+        showMessage('SHIELDS FAILED',
+          `${_currentStarbase.name.toUpperCase()} OFFLINE — DOCK TO RESTORE`);
+      }
+    }
+    // If base was restored (e.g. cargo ship), reset flag and re-show shields
+    if (_starbaseDormantNotified && _currentStarbase?.state === 'active') {
+      _starbaseDormantNotified = false;
+      _sbShieldMeshes.forEach(m => { m.visible = true; });
+      if (typeof showMessage === 'function') {
+        showMessage('SHIELDS RESTORED',
+          `${_currentStarbase.name.toUpperCase()} BACK ONLINE`);
+      }
+    }
+
     _updateCargoShips(dt);
     _checkAsteroidCollision();
+    _checkCargoCollisions();
     if (_hitFlash  > 0) _hitFlash  -= dt;
     if (_fireFlash > 0) _fireFlash -= dt;
 
@@ -937,10 +1036,48 @@ const SectorView = (() => {
       _energySampleTimer -= 1.0;
     }
 
-    _renderer.render(_scene, _camera);
+    if (_renderer && _scene) _renderer.render(_scene, _camera);
     _drawHUD();
     if (_lrsOn) _drawLRS();
+    if (GameConfig.testMode && _hasStarbase && _currentStarbase) _drawStarbaseDebug();
     if (_entryTimer > 0) _entryTimer -= dt;
+  }
+
+  function _drawStarbaseDebug() {
+    const oc = _overlayCtx; if (!oc || !_currentStarbase) return;
+    const sb = _currentStarbase;
+    const energy    = sb.inventory?.energy ?? 0;
+    const energyOn  = energy >= 1;
+    const shieldChg = sb.shieldCharge ?? 0;
+    const shieldsOn = shieldChg >= 1;
+    const status    = sb.state ?? '?';
+
+    const lines = [
+      `SB: ${sb.name}`,
+      `ENERGY : ${Math.floor(energy)}  [${energyOn ? 'ON' : 'OFF'}]`,
+      `SHIELDS: ${Math.floor(shieldChg)}  [${shieldsOn ? 'ON' : 'OFF'}]`,
+      `STATUS : ${status.toUpperCase()}`,
+    ];
+
+    const pad = 10, lh = 16, panW = 210, panH = pad * 2 + lh * lines.length;
+    const x = 10, y = 10;
+
+    oc.save();
+    oc.fillStyle = 'rgba(0,0,0,0.65)';
+    oc.fillRect(x, y, panW, panH);
+    oc.strokeStyle = energyOn ? '#00ff88' : '#ff4444';
+    oc.lineWidth = 1;
+    oc.strokeRect(x, y, panW, panH);
+
+    oc.font = '11px Share Tech Mono, monospace';
+    oc.textAlign = 'left'; oc.textBaseline = 'top';
+    lines.forEach((line, i) => {
+      const isOff = line.includes('[OFF]');
+      const isDormant = line.includes('DORMANT');
+      oc.fillStyle = isOff || isDormant ? '#ff4444' : '#00ff88';
+      oc.fillText(line, x + pad, y + pad + i * lh);
+    });
+    oc.restore();
   }
 
   function _updateFlight(dt) {
@@ -1404,7 +1541,32 @@ const SectorView = (() => {
             break;
           }
         }
+        // Player torpedo → starbase shield (only when shields are charged)
+        if (!hit && _hasStarbase && _currentStarbase?.state === 'active' && _currentStarbase.shieldCharge >= 1) {
+          if (t.pos.distanceTo(SB_POS) < SHIELD_R + 4) {
+            _currentStarbase.hitByPhoton();
+            _spawnShieldImpact(t.pos.clone());
+            _sbShieldFlash = 1.0;
+            hit = true;
+            // Check if the hit just caused the base to go dormant
+            if (_currentStarbase.state === 'dormant') {
+              _sbShieldMeshes.forEach(m => { m.visible = false; });
+              if (typeof showMessage === 'function') {
+                showMessage('SHIELDS FAILED', _currentStarbase.name.toUpperCase() + ' OFFLINE — DOCK TO RESTORE');
+              }
+            }
+          }
+        }
+        // Player torpedo → starbase hull (when shields are down)
+        if (!hit && _hasStarbase && _currentStarbase
+            && (_currentStarbase.shieldCharge ?? 1000) < 1
+            && t.pos.distanceTo(SB_POS) < 75) {
+          _spawnExplosion(t.pos.clone(),
+            { scale: 0.5, debris: 4, fireColor: 0x886644, debrisColor: 0x555555 });
+          hit = true;
+        }
         // Player torpedo → Zylon ships
+
         if (!hit) {
           for (const z of _zylons) {
             if (z.dead) continue;
@@ -1420,14 +1582,39 @@ const SectorView = (() => {
             }
           }
         }
-        // Player torpedo → cargo ships (friendly fire)
+        // Player torpedo → cargo ships
         if (!hit) {
           for (let ci = _cargoShips.length - 1; ci >= 0; ci--) {
             if (t.pos.distanceTo(_cargoShips[ci].pos) < 8) {
-              _spawnExplosion(_cargoShips[ci].pos.clone(),
-                { scale: 2, debris: 8, fireColor: 0xff6600, debrisColor: 0xff4400 });
-              _removeCargoMesh(_cargoShips[ci].mesh);
-              _cargoShips.splice(ci, 1);
+              const cs        = _cargoShips[ci];
+              const dmg       = GameConfig.supplyShip.torpedoDamage ?? 100;
+              const shipId    = cs.ship.outerBase?.name || cs.ship.resource || 'CARGO';
+              cs.ship.health  = Math.max(0, (cs.ship.health ?? 1000) - dmg);
+              if (cs.ship.health <= 0) {
+                // Destroyed — permanent
+                cs.ship.destroyed              = true;
+                cs.ship.forward               = !cs.ship.forward;
+                cs.ship.state                 = 'departing';
+                cs.ship.stateTimer            = 0.1;
+                cs.ship._pendingFuelDelivery  = 0;
+                cs.ship._pendingRepairHp      = 0;
+                if (GameConfig.testMode) {
+                  const clk = window.SubspaceComm?.clockStr?.() || '?';
+                  window.SubspaceComm?.send('CARGO LOST', clk, `[${shipId}] SHIP DESTROYED`);
+                }
+                _spawnExplosion(cs.pos.clone(),
+                  { scale: 2, debris: 8, fireColor: 0xff6600, debrisColor: 0xff4400 });
+                _removeCargoMesh(cs.mesh);
+                _cargoShips.splice(ci, 1);
+              } else {
+                // Damaged but alive — small hit flash
+                if (GameConfig.testMode) {
+                  const clk = window.SubspaceComm?.clockStr?.() || '?';
+                  window.SubspaceComm?.send('CARGO HIT', clk, `[${shipId}]  HP: ${cs.ship.health}/1000`);
+                }
+                _spawnExplosion(cs.pos.clone(),
+                  { scale: 0.6, debris: 2, fireColor: 0xff8800, debrisColor: 0xcc6600 });
+              }
               hit = true; break;
             }
           }
@@ -1436,6 +1623,10 @@ const SectorView = (() => {
         if (!hit) {
           for (let di = _cargoDrones.length - 1; di >= 0; di--) {
             if (t.pos.distanceTo(_cargoDrones[di].pos) < 5) {
+              // Parts on this drone are lost
+              if (_cargoDrones[di].cargoShip?.ship) {
+                _cargoDrones[di].cargoShip.ship._pendingRepairHp = 0;
+              }
               _spawnExplosion(_cargoDrones[di].pos.clone(),
                 { scale: 1, debris: 0, fireColor: 0xff8800, debrisColor: 0 });
               _removeCargoMesh(_cargoDrones[di].mesh);
@@ -1453,14 +1644,7 @@ const SectorView = (() => {
             hit = true;
           }
         }
-        // Player torpedo → starbase shield
-        if (!hit && _hasStarbase && _sbShieldMeshes.length > 0) {
-          if (t.pos.distanceTo(SB_POS) < SHIELD_R) {
-            _sbShieldFlash = 1.0;
-            _spawnShieldImpact(t.pos.clone());
-            hit = true;
-          }
-        }
+
       }
 
       if (t.life <= 0 || hit) {
@@ -1476,7 +1660,6 @@ const SectorView = (() => {
       const ast = _asteroids[i];
       const dist = _camera.position.distanceTo(ast.pos);
       if (dist < ast.radius + 6) {
-        // Destroy the rock — ship punches through it
         _spawnExplosion(ast.pos.clone(),
           { scale: ast.radius / 10, debris: 5, fireColor: 0xaa8855, debrisColor: 0x887755 });
         if (ast.mesh) _scene.remove(ast.mesh);
@@ -1486,31 +1669,83 @@ const SectorView = (() => {
     }
   }
 
+  function _checkCargoCollisions() {
+    const SHIP_R  = 6;   // hull half-diagonal
+    const DRONE_R = 3;   // drone glow zone
+    const COLLISION_DMG = 100;
+
+    // ── Cargo ships ──
+    for (let i = _cargoShips.length - 1; i >= 0; i--) {
+      const cs = _cargoShips[i];
+      if (_camera.position.distanceTo(cs.pos) < SHIP_R) {
+        const shipId = cs.ship.outerBase?.name || cs.ship.resource || 'CARGO';
+        // Deal collision damage to the cargo ship
+        cs.ship.health = Math.max(0, cs.ship.health - COLLISION_DMG);
+        _spawnExplosion(cs.pos.clone(),
+          { scale: 1.2, debris: 4, fireColor: 0xff8800, debrisColor: 0xcc4400 });
+        if (cs.ship.health <= 0) {
+          cs.ship.destroyed             = true;
+          cs.ship.forward              = !cs.ship.forward;
+          cs.ship.state                = 'departing';
+          cs.ship.stateTimer           = 0.1;
+          cs.ship._pendingFuelDelivery = 0;
+          cs.ship._pendingRepairHp     = 0;
+          if (GameConfig.testMode) {
+            const clk = window.SubspaceComm?.clockStr?.() || '?';
+            window.SubspaceComm?.send('CARGO LOST', clk, `[${shipId}] DESTROYED — COLLISION`);
+          }
+          _spawnExplosion(cs.pos.clone(),
+            { scale: 2, debris: 8, fireColor: 0xff6600, debrisColor: 0xff4400 });
+          _removeCargoMesh(cs.mesh);
+          _cargoShips.splice(i, 1);
+        } else if (GameConfig.testMode) {
+          const clk = window.SubspaceComm?.clockStr?.() || '?';
+          window.SubspaceComm?.send('CARGO COLL', clk, `[${shipId}]  HP: ${cs.ship.health}/1000`);
+        }
+        _applyPlayerHit(COLLISION_DMG);
+      }
+    }
+
+    // ── Cargo drones ──
+    for (let i = _cargoDrones.length - 1; i >= 0; i--) {
+      const d = _cargoDrones[i];
+      if (_camera.position.distanceTo(d.pos) < DRONE_R) {
+        // Cancel pending repair — parts are scattered
+        if (d.cargoShip?.ship) d.cargoShip.ship._pendingRepairHp = 0;
+        _spawnExplosion(d.pos.clone(),
+          { scale: 0.5, debris: 2, fireColor: 0xff8800, debrisColor: 0 });
+        _removeCargoMesh(d.mesh);
+        _cargoDrones.splice(i, 1);
+        _applyPlayerHit(COLLISION_DMG);
+      }
+    }
+  }
+
   // ---- Cargo ship 3D presence ----
   function _buildCargoShipMesh() {
     const group = new THREE.Group();
-    // Main hull — small flat freighter
+    // Main hull — light steel grey freighter
     group.add(Object.assign(new THREE.Mesh(
       new THREE.BoxGeometry(3, 1, 5),
-      new THREE.MeshLambertMaterial({ color: 0x445566 })
+      new THREE.MeshLambertMaterial({ color: 0xaabbcc })
     ), { name: 'hull' }));
     // Bridge module on top/front
     const bridge = new THREE.Mesh(
       new THREE.BoxGeometry(1.5, 0.8, 1.8),
-      new THREE.MeshLambertMaterial({ color: 0x223344 })
+      new THREE.MeshLambertMaterial({ color: 0x6688aa })
     );
     bridge.position.set(0, 0.9, -1.5);
     group.add(bridge);
     // Engine glow — rear
-    const eng = new THREE.PointLight(0x4488ff, 1.5, 20);
+    const eng = new THREE.PointLight(0x4488ff, 2.5, 30);
     eng.position.set(0, 0, 2.5);
     eng.name = 'EngineLight';
     group.add(eng);
     // Running lights
-    const port = new THREE.PointLight(0xff2222, 0.3, 8);
+    const port = new THREE.PointLight(0xff2222, 0.5, 10);
     port.position.set(-1.5, 0, 0);
     group.add(port);
-    const stbd = new THREE.PointLight(0x22ff22, 0.3, 8);
+    const stbd = new THREE.PointLight(0x22ff22, 0.5, 10);
     stbd.position.set(1.5, 0, 0);
     group.add(stbd);
     return group;
@@ -1595,7 +1830,7 @@ const SectorView = (() => {
         const dist     = toTarget.length();
         if (dist < 4) {
           cs.phase = 'docked'; cs.phaseTimer = SS.dockTime;
-          _spawnCargoDrone(cs.pos.clone()); // send drone to service this ship
+          _spawnCargoDrone(cs); // send drone to service this ship
         } else {
           const dir = toTarget.normalize();
           cs.pos.addScaledVector(dir, Math.min(spd * dt, dist));
@@ -1649,6 +1884,7 @@ const SectorView = (() => {
       const knownShips = new Set(_cargoShips.map(cs => cs.ship));
       for (const ship of _allSupplyShips) {
         if (knownShips.has(ship)) continue;
+        if (ship.destroyed) continue;              // permanently gone
         const h = ship.currentHex;
         if (!h || h.q !== _sectorQ || h.r !== _sectorR) continue;
         const mesh   = _buildCargoShipMesh();
@@ -1681,17 +1917,18 @@ const SectorView = (() => {
     return g;
   }
 
-  function _spawnCargoDrone(shipPos) {
+  function _spawnCargoDrone(cs) {
     if (!_scene || !_hasStarbase) return;
     const mesh = _buildCargoDroneMesh();
     mesh.position.copy(SB_POS);
     _scene.add(mesh);
     _cargoDrones.push({
       mesh,
-      pos:     SB_POS.clone(),
-      target:  shipPos.clone(),
-      state:   'flying_to',
-      timer:   0,
+      pos:       SB_POS.clone(),
+      target:    cs.pos.clone(),
+      cargoShip: cs,          // reference so drone can apply fuel on return
+      state:     'flying_to',
+      timer:     0,
     });
   }
 
@@ -1718,6 +1955,27 @@ const SectorView = (() => {
         const toSB = SB_POS.clone().sub(d.pos);
         const dist  = toSB.length();
         if (dist < 3) {
+          // Drone arrived back at starbase — apply pending fuel AND repair
+          const pending = d.cargoShip?.ship?._pendingFuelDelivery ?? 0;
+          if (pending > 0 && _currentStarbase?.inventory) {
+            _currentStarbase.inventory.energy = Math.min(
+              _currentStarbase.target?.energy ?? Infinity,
+              (_currentStarbase.inventory.energy ?? 0) + pending
+            );
+            d.cargoShip.ship._pendingFuelDelivery = 0;
+          }
+          // Apply pending repair (parts were on this drone)
+          const repairHp = d.cargoShip?.ship?._pendingRepairHp ?? 0;
+          if (repairHp > 0 && d.cargoShip?.ship) {
+            const maxH = GameConfig.supplyShip.maxHealth;
+            d.cargoShip.ship.health = Math.min(maxH, (d.cargoShip.ship.health ?? maxH) + repairHp);
+            d.cargoShip.ship._pendingRepairHp = 0;
+            if (GameConfig.testMode) {
+              const sid = d.cargoShip.ship.outerBase?.name || d.cargoShip.ship.resource || 'CARGO';
+              const clk = window.SubspaceComm?.clockStr?.() || '?';
+              window.SubspaceComm?.send('CARGO RPR', clk, `[${sid}]  HP: ${d.cargoShip.ship.health}/1000`);
+            }
+          }
           toRem.push(i);
         } else {
           d.pos.addScaledVector(toSB.normalize(), Math.min(spd * dt, dist));
