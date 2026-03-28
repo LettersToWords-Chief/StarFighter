@@ -38,11 +38,9 @@ class ZylonSeeker {
     this.target  = null;         // tracked cargo ship { q, r } or sector
     this.alive   = true;
 
-    // Galaxy-move timer
+    // Galaxy-move timer — interval set dynamically in tick() based on red-alert state
     this._moveTimer    = 0;
-    this._moveInterval = GameConfig.testMode
-      ? GameConfig.zylon.seekerMoveIntervalSecTest   // 3 s — real-time observation
-      : GameConfig.zylon.seekerMoveIntervalSec;      // 45 s — normal gameplay
+    this._moveInterval = GameConfig.zylon.seekerMoveIntervalSecTest; // starts fast
 
     // In-sector combat (managed by SectorView when player is present)
     this.hp        = 1;        // one hit and they die
@@ -60,6 +58,11 @@ class ZylonSeeker {
     if (!this.alive) return;
     if (this.state === 'GUARDING' || this.state === 'FALLBACK') return;
     if (this.inCombat) return;
+
+    // Switch to normal warp interval once red alert is active
+    this._moveInterval = (GameConfig.testMode && !galaxy.redAlert)
+      ? GameConfig.zylon.seekerMoveIntervalSecTest
+      : GameConfig.zylon.seekerMoveIntervalSec;
 
     this._moveTimer += dt;
     if (this._moveTimer < this._moveInterval) return;

@@ -715,16 +715,6 @@ class GalaxyMap {
 
   /** Tick all Zylon units. Called every frame (and during fast-forward). */
   _updateZylons(dt) {
-    // Test mode: freeze the moment a starbase beacon is placed (game-start state)
-    if (GameConfig.testMode && !this._testFrozen) {
-      if (this.zylonBeacons.some(b => b.active && b.type === 'starbase')) {
-        this._testFrozen = true;
-        console.log('[TEST MODE] Red Alert condition reached — AI frozen.');
-        return;
-      }
-    }
-    if (this._testFrozen) return;
-
     for (const spawner of this.zylonSpawners) {
       spawner.tick(dt, this);
     }
