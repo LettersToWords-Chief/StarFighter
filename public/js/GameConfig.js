@@ -308,6 +308,30 @@ const GameConfig = Object.freeze({
     maxSeekerPairsPerSpawner:    12,
     maxWarriorPairsPerSpawner:   12,
     maxSubSpawnersPerSpawner:     2,
+
+    // ---- Sector combat ----
+    // Seeker
+    seekerHP:                    25,   // 1 hit to kill
+
+    // Warrior shield model
+    warriorShieldMax:           300,
+    warriorShieldRegenPerSec:    50,
+    warriorShieldZone1:         150,  // above this: 100% absorption
+    warriorShieldBleedPct:     0.25,  // below zone1: fraction that bleeds to generator
+    warriorGeneratorHP:         100,  // when depleted: regen stops permanently
+    warriorHullHP:              185,  // hull after generator destroyed; 1 shot kills
+
+    // Torpedo
+    torpedoDamage:              185,  // player torpedo dmg to Zylon ships
+    zylonTorpedoDamage:         185,  // Zylon torpedo dmg to player
+    zylonTorpedoSpeed:          160,  // u/s  (slower than player's 200)
+    zylonTorpedoColor:     0xff4400, // orange-red
+    zylonFireCooldownMin:       1.5,  // seconds
+    zylonFireCooldownMax:       3.0,
+
+    // Flight
+    zylonBaseSpeed:               8,  // u/s — keeps pace with player throttle 3 (6 u/s)
+    zylonPassRange:              12,  // break-off distance when approaching player
   },
 
   // =========================================================

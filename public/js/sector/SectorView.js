@@ -1479,7 +1479,7 @@ const SectorView = (() => {
       const z = _zylons[i];
       if (z.dead) { _zylons.splice(i, 1); continue; }
       anyAlive = true;
-      const torp = z.update(dt, playerPos);
+      const torp = z.update(dt, playerPos, _currentVelocity);
       if (torp) {
         // Spawn Zylon torpedo (orange)
         _spawnZylonTorpedo(torp.pos, torp.vel);
@@ -1799,7 +1799,7 @@ const SectorView = (() => {
       if (t.isZylon) {
         // Zylon torpedo → player (camera)
         if (t.pos.distanceTo(_camera.position) < 18) {
-          _applyPlayerHit(25);
+          _applyPlayerHit(GameConfig.zylon.zylonTorpedoDamage);
           hit = true;
         }
       } else {
@@ -1844,7 +1844,10 @@ const SectorView = (() => {
           for (const z of _zylons) {
             if (z.dead) continue;
             if (t.pos.distanceTo(z.position) < 22) {
-              const destroyed = z.takeDamage(25);
+              const destroyed = z.takeDamage(GameConfig.zylon.torpedoDamage);
+              _spawnExplosion(t.pos.clone(),
+                { scale: destroyed ? 1.5 : 0.5, debris: destroyed ? 6 : 2,
+                  fireColor: 0xff4400, debrisColor: 0xcc2200 });
               if (destroyed) {
                 z.destroy();
                 _kills++;
@@ -3143,7 +3146,8 @@ const SectorView = (() => {
     _buildScene();
     _spawnCargoShips(sector?.supplyShips || []);
 
-    // Spawn Zylons after scene is built
+    // Spawn Zylons after scene is built — mix of seekers (tie/bird) and warriors
+    const seekerTypes = ['seeker_tie', 'seeker_bird'];
     for (let i = 0; i < zylonCount; i++) {
       const angle = (i / zylonCount) * Math.PI * 2 + Math.random() * 0.5;
       const dist  = 350 + Math.random() * 400;
@@ -3152,7 +3156,9 @@ const SectorView = (() => {
         (Math.random() - 0.5) * 200,
         Math.sin(angle) * dist,
       );
-      _zylons.push(new ZylonShip(_scene, startPos));
+      // Every 3rd ship is a warrior; others alternate seeker types
+      const type = (i % 3 === 2) ? 'warrior' : seekerTypes[i % 2];
+      _zylons.push(new ZylonShip(_scene, startPos, type));
     }
 
     // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
@@ -3289,14 +3295,20 @@ const SectorView = (() => {
     }
   }
 
-  /** Directly set Zylon count in current sector (for testing / galaxy map events) */
-  function spawnZylons(count) {
+  /** Spawn Zylon ships of mixed types for testing or galaxy-map triggers */
+  function spawnZylons(count, forceType) {
     if (!_scene || !_running) return;
+    const types = ['seeker_tie', 'seeker_bird', 'warrior'];
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
       const dist  = 350 + Math.random() * 400;
-      const pos = new THREE.Vector3(Math.cos(angle)*dist, (Math.random()-0.5)*200, Math.sin(angle)*dist);
-      _zylons.push(new ZylonShip(_scene, pos));
+      const pos   = new THREE.Vector3(
+        Math.cos(angle) * dist,
+        (Math.random() - 0.5) * 200,
+        Math.sin(angle) * dist);
+      // forceType overrides; otherwise alternate seeker types for first 2/3, warrior for last 1/3
+      const type = forceType ?? (i % 3 === 2 ? 'warrior' : types[i % 2]);
+      _zylons.push(new ZylonShip(_scene, pos, type));
     }
     _targets  += count;
     _redAlert  = true;
