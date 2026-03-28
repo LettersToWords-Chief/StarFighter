@@ -184,6 +184,8 @@ const SectorView = (() => {
 
   // ---- Zylon ships ----
   let _zylons = [];  // ZylonShip instances
+  let _beaconMesh = null; // Zylon beacon 3D object
+  let _beaconPos  = new THREE.Vector3(); // world position of beacon in sector
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -1536,6 +1538,36 @@ const SectorView = (() => {
     if (ring)  ring.rotation.z  = t * 0.28;
     if (ringW) ringW.rotation.z = t * 0.28;
     _sbGroup.rotation.y = t * 0.05;
+    // Rotate beacon
+    if (_beaconMesh) {
+      _beaconMesh.rotation.y = t * 0.5;
+      _beaconMesh.rotation.x = t * 0.3;
+    }
+  }
+
+  function _buildBeaconMesh() {
+    const g = new THREE.Group();
+    // Dark red outer shell
+    const outer = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8, 0),
+      new THREE.MeshBasicMaterial({ color: 0x440000, wireframe: false }));
+    g.add(outer);
+    // Red wireframe over shell
+    const wf = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8.1, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true }));
+    g.add(wf);
+    // Sickly green inner glow core
+    const core = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(3, 0),
+      new THREE.MeshBasicMaterial({ color: 0x00ff44 }));
+    g.add(core);
+    // Point lights
+    const grnLight = new THREE.PointLight(0x00ff44, 2.5, 80);
+    g.add(grnLight);
+    const redLight = new THREE.PointLight(0xff2200, 1.0, 50);
+    g.add(redLight);
+    return g;
   }
 
 
@@ -2420,6 +2452,7 @@ const SectorView = (() => {
         if (!z.dead) rawContacts.push({ pos: z.position, color: '#ff3300', size: 3, label: `ZY-${zyIdx++}` });
       }
       if (_hasStarbase) rawContacts.push({ pos: SB_POS.clone(), color: '#00e5ff', size: 3.5, label: 'SB' });
+      if (_beaconMesh) rawContacts.push({ pos: _beaconPos.clone(), color: '#00ff44', size: 3, label: 'BN' });
       for (const cs of _cargoShips) {
         rawContacts.push({ pos: cs.pos.clone(), color: '#aaff44', size: 2.5, label: 'CS' });
       }
@@ -3160,6 +3193,25 @@ const SectorView = (() => {
       const type = (i % 3 === 2) ? 'warrior' : seekerTypes[i % 2];
       _zylons.push(new ZylonShip(_scene, startPos, type));
     }
+    // Alert message after scene is ready (deferred so showMessage works)
+    if (zylonCount > 0 && typeof showMessage === 'function') {
+      showMessage('RED ALERT', '', `${zylonCount} ZYLON FIGHTER${zylonCount > 1 ? 'S' : ''} DETECTED`);
+    }
+
+    // Beacon 3D object — rotating icosahedron at deterministic position in sector
+    _beaconMesh = null;
+    if (sector?.hasBeacon && _scene) {
+      const angle = ((_sectorQ * 3 + _sectorR * 7) % 12) * (Math.PI * 2 / 12);
+      const BEACON_DIST = GameConfig.zylon.beaconPlacementUnits ?? 750;
+      _beaconPos.set(
+        (_hasStarbase ? SB_POS.x : 0) + Math.cos(angle) * BEACON_DIST,
+        0,
+        (_hasStarbase ? SB_POS.z : 0) + Math.sin(angle) * BEACON_DIST,
+      );
+      _beaconMesh = _buildBeaconMesh();
+      _beaconMesh.position.copy(_beaconPos);
+      _scene.add(_beaconMesh);
+    }
 
     // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
     const off = arrivalOffset && typeof arrivalOffset === 'object' ? arrivalOffset : { x: 0, z: 0 };
@@ -3245,6 +3297,8 @@ const SectorView = (() => {
     _torpedoes = [];
     _zylons.forEach(z => z.destroy());
     _zylons = [];
+    if (_beaconMesh && _scene) _scene.remove(_beaconMesh);
+    _beaconMesh = null;
     _scene = null;
     _asteroids = [];
     _cargoShips.forEach(cs => cs.mesh && _removeCargoMesh(cs.mesh));
@@ -3306,12 +3360,14 @@ const SectorView = (() => {
         Math.cos(angle) * dist,
         (Math.random() - 0.5) * 200,
         Math.sin(angle) * dist);
-      // forceType overrides; otherwise alternate seeker types for first 2/3, warrior for last 1/3
       const type = forceType ?? (i % 3 === 2 ? 'warrior' : types[i % 2]);
       _zylons.push(new ZylonShip(_scene, pos, type));
     }
     _targets  += count;
     _redAlert  = true;
+    if (typeof showMessage === 'function') {
+      showMessage('RED ALERT', '', `${count} ZYLON FIGHTER${count > 1 ? 'S' : ''} INCOMING`);
+    }
   }
 
   function beginWarpBurst(onComplete) {

@@ -124,43 +124,48 @@ class ZylonShip {
    */
   _build_seeker_bird() {
     const g     = new THREE.Group();
-    const steel = new THREE.MeshBasicMaterial({ color: 0x1a1a22 });
+    const steel = new THREE.MeshBasicMaterial({ color: 0x3a1a1a });
     const redWF = new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true });
 
-    // Center spine (short rod pointing forward)
+    // Center spine (short body pointing forward)
     const spine = new THREE.Mesh(
-      new THREE.BoxGeometry(1.2, 0.8, 5),
-      new THREE.MeshBasicMaterial({ color: 0x222233 }));
+      new THREE.BoxGeometry(2, 1.2, 6),
+      new THREE.MeshBasicMaterial({ color: 0x331111 }));
     spine.position.set(0, 0, 2);
     g.add(spine);
 
-    // Two swept arms radiating outward-back from centre
-    const armGeo = new THREE.BoxGeometry(1, 0.7, 7);
-    const angles = [-38, 38]; // degrees from forward axis
+    // Two swept arms radiating outward-back in a wide V
+    const armGeo = new THREE.BoxGeometry(2, 1.2, 10);
+    const angles = [-42, 42]; // degrees from forward axis
     angles.forEach(deg => {
       const rad = THREE.MathUtils.degToRad(deg);
       const arm = new THREE.Mesh(armGeo, steel.clone());
       arm.rotation.y = -rad;
-      // Offset so arm root is near the centre
-      arm.position.set(Math.sin(rad) * 3.5, 0, Math.cos(rad) * 3.5 - 1);
+      arm.position.set(Math.sin(rad) * 5, 0, Math.cos(rad) * 5 - 1);
       g.add(arm);
 
       // Red wireframe on each arm
       const wf = new THREE.Mesh(
-        new THREE.BoxGeometry(1.05, 0.75, 7.05), redWF);
+        new THREE.BoxGeometry(2.1, 1.25, 10.1), redWF);
       wf.rotation.copy(arm.rotation);
       wf.position.copy(arm.position);
       g.add(wf);
 
       // Wingtip glow
-      const tipX = Math.sin(rad) * 8;
-      const tipZ = Math.cos(rad) * 8 - 1;
-      const l = new THREE.PointLight(0xff2200, 0.7, 20);
+      const tipX = Math.sin(rad) * 11;
+      const tipZ = Math.cos(rad) * 11 - 1;
+      const l = new THREE.PointLight(0xff2200, 0.9, 26);
       l.position.set(tipX, 0, tipZ);
       g.add(l);
     });
 
-    this._light = new THREE.PointLight(0xff2200, 0.5, 40);
+    // Red wireframe spine overlay
+    const spWF = new THREE.Mesh(
+      new THREE.BoxGeometry(2.1, 1.25, 6.1), redWF.clone());
+    spWF.position.copy(spine.position);
+    g.add(spWF);
+
+    this._light = new THREE.PointLight(0xff2200, 0.7, 50);
     g.add(this._light);
     return g;
   }
@@ -282,7 +287,7 @@ class ZylonShip {
 
     pos.addScaledVector(this._vel, dt);
 
-    // Face player
+    // Face player — Object3D.lookAt makes +Z face the target
     const target = playerPos.clone();
     target.y = pos.y; // keep level for cleaner look
     if (pos.distanceTo(target) > 0.1) {
@@ -291,9 +296,9 @@ class ZylonShip {
 
     // ── Firing ──
     this._fireCd -= dt;
-    // Fire when facing player (within ~35° cone) and within range
+    // +Z faces the player after lookAt — dot vs dirToP should be ~+1 when aligned
     const dot = dirToP.dot(
-      new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion)
+      new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion)
     );
     if (this._fireCd <= 0 && dist < 500 && dot > 0.8) {
       this._fireCd = cfg.zylonFireCooldownMin +
