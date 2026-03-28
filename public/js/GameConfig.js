@@ -262,14 +262,14 @@ const GameConfig = Object.freeze({
     /** Seconds between each Seeker one-hex galaxy move (normal gameplay). */
     seekerMoveIntervalSec:       45,
 
-    /** Seconds between Seeker moves when testMode is true (fast, observable). */
-    seekerMoveIntervalSecTest:    3,
-
     /** Seconds to produce one unit/pair (Seeker, Warrior, or sub-Spawner). */
     spawnerSpawnIntervalSec:     60,
 
-    /** Test-mode spawn interval — proportional to move interval (60s:45s ≈ 4s:3s). */
-    spawnerSpawnIntervalSecTest:  4,
+    /**
+     * Simulated seconds per step in the synchronous fast-forward loop.
+     * 45s / 15 = 3 steps per Seeker jump; 60s / 15 = 4 steps per Spawner cycle.
+     */
+    fastForwardStepSec:          15,
 
     /** Visual delay (seconds) after a Warrior is dispatched before it "arrives". */
     warriorWarpDelaySec:          5,
@@ -280,14 +280,6 @@ const GameConfig = Object.freeze({
     /** Test-mode outer base starting energy — low so player can drain shields with cannons. */
     testMode_starbaseEnergy:   2000,
 
-    /** Seconds between warpedo shots fired at the starbase. */
-    warpedoFireIntervalSec:       5,
-
-    /** Shield points drained per warpedo hit on the starbase. */
-    warpedoShieldDamage:          8,
-
-    /** Starbase energy cost per warpedo hit (shields burn energy to recharge). */
-    warpedoEnergyDamage:        200,
 
     /** Sector-view distance from starbase where Beacon is placed (units). */
     beaconPlacementUnits:       750,
@@ -332,6 +324,16 @@ const GameConfig = Object.freeze({
     // Flight
     zylonBaseSpeed:               8,  // u/s — keeps pace with player throttle 3 (6 u/s)
     zylonPassRange:              12,  // break-off distance when approaching player
+
+    // Warrior orbit
+    warriorOrbitRadiusMin:      100,  // u — inner orbit distance from starbase
+    warriorOrbitRadiusMax:      150,  // u — outer orbit distance from starbase
+    warriorOrbitSpeed:           50,  // u/s — tangential orbit speed (also used for approach)
+    warriorFireIntervalSec:       5,  // s — delay between cannon shots
+
+    // Warrior cannon projectile
+    warriorCannonSpeed:         200,  // u/s — matches player torpedo speed
+    warriorCannonLife:          2.5,  // s — projectile lifetime → 500u effective range
   },
 
   // =========================================================

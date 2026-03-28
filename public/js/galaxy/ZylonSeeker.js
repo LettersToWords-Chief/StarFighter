@@ -38,9 +38,9 @@ class ZylonSeeker {
     this.target  = null;         // tracked cargo ship { q, r } or sector
     this.alive   = true;
 
-    // Galaxy-move timer — interval set dynamically in tick() based on red-alert state
+    // Galaxy-move timer
     this._moveTimer    = 0;
-    this._moveInterval = GameConfig.zylon.seekerMoveIntervalSecTest; // starts fast
+    this._moveInterval = GameConfig.zylon.seekerMoveIntervalSec;
 
     // In-sector combat (managed by SectorView when player is present)
     this.hp        = 1;        // one hit and they die
@@ -59,10 +59,8 @@ class ZylonSeeker {
     if (this.state === 'GUARDING' || this.state === 'FALLBACK') return;
     if (this.inCombat) return;
 
-    // Switch to normal warp interval once red alert is active
-    this._moveInterval = (GameConfig.testMode && !galaxy.redAlert)
-      ? GameConfig.zylon.seekerMoveIntervalSecTest
-      : GameConfig.zylon.seekerMoveIntervalSec;
+    // Interval is always the real game value — the caller scales dt during fast-forward
+    this._moveInterval = GameConfig.zylon.seekerMoveIntervalSec;
 
     this._moveTimer += dt;
     if (this._moveTimer < this._moveInterval) return;
@@ -183,8 +181,9 @@ class ZylonSeeker {
    * Priority: starbase → resource node → cargo ship → empty
    */
   _evaluateSector(galaxy) {
+    // Only deploy at outer, active starbases — never at the capital or already-fallen bases
     const starbase = galaxy.starbases.find(sb =>
-      sb.q === this.q && sb.r === this.r && sb.state !== 'occupied'
+      sb.q === this.q && sb.r === this.r && !sb.isCapital && sb.state === 'active'
     );
 
     if (starbase) {

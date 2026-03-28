@@ -45,7 +45,6 @@ class GalaxyMap {
 
     // Callbacks
     this.onRedAlert    = null;    // () => void — fired once at game start
-    this.onWarpedoHit  = null;    // (starbase) => void — fired each hit
 
     // Fog of war
     this.revealed = new Set();  // known sectors (ever visited or in sensor range)
@@ -100,8 +99,8 @@ class GalaxyMap {
     this._placeStarbases(outerBases, resourceHexes);
     this._buildLanes();
     this._spawnSupplyShips();
-    this._placeZylonSpawner();      // ← Zylon init
-    if (!GameConfig.testMode) this._fastForwardZylons(); // skip in test mode — observe in real-time
+    this._placeZylonSpawner();
+    this._fastForwardZylons();   // always runs — synchronous, invisible, completes before frame 1
     this._updateVisibility();
     this._centerOrigin();
   }
@@ -697,19 +696,19 @@ class GalaxyMap {
    * starbase Beacon is placed. This ensures Red Alert fires on frame 1.
    */
   _fastForwardZylons() {
-    const step = GameConfig.zylon.seekerMoveIntervalSec;
-    const MAX_STEPS = 500; // safety cap (~375 simulated minutes)
+    // Each step = 15 simulated seconds. At 45s/jump a Seeker moves every 3 steps;
+    // at 60s/cycle a Spawner produces every 4 steps.
+    // Runs synchronously with no rendering — completes in milliseconds.
+    const step = GameConfig.zylon.fastForwardStepSec;
+    const MAX_STEPS = 2000; // safety cap (~500 simulated minutes)
     let steps = 0;
+    // The Spawner fires redAlert + onRedAlert() automatically when the beacon is deployed.
     while (
       !this.zylonBeacons.some(b => b.active && b.type === 'starbase') &&
       steps < MAX_STEPS
     ) {
       this._updateZylons(step);
       steps++;
-    }
-    if (this.zylonBeacons.some(b => b.active && b.type === 'starbase')) {
-      this.redAlert = true;
-      if (this.onRedAlert) this.onRedAlert();
     }
   }
 
@@ -739,11 +738,6 @@ class GalaxyMap {
     if (this.onWarriorArrived) this.onWarriorArrived(warrior);
   }
 
-  /** Called when a Warrior fires at a starbase. */
-  _onWarpedoFired(warrior, starbase) {
-    if (this.onWarpedoFired) this.onWarpedoFired(warrior, starbase);
-  }
-
   /** Called when a starbase's shields fail and it goes dormant. */
   _onStarbaseFallen(sb) {
     console.log(`[GalaxyMap] Starbase ${sb.name} has gone DORMANT.`);
@@ -769,7 +763,7 @@ class GalaxyMap {
 
   /** Returns all Zylon Warriors currently in the given galaxy sector. */
   warriorsInSector(q, r) {
-    return this.zylonWarriors.filter(w => w.q === w.q && w.r === r && w.alive && w.state !== 'WARPING');
+    return this.zylonWarriors.filter(w => w.q === q && w.r === r && w.alive && w.state !== 'WARPING');
   }
 
   /** Returns all Beacons in the given galaxy sector. */

@@ -32,6 +32,7 @@ class Starbase {
     this.shields          = 100;   // 0–100 display (derived from shieldCharge)
     this.underAttack      = false;
     this.distressActive   = false;
+    // Note: 'underAssault' is no longer a valid state; only 'active' and 'dormant' exist.
 
     // Upgrade levels
     this.sensorLevel  = sensorRange;
@@ -106,7 +107,7 @@ class Starbase {
       this._maintenanceTick(dt);
       this._shieldRechargeTick(dt);
     } else if (this.state === 'dormant') {
-      // Even when dormant, recharge shields from any available energy
+      // Even when dormant, run the recharge tick so a supply ship can restore us
       this._shieldRechargeTick(dt);
     }
   }
@@ -357,68 +358,42 @@ class Starbase {
   // COMBAT
   // ------------------------------------------------------------------
 
-  siegeTick(deltaSeconds) {
-    if (this.state !== 'active') return false;
-    const drainRate = 5 * deltaSeconds;
-    this.inventory.energy  = Math.max(0, (this.inventory.energy ?? 0) - drainRate * 20);
-    this.shields           = Math.max(0, this.shields - drainRate);
-    if (this.shields <= 0) {
-      this.state          = 'dormant';
-      this.underAttack    = false;
-      this.distressActive = false;
-      return false;
-    }
-    this.distressActive = this.shields < 40;
-    return true;
-  }
-
   /**
-   * Called by ZylonWarrior on each warpedo impact.
-   * Drains energy; when energy hits 0 shields cannot recharge → shields fail.
+   * Called by SectorView when a player photon round hits the starbase shield.
+   * Drains shieldCharge directly; if charge hits zero, base goes dormant.
    */
-  warpedoHit(shieldDamage, energyDamage) {
-    if (this.state !== 'active' && this.state !== 'underAssault') return;
-    this.state       = 'underAssault';
-    this.underAttack = true;
-
-    // Energy absorbs the hit cost first
-    this.inventory.energy = Math.max(0, (this.inventory.energy ?? 0) - energyDamage);
-
-    // Shields drain; rate is faster when energy is low (can't recharge as fast)
-    this.shields = Math.max(0, this.shields - shieldDamage);
-
-    this.distressActive = this.shields < 40 || (this.inventory.energy ?? 0) < 5000;
-
-    // When energy is exhausted, shields fail permanently
-    if ((this.inventory.energy ?? 0) <= 0) {
+  hitByPhoton() {
+    if (this.state !== 'active') return;
+    this.underAttack  = true;
+    const damage      = 500;
+    this.shieldCharge = Math.max(0, this.shieldCharge - damage);
+    this.shields      = Math.round(this.shieldCharge / 10);
+    if (this.shieldCharge <= 0) {
       this._onShieldsFailed();
     }
   }
 
   /**
-   * Called by SectorView when a player photon round hits the starbase shield.
-   * Each hit drains 100 shield charge. If drained completely, base goes dormant.
+   * Called by SectorView when a Warrior cannon round hits the starbase shield.
+   * Uses the same torpedo damage value (185) as all other combat hits.
    */
-  hitByPhoton() {
+  takeCombatHit(shieldDamage) {
     if (this.state !== 'active') return;
-    this.underAttack = true;
-    // Drain energy first; overflow spills into shieldCharge
-    const energy  = this.inventory.energy ?? 0;
-    const damage  = 500;
-    const eHit    = Math.min(energy, damage);
-    const sHit    = damage - eHit;           // overflow once energy is depleted
-    this.inventory.energy = Math.max(0, energy - eHit);
-    this.shieldCharge     = Math.max(0, this.shieldCharge - sHit);
+    this.underAttack    = true;
+    this.shieldCharge   = Math.max(0, this.shieldCharge - shieldDamage);
+    this.shields        = Math.round(this.shieldCharge / 10);
+    this.distressActive = this.shields < 40;
+    if (this.shieldCharge <= 0) this._onShieldsFailed();
   }
 
   /** Shields have failed — starbase goes dormant; must be kickstarted by the player. */
   _onShieldsFailed() {
-    this.shieldCharge    = 0;
-    this.shields         = 0;
+    this.shieldCharge     = 0;
+    this.shields          = 0;
     this.inventory.energy = 0;
-    this.state           = 'dormant';
-    this.underAttack     = false;
-    this.distressActive  = false;
+    this.state            = 'dormant';
+    this.underAttack      = false;
+    this.distressActive   = false;
     if (this.onShieldsFailed) this.onShieldsFailed(this);
   }
 

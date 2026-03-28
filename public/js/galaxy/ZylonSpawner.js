@@ -37,10 +37,8 @@ class ZylonSpawner {
     // ── Production queue ──────────────────────────────────
     // Each item: { type: 'seeker'|'warrior'|'spawner', beaconRef, remaining }
     this._queue        = [];
-    this._produceTimer = 0;
-    this._produceInterval = GameConfig.testMode
-      ? GameConfig.zylon.spawnerSpawnIntervalSecTest   // 4 s — proportional to 3 s move
-      : GameConfig.zylon.spawnerSpawnIntervalSec;      // 60 s — normal gameplay
+    this._produceTimer    = 0;
+    this._produceInterval = GameConfig.zylon.spawnerSpawnIntervalSec; // 60 s
 
     // ── Bloom state ──────────────────────────────────────
     // Directions still needing initial seekers
@@ -60,6 +58,9 @@ class ZylonSpawner {
 
   tick(dt, galaxy) {
     if (!this.alive) return;
+
+    // Interval is always the real game value — the caller scales dt during fast-forward
+    this._produceInterval = GameConfig.zylon.spawnerSpawnIntervalSec;
 
     this._produceTimer += dt;
     if (this._produceTimer < this._produceInterval) return;
@@ -117,6 +118,12 @@ class ZylonSpawner {
     if (!this.alive) return;
 
     if (beacon.type === 'starbase') {
+      // Fire Red Alert the first time any starbase Beacon is planted —
+      // works in both normal play and test mode.
+      if (!galaxy.redAlert) {
+        galaxy.redAlert = true;
+        if (galaxy.onRedAlert) galaxy.onRedAlert();
+      }
       // Queue 2 Warrior pairs for this beacon
       const pairs = GameConfig.zylon.warriorPairsPerBeacon; // 2
       this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairs });

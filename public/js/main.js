@@ -80,6 +80,15 @@
     galaxyMap = new GalaxyMap(canvas, { difficulty: currentDifficulty });
     galaxyMap.getStardate = () => _stardate;
 
+    // When a Warrior finishes warping and enters a sector, spawn its 3D ship
+    // if the player is currently in that same sector.
+    galaxyMap.onWarriorArrived = (warrior) => {
+      if (!_sectorLive) return;
+      const pos = galaxyMap.playerPos;
+      if (warrior.q === pos.q && warrior.r === pos.r) {
+        SectorView.spawnZylons(1, 'warrior');
+      }
+    };
 
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
@@ -133,9 +142,8 @@
     const destKey  = HexMath.key(pos.q, pos.r);
     const hexData  = galaxyMap.hexes.get(destKey);
     const starbase = galaxyMap.starbases.find(s => s.q === pos.q && s.r === pos.r);
-    const zylonsInSector =
-      (galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === pos.q && w.r === pos.r).length ?? 0) +
-      (galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r).length ?? 0);
+    const seekerCount  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r).length ?? 0;
+    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === pos.q && w.r === pos.r).length ?? 0;
     const sector   = {
       q:           pos.q,
       r:           pos.r,
@@ -147,8 +155,11 @@
       starbase:      starbase || null,
       supplyShips:    galaxyMap.shipsInSector(pos.q, pos.r),
       allSupplyShips: galaxyMap.supplyShips,
-      zylons:         zylonsInSector,
+      seekerCount,
+      warriorCount,
+      zylons:         seekerCount + warriorCount, // legacy total
       hasBeacon:      !!galaxyMap.zylonBeacons?.find(b => b.active && b.q === pos.q && b.r === pos.r),
+      beaconRef:      galaxyMap.zylonBeacons?.find(b => b.active && b.q === pos.q && b.r === pos.r) || null,
     };
 
     _sectorLive = true;
@@ -242,9 +253,8 @@
     const destKey  = HexMath.key(destination.q, destination.r);
     const hexData  = galaxyMap.hexes.get(destKey);
     const starbase = galaxyMap.starbases.find(s => s.q === destination.q && s.r === destination.r);
-    const zylonsInSector =
-      (galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === destination.q && w.r === destination.r).length ?? 0) +
-      (galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r).length ?? 0);
+    const seekerCount  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r).length ?? 0;
+    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === destination.q && w.r === destination.r).length ?? 0;
     const sector   = {
       q:           destination.q,
       r:           destination.r,
@@ -256,8 +266,11 @@
       starbase:      starbase || null,
       supplyShips:    galaxyMap.shipsInSector(destination.q, destination.r),
       allSupplyShips: galaxyMap.supplyShips,
-      zylons:         zylonsInSector,
+      seekerCount,
+      warriorCount,
+      zylons:         seekerCount + warriorCount, // legacy total
       hasBeacon:      !!galaxyMap.zylonBeacons?.find(b => b.active && b.q === destination.q && b.r === destination.r),
+      beaconRef:      galaxyMap.zylonBeacons?.find(b => b.active && b.q === destination.q && b.r === destination.r) || null,
     };
 
     _sectorLive = true;

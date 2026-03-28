@@ -36,6 +36,14 @@ class ZylonShip {
       this._generatorHP    = cfg.warriorGeneratorHP;
       this._generatorAlive = true;
       this._hullHP         = cfg.warriorHullHP;
+      // Orbit AI
+      const rMin = cfg.warriorOrbitRadiusMin ?? 100;
+      const rMax = cfg.warriorOrbitRadiusMax ?? 150;
+      this._worbitR     = rMin + Math.random() * (rMax - rMin);
+      this._worbitAngle = Math.atan2(startPos.z, startPos.x);
+      this._worbitDir   = Math.random() < 0.5 ? 1 : -1;
+      this._wphase      = 'approach'; // 'approach' | 'orbit'
+      this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
     } else {
       this._hp = cfg.seekerHP;
     }
@@ -115,6 +123,7 @@ class ZylonShip {
 
     this._light = new THREE.PointLight(0xff2200, 0.5, 40);
     g.add(this._light);
+    g.scale.set(0.5, 0.5, 0.5);  // scale down to fit 10u hitbox
     return g;
   }
 
@@ -167,6 +176,7 @@ class ZylonShip {
 
     this._light = new THREE.PointLight(0xff2200, 0.7, 50);
     g.add(this._light);
+    g.scale.set(0.5, 0.5, 0.5);  // scale down to fit 10u hitbox
     return g;
   }
 
@@ -211,6 +221,7 @@ class ZylonShip {
     g.add(this._shieldLight);
     this._light = this._shieldLight;
 
+    g.scale.set(0.5, 0.5, 0.5);  // scale down to fit 10u hitbox
     return g;
   }
 
@@ -222,7 +233,7 @@ class ZylonShip {
    * @param {number}           playerSpeed current player speed in u/s
    * @returns {{ pos, vel, isZylon } | null}  fired torpedo, or null
    */
-  update(dt, playerPos, playerSpeed) {
+  update(dt, playerPos, playerSpeed, context = null) {
     if (this._dead) return null;
 
     const cfg      = GameConfig.zylon;
@@ -243,7 +254,10 @@ class ZylonShip {
       }
     }
 
-    // ── Flight AI ──
+    // ── Warrior: orbit & fire (separate state machine from seekers) ──
+    if (this._type === 'warrior') return this._updateWarrior(dt, playerPos, context);
+
+    // ── Seeker flight AI (PURSUE / BREAK / CIRCLE) ──
     const SPEED     = cfg.zylonBaseSpeed;
     const PASS_R    = cfg.zylonPassRange;
     const CIRCLE_T  = 3.5;  // seconds to complete arc-around
@@ -374,6 +388,87 @@ class ZylonShip {
       return true;
     }
     return false;
+  }
+
+  // ─────────────────────────────────── warrior orbit AI ────────────────────
+
+  /**
+   * Two-phase warrior AI:
+   *   APPROACH — fly from spawn (near beacon ~750u) straight toward the starbase (origin).
+   *   ORBIT    — circle the starbase at _worbitR; fire cannon at the closest target
+   *              every warriorFireIntervalSec seconds.
+   *
+   * Targeting is pure distance — no priority.  Starbase is only considered
+   * while its shieldCharge > 0; once shields are down it is ignored.
+   *
+   * Returns { pos, vel, isWarriorCannon: true } when a shot is fired, else null.
+   */
+  _updateWarrior(dt, playerPos, context) {
+    const cfg = GameConfig.zylon;
+    const pos = this.mesh.position;
+    const SPEED = cfg.warriorOrbitSpeed ?? 50;
+
+    // ── APPROACH: fly toward the starbase (world origin) ──
+    if (this._wphase === 'approach') {
+      const distToCenter = pos.length();
+      if (distToCenter <= this._worbitR + 1) {
+        // Reached orbit radius — lock in angle and switch to orbit mode
+        this._worbitAngle = Math.atan2(pos.z, pos.x);
+        this._wphase = 'orbit';
+      } else {
+        // Fly toward origin, face it
+        const dir = pos.clone().negate().normalize();
+        pos.addScaledVector(dir, SPEED * dt);
+        this.mesh.lookAt(0, 0, 0);
+        return null; // no firing during approach
+      }
+    }
+
+    // ── ORBIT: circle the starbase at fixed radius ──
+    const omega = SPEED / this._worbitR; // rad/s for 50 u/s tangential
+    this._worbitAngle += this._worbitDir * omega * dt;
+    pos.set(
+      Math.cos(this._worbitAngle) * this._worbitR,
+      0,
+      Math.sin(this._worbitAngle) * this._worbitR
+    );
+    // Face toward the starbase while orbiting
+    this.mesh.lookAt(0, 0, 0);
+
+    // ── Target selection: find closest entity (pure distance) ──
+    let closestDist = Infinity;
+    let closestPos  = null;
+
+    // Starbase — only when its shields are still up
+    if (context?.starbase && (context.starbase.shieldCharge ?? 0) > 0) {
+      const d = pos.distanceTo(context.starbase.pos);
+      if (d < closestDist) { closestDist = d; closestPos = context.starbase.pos.clone(); }
+    }
+    // Cargo ships
+    for (const cs of (context?.cargoShips ?? [])) {
+      const d = pos.distanceTo(cs.pos);
+      if (d < closestDist) { closestDist = d; closestPos = cs.pos.clone(); }
+    }
+    // Service drones
+    for (const dr of (context?.drones ?? [])) {
+      const d = pos.distanceTo(dr.pos);
+      if (d < closestDist) { closestDist = d; closestPos = dr.pos.clone(); }
+    }
+    // Player
+    {
+      const d = pos.distanceTo(playerPos);
+      if (d < closestDist) { closestDist = d; closestPos = playerPos.clone(); }
+    }
+
+    // ── Fire cannon at closest target ──
+    this._cannonCd -= dt;
+    if (this._cannonCd <= 0 && closestPos) {
+      this._cannonCd = cfg.warriorFireIntervalSec ?? 5;
+      const vel = closestPos.clone().sub(pos).normalize()
+                    .multiplyScalar(cfg.warriorCannonSpeed ?? 200);
+      return { pos: pos.clone(), vel, isWarriorCannon: true };
+    }
+    return null;
   }
 
   // ─────────────────────────────────── cleanup ───────────────────────────────

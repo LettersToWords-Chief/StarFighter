@@ -2,13 +2,12 @@
  * ZylonWarrior.js — A Warrior pair dispatched by a Spawner to an active Beacon.
  *
  * Warriors warp directly to a Beacon sector (instant galaxy transit).
- * Once present, they fire warpedos at the starbase.
- * When the player fires at them, they break off and fight the player.
- * When the player warps out, they resume the starbase assault.
+ * Once present, they hold position and engage any player ship that enters.
+ * When the player warps out, they remain on station.
  *
  * States:
  *   WARPING    — in transit; will arrive after warpDelay seconds
- *   ASSAULTING — firing warpedos at starbase
+ *   ASSAULTING — holding the beacon sector; fights player on contact
  *   COMBAT     — fighting the player (switched by SectorView)
  *   DEAD
  */
@@ -38,10 +37,6 @@ class ZylonWarrior {
     this._warpTimer    = 0;
     this._warpDuration = GameConfig.zylon.warriorWarpDelaySec; // visual delay
 
-    // Warpedo fire timer
-    this._fireTimer    = 0;
-    this._fireInterval = GameConfig.zylon.warpedoFireIntervalSec;
-
     // In-sector
     this.sectorPos = null;   // { x, y } — set by SectorView on arrival
     this.inCombat  = false;  // true when fighting the player
@@ -63,52 +58,26 @@ class ZylonWarrior {
         // Notify the galaxy map that a warrior has arrived in this sector
         galaxy._onWarriorArrived(this);
       }
-      return;
     }
-
-    if (this.state === 'ASSAULTING' && !this.inCombat) {
-      this._fireTimer += dt;
-      if (this._fireTimer >= this._fireInterval) {
-        this._fireTimer = 0;
-        this._fireWarpedo(galaxy);
-      }
-    }
-    // In COMBAT state, SectorView handles timing and damage
-  }
-
-  // ─────────────────────────────────────────────
-  // WARPEDO FIRE
-  // ─────────────────────────────────────────────
-
-  _fireWarpedo(galaxy) {
-    const starbase = galaxy.starbases.find(
-      sb => sb.q === this.q && sb.r === this.r
-    );
-    if (!starbase) return;
-    starbase.warpedoHit(
-      GameConfig.zylon.warpedoShieldDamage,
-      GameConfig.zylon.warpedoEnergyDamage
-    );
-    // Galaxy map fires an event so SectorView (if player is present) can animate the impact
-    galaxy._onWarpedoFired(this, starbase);
+    // In ASSAULTING state, Warriors hold their position.
+    // In COMBAT state, SectorView handles all timing and damage.
   }
 
   // ─────────────────────────────────────────────
   // COMBAT EVENTS (called by SectorView)
   // ─────────────────────────────────────────────
 
-  /** Player fired at this Warrior — break off starbase attack, engage player. */
+  /** Player fired at this Warrior — break off and engage player. */
   onPlayerFired() {
     this.inCombat = true;
     this.state    = 'COMBAT';
   }
 
-  /** Player left the sector — resume starbase assault. */
+  /** Player left the sector — return to holding the beacon sector. */
   onPlayerLeft() {
     if (!this.alive) return;
     this.inCombat = false;
     this.state    = 'ASSAULTING';
-    this._fireTimer = 0; // small grace period before first shot
   }
 
   hit(damage = 1) {

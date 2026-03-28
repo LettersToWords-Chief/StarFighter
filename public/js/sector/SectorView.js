@@ -19,7 +19,7 @@ const SectorView = (() => {
   const SPD_VALS    = [0, 2, 4, 6, 9, 13, 19, 28, 42, 64];
   const SECTOR_R    = 1000;
   const DOCK_R      = 100;
-  const SB_POS      = new THREE.Vector3(0, 0, -500);
+  const SB_POS      = new THREE.Vector3(0, 0, 0);   // Starbase is always at world origin
   const TORPEDO_SPEED  = 200;  // units/sec
   const TORPEDO_LIFE   = 2.5;  // seconds (travels 1500 units max in sector of radius 1000)
   const TORPEDO_OFFSET = 1.0;  // horizontal spawn offset
@@ -36,6 +36,12 @@ const SectorView = (() => {
   const SHIELD_R      = 82;    // radius — outside starbase ring+arms (~65u), inside cargo dock (102u)
   const SHIELD_DAMAGE = 100;   // HP dealt to player per collision event
   const SHIELD_CD     = 1.0;   // seconds between player collision damage ticks
+
+  // Beacon combat
+  const BEACON_HIT_R       = 20;   // torpedo/ram collision radius (units)
+  const BEACON_SPEED       = 100;  // orbital evasion speed (u/s)
+  const BEACON_EVASION_DUR = 10;   // seconds of orbit after each hit
+  const BEACON_HIT_DELAY   = 0.2;  // delay before flight starts (seconds)
 
   // ---- State ----
   let _renderer = null, _scene = null, _camera = null;
@@ -186,6 +192,13 @@ const SectorView = (() => {
   let _zylons = [];  // ZylonShip instances
   let _beaconMesh = null; // Zylon beacon 3D object
   let _beaconPos  = new THREE.Vector3(); // world position of beacon in sector
+  let _beaconRef      = null;  // galaxy ZylonBeacon reference (for destroy())
+  let _beaconShield   = 0;     // current shield charge
+  let _beaconOrbitR   = 0;     // orbit radius around sector origin during evasion
+  let _beaconAngle    = 0;     // current orbit angle (radians)
+  let _beaconOrbitDir = 1;     // +1 or -1
+  let _beaconEvasionTimer = 0; // seconds of active evasion remaining
+  let _beaconHitDelay     = 0; // pre-flight delay countdown
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -1252,6 +1265,8 @@ const SectorView = (() => {
     _gamepad();
     _updateFlight(dt);
     _updateSB(dt);
+    _updateBeacon(dt);
+    _checkBeaconCollision();
     _updateDust();
     _updateVoidObjects();
     _updateDocking(dt);
@@ -1476,21 +1491,30 @@ const SectorView = (() => {
   function _updateZylons(dt) {
     if (!_zylons.length) return;
     const playerPos = _camera.position.clone();
+
+    // Build targeting context for warrior orbit AI
+    const context = {
+      starbase:   (_hasStarbase && _currentStarbase)
+                  ? { pos: SB_POS.clone(), shieldCharge: _currentStarbase.shieldCharge ?? 0 }
+                  : null,
+      cargoShips: _cargoShips.map(cs => ({ pos: cs.pos.clone() })),
+      drones:     _cargoDrones.map(d  => ({ pos: d.pos.clone() })),
+    };
+
     let anyAlive = false;
     for (let i = _zylons.length - 1; i >= 0; i--) {
       const z = _zylons[i];
       if (z.dead) { _zylons.splice(i, 1); continue; }
       anyAlive = true;
-      const torp = z.update(dt, playerPos, _currentVelocity);
-      if (torp) {
-        // Spawn Zylon torpedo (orange)
-        _spawnZylonTorpedo(torp.pos, torp.vel);
+      const result = z.update(dt, playerPos, _currentVelocity, context);
+      if (result) {
+        _spawnZylonTorpedo(result.pos, result.vel, result.isWarriorCannon ?? false);
       }
     }
     if (!anyAlive && _zylons.length === 0) _redAlert = false;
   }
 
-  function _spawnZylonTorpedo(pos, vel) {
+  function _spawnZylonTorpedo(pos, vel, isWarriorCannon = false) {
     if (!_scene) return;
     const geo = new THREE.CylinderGeometry(0.5, 0.5, 6, 5);
     const mat = new THREE.MeshBasicMaterial({ color: 0xff6600 });
@@ -1502,7 +1526,11 @@ const SectorView = (() => {
     const gl = new THREE.PointLight(0xff4400, 1.2, 30);
     mesh.add(gl);
     _scene.add(mesh);
-    _torpedoes.push({ mesh, pos: pos.clone(), vel, life: 2.5, isZylon: true });
+    const life = isWarriorCannon
+      ? (GameConfig.zylon.warriorCannonLife ?? 2.5)
+      : 2.5;
+    _torpedoes.push({ mesh, pos: pos.clone(), vel, life,
+                      isZylon: !isWarriorCannon, isWarriorCannon });
   }
 
   function _updateDust() {
@@ -1568,6 +1596,81 @@ const SectorView = (() => {
     const redLight = new THREE.PointLight(0xff2200, 1.0, 50);
     g.add(redLight);
     return g;
+  }
+
+
+  // ---- Beacon combat system ----
+
+  function _updateBeacon(dt) {
+    if (!_beaconMesh) return;
+    const ZC = GameConfig.zylon;
+
+    // Shield recharge
+    if (_beaconShield < ZC.warriorShieldMax) {
+      _beaconShield = Math.min(ZC.warriorShieldMax, _beaconShield + ZC.warriorShieldRegenPerSec * dt);
+    }
+
+    // Pre-flight delay — wait 0.2s before starting orbit
+    if (_beaconHitDelay > 0) {
+      _beaconHitDelay -= dt;
+      return;
+    }
+
+    // Orbital evasion — arc around sector origin at BEACON_SPEED u/s
+    if (_beaconEvasionTimer > 0) {
+      _beaconEvasionTimer = Math.max(0, _beaconEvasionTimer - dt);
+      const omega = BEACON_SPEED / Math.max(50, _beaconOrbitR); // rad/s
+      _beaconAngle += _beaconOrbitDir * omega * dt;
+      _beaconPos.set(
+        Math.cos(_beaconAngle) * _beaconOrbitR,
+        0,
+        Math.sin(_beaconAngle) * _beaconOrbitR
+      );
+      _beaconMesh.position.copy(_beaconPos);
+    }
+  }
+
+  /** Apply damage to the beacon's shield; triggers evasion and destroys on depletion. */
+  function _hitBeacon(amount) {
+    if (!_beaconMesh) return;
+    const ZC = GameConfig.zylon;
+
+    // Shield absorption (zone model — beacon has no generator/hull; depleted = destroyed)
+    _beaconShield = Math.max(0, _beaconShield - amount);
+
+    // Trigger evasion: 0.2s delay, then orbit for 10s; randomise direction each hit
+    _beaconHitDelay    = BEACON_HIT_DELAY;
+    _beaconEvasionTimer = BEACON_EVASION_DUR;
+    _beaconOrbitDir     = Math.random() < 0.5 ? 1 : -1;
+
+    // Destroyed?
+    if (_beaconShield <= 0) {
+      _spawnExplosion(_beaconPos.clone(), {
+        scale: 2.5, debris: 10, fireColor: 0x00ff44, debrisColor: 0x004422,
+      });
+      _scene?.remove(_beaconMesh);
+      _beaconMesh = null;
+      _beaconRef?.destroy();
+      _beaconRef  = null;
+      if (typeof showMessage === 'function') {
+        showMessage('BEACON DESTROYED', '', 'ZYLON REINFORCEMENTS RECALLED');
+      }
+    }
+  }
+
+  /** Detect player ramming the beacon — damages both sides, pushes player away. */
+  function _checkBeaconCollision() {
+    if (!_beaconMesh || _warpDebursting) return;
+    const dist = _camera.position.distanceTo(_beaconPos);
+    if (dist < BEACON_HIT_R) {
+      _hitBeacon(250);
+      _applyPlayerHit(250);
+      // Push player away
+      const pushDir = _camera.position.clone().sub(_beaconPos);
+      if (pushDir.lengthSq() < 0.001) pushDir.set(0, 0, 1);
+      pushDir.normalize();
+      _camera.position.copy(_beaconPos).addScaledVector(pushDir, BEACON_HIT_R + 2);
+    }
   }
 
 
@@ -1829,12 +1932,113 @@ const SectorView = (() => {
       let hit = false;
 
       if (t.isZylon) {
-        // Zylon torpedo → player (camera)
-        if (t.pos.distanceTo(_camera.position) < 18) {
+        // Seeker torpedo → player only
+        if (t.pos.distanceTo(_camera.position) < 10) {
           _applyPlayerHit(GameConfig.zylon.zylonTorpedoDamage);
           hit = true;
         }
+
+      } else if (t.isWarriorCannon) {
+        // Warrior cannon → starbase shield, cargo ships, service drones, player
+        // (Same hit detection order as the warrior's own target selection.)
+
+        // Starbase shield
+        if (!hit && _hasStarbase && _currentStarbase?.state === 'active'
+            && (_currentStarbase.shieldCharge ?? 0) > 0) {
+          if (t.pos.distanceTo(SB_POS) < SHIELD_R + 4) {
+            _currentStarbase.takeCombatHit(GameConfig.zylon.torpedoDamage);
+            _spawnShieldImpact(t.pos.clone());
+            _sbShieldFlash = 1.0;
+            if (_currentStarbase.state === 'dormant') {
+              _sbShieldMeshes.forEach(m => { m.visible = false; });
+              if (typeof showMessage === 'function') {
+                showMessage('SHIELDS FAILED',
+                  _currentStarbase.name.toUpperCase() + ' OFFLINE — DOCK TO RESTORE');
+              }
+            }
+            hit = true;
+          }
+        }
+        // Cargo ships
+        if (!hit) {
+          for (let ci = _cargoShips.length - 1; ci >= 0; ci--) {
+            if (t.pos.distanceTo(_cargoShips[ci].pos) < 8) {
+              const cs     = _cargoShips[ci];
+              const dmg    = GameConfig.zylon.torpedoDamage;
+              const shipId = cs.ship.outerBase?.name || cs.ship.resource || 'CARGO';
+              cs.ship.health = Math.max(0, (cs.ship.health ?? 1000) - dmg);
+              if (cs.ship.health <= 0) {
+                cs.ship.destroyed = true; cs.ship.forward = !cs.ship.forward;
+                cs.ship.state = 'departing'; cs.ship.stateTimer = 0.1;
+                cs.ship._pendingFuelDelivery = 0; cs.ship._pendingRepairHp = 0;
+                if (GameConfig.testMode) {
+                  const clk = window.SubspaceComm?.clockStr?.() || '?';
+                  window.SubspaceComm?.send('CARGO LOST', clk, `[${shipId}] DESTROYED BY ZYLON`);
+                }
+                _spawnExplosion(cs.pos.clone(),
+                  { scale: 2, debris: 8, fireColor: 0xff6600, debrisColor: 0xff4400 });
+                _removeCargoMesh(cs.mesh); _cargoShips.splice(ci, 1);
+              } else {
+                if (GameConfig.testMode) {
+                  const clk = window.SubspaceComm?.clockStr?.() || '?';
+                  window.SubspaceComm?.send('CARGO HIT', clk, `[${shipId}]  HP: ${cs.ship.health}/1000`);
+                }
+                _spawnExplosion(cs.pos.clone(),
+                  { scale: 0.6, debris: 2, fireColor: 0xff8800, debrisColor: 0xcc6600 });
+              }
+              hit = true; break;
+            }
+          }
+        }
+        // Service drones
+        if (!hit) {
+          for (let di = _cargoDrones.length - 1; di >= 0; di--) {
+            if (t.pos.distanceTo(_cargoDrones[di].pos) < 5) {
+              if (_cargoDrones[di].cargoShip?.ship) {
+                _cargoDrones[di].cargoShip.ship._pendingRepairHp = 0;
+              }
+              _spawnExplosion(_cargoDrones[di].pos.clone(),
+                { scale: 1, debris: 0, fireColor: 0xff8800, debrisColor: 0 });
+              _removeCargoMesh(_cargoDrones[di].mesh);
+              _cargoDrones.splice(di, 1);
+              hit = true; break;
+            }
+          }
+        }
+        // Docking drone (plug mesh)
+        if (!hit && _plugMesh && _plugMesh.visible
+            && _dockState !== 'idle' && _dockState !== 'done') {
+          if (t.pos.distanceTo(_plugMesh.position) < 5) {
+            _spawnExplosion(_plugMesh.position.clone(),
+              { scale: 0.8, debris: 3, fireColor: 0xff8800, debrisColor: 0xffcc00 });
+            _dockState = 'returning';
+            hit = true;
+          }
+        }
+        // Player
+        if (!hit && t.pos.distanceTo(_camera.position) < 10) {
+          _applyPlayerHit(GameConfig.zylon.zylonTorpedoDamage);
+          hit = true;
+        }
+
       } else {
+        // Player torpedo → intercept incoming Zylon fire (10u detection radius)
+        // Marks the intercepted torpedo life=-1 so the outer loop cleans it up safely.
+        if (!hit) {
+          for (let ti2 = 0; ti2 < _torpedoes.length; ti2++) {
+            if (ti2 === i) continue;
+            const t2 = _torpedoes[ti2];
+            if (!t2.isZylon && !t2.isWarriorCannon) continue;
+            if (t.pos.distanceTo(t2.pos) < 10) {
+              t2.life = -1; // mark for cleanup; removed when outer loop reaches it
+              _spawnExplosion(t.pos.clone(),
+                { scale: 0.4, debris: 2, fireColor: 0xff6600, debrisColor: 0xff4400 });
+              hit = true;
+              break;
+            }
+          }
+        }
+
         // Player torpedo → asteroid
         for (let j = _asteroids.length - 1; j >= 0; j--) {
           if (t.pos.distanceTo(_asteroids[j].pos) < _asteroids[j].radius + 5) {
@@ -1875,7 +2079,7 @@ const SectorView = (() => {
         if (!hit) {
           for (const z of _zylons) {
             if (z.dead) continue;
-            if (t.pos.distanceTo(z.position) < 22) {
+            if (t.pos.distanceTo(z.position) < 10) {
               const destroyed = z.takeDamage(GameConfig.zylon.torpedoDamage);
               _spawnExplosion(t.pos.clone(),
                 { scale: destroyed ? 1.5 : 0.5, debris: destroyed ? 6 : 2,
@@ -1888,6 +2092,16 @@ const SectorView = (() => {
               hit = true;
               break;
             }
+          }
+        }
+        // Player torpedo → Zylon beacon
+        if (!hit && _beaconMesh) {
+          if (t.pos.distanceTo(_beaconPos) < BEACON_HIT_R) {
+            _hitBeacon(GameConfig.zylon.torpedoDamage);
+            _spawnExplosion(t.pos.clone(), {
+              scale: 0.8, debris: 3, fireColor: 0x00ff44, debrisColor: 0x004422,
+            });
+            hit = true;
           }
         }
         // Player torpedo → cargo ships
@@ -2452,7 +2666,7 @@ const SectorView = (() => {
         if (!z.dead) rawContacts.push({ pos: z.position, color: '#ff3300', size: 3, label: `ZY-${zyIdx++}` });
       }
       if (_hasStarbase) rawContacts.push({ pos: SB_POS.clone(), color: '#00e5ff', size: 3.5, label: 'SB' });
-      if (_beaconMesh) rawContacts.push({ pos: _beaconPos.clone(), color: '#00ff44', size: 3, label: 'BN' });
+      if (_beaconMesh) rawContacts.push({ pos: _beaconPos.clone(), color: '#00ff44', size: 6, label: 'BN' });
       for (const cs of _cargoShips) {
         rawContacts.push({ pos: cs.pos.clone(), color: '#aaff44', size: 2.5, label: 'CS' });
       }
@@ -3169,58 +3383,87 @@ const SectorView = (() => {
     _currentStarbase = sector?.starbase || null;
     _sectorName  = sector?.name        || `SECTOR ${sector?.q ?? '?'},${sector?.r ?? '?'}`;
 
-    // Spawn Zylon enemies if sector has them
-    const zylonCount = sector?.zylons ?? 0;
-    _targets = zylonCount;
-    // Red Alert only if Long Range Scanner is alive (scanner=0 = no detection on entry)
-    if (zylonCount > 0 && (!_computer || _computer.scanner > 0)) _redAlert = true;
+    // ── Spawn Zylon enemies ──────────────────────────────────────────────────
+    // Each galaxy ZylonSeeker represents a PAIR — spawn one tie-fighter and one
+    // bird silhouette per seeker count so the player always sees both models.
+    // Warriors are separate galaxy objects; spawn one saucer each.
+    const seekerCount  = sector?.seekerCount  ?? 0;
+    const warriorCount = sector?.warriorCount ?? 0;
+    const totalZylons  = seekerCount * 2 + warriorCount;
+    _targets = totalZylons;
+    if (totalZylons > 0 && (!_computer || _computer.scanner > 0)) _redAlert = true;
 
     _initThree();
     _buildScene();
     _spawnCargoShips(sector?.supplyShips || []);
 
-    // Spawn Zylons after scene is built — mix of seekers (tie/bird) and warriors
-    const seekerTypes = ['seeker_tie', 'seeker_bird'];
-    for (let i = 0; i < zylonCount; i++) {
-      const angle = (i / zylonCount) * Math.PI * 2 + Math.random() * 0.5;
-      const dist  = 350 + Math.random() * 400;
-      const startPos = new THREE.Vector3(
-        Math.cos(angle) * dist,
-        (Math.random() - 0.5) * 200,
-        Math.sin(angle) * dist,
-      );
-      // Every 3rd ship is a warrior; others alternate seeker types
-      const type = (i % 3 === 2) ? 'warrior' : seekerTypes[i % 2];
-      _zylons.push(new ZylonShip(_scene, startPos, type));
+    for (let i = 0; i < seekerCount; i++) {
+      ['seeker_tie', 'seeker_bird'].forEach(type => {
+        const angle = Math.random() * Math.PI * 2;
+        const dist  = 350 + Math.random() * 400;
+        _zylons.push(new ZylonShip(_scene, new THREE.Vector3(
+          Math.cos(angle) * dist, (Math.random() - 0.5) * 200, Math.sin(angle) * dist
+        ), type));
+      });
     }
-    // Alert message after scene is ready (deferred so showMessage works)
-    if (zylonCount > 0 && typeof showMessage === 'function') {
-      showMessage('RED ALERT', '', `${zylonCount} ZYLON FIGHTER${zylonCount > 1 ? 'S' : ''} DETECTED`);
+    for (let i = 0; i < warriorCount; i++) {
+      // Warriors spawn near the beacon position so they have to fly in.
+      // If there is no beacon, spawn ahead at the same 750u distance.
+      const bAngle    = sector?.hasBeacon
+        ? ((_sectorQ * 3 + _sectorR * 7) % 12) * (Math.PI * 2 / 12)
+        : 0;
+      const bDist     = GameConfig.zylon.beaconPlacementUnits ?? 750;
+      const bBase     = new THREE.Vector3(Math.cos(bAngle) * bDist, 0, Math.sin(bAngle) * bDist);
+      const jAngle    = Math.random() * Math.PI * 2;
+      const jitter    = 30 + Math.random() * 50;  // 30–80u scatter around beacon
+      const wSpawn    = bBase.clone().addScaledVector(
+        new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+      _zylons.push(new ZylonShip(_scene, wSpawn, 'warrior'));
+    }
+    if (totalZylons > 0 && typeof showMessage === 'function') {
+      showMessage('RED ALERT', '', `${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED`);
     }
 
     // Beacon 3D object — rotating icosahedron at deterministic position in sector
-    _beaconMesh = null;
+    _beaconMesh        = null;
+    _beaconRef         = null;
+    _beaconShield      = 0;
+    _beaconOrbitR      = 0;
+    _beaconAngle       = 0;
+    _beaconOrbitDir    = 1;
+    _beaconEvasionTimer = 0;
+    _beaconHitDelay      = 0;
     if (sector?.hasBeacon && _scene) {
       const angle = ((_sectorQ * 3 + _sectorR * 7) % 12) * (Math.PI * 2 / 12);
       const BEACON_DIST = GameConfig.zylon.beaconPlacementUnits ?? 750;
+      // Starbase is at world origin, so beacon orbits the origin at BEACON_DIST radius
       _beaconPos.set(
-        (_hasStarbase ? SB_POS.x : 0) + Math.cos(angle) * BEACON_DIST,
+        Math.cos(angle) * BEACON_DIST,
         0,
-        (_hasStarbase ? SB_POS.z : 0) + Math.sin(angle) * BEACON_DIST,
+        Math.sin(angle) * BEACON_DIST,
       );
       _beaconMesh = _buildBeaconMesh();
       _beaconMesh.position.copy(_beaconPos);
       _scene.add(_beaconMesh);
+      // Combat state
+      _beaconRef    = sector?.beaconRef || null;
+      _beaconShield = GameConfig.zylon.warriorShieldMax;
+      _beaconOrbitR = Math.sqrt(_beaconPos.x ** 2 + _beaconPos.z ** 2);
+      _beaconAngle  = Math.atan2(_beaconPos.z, _beaconPos.x);
     }
 
     // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
     const off = arrivalOffset && typeof arrivalOffset === 'object' ? arrivalOffset : { x: 0, z: 0 };
-    // Starbase sectors: arrive 100u above the SB plane so the deburst path never
-    // enters the 82u shield radius (player passes over the top, then flies down to dock)
-    const arrivalY = (_hasStarbase && _warpDebursting) ? 100 : 0;
-    _camera.position.set(off.x ?? 0, arrivalY, off.z ?? 0);
+    // Starbase is at world origin (0,0,0). Player arrives 500 units behind it (+Z)
+    // so they always enter the sector facing toward the starbase.
+    // Non-starbase sectors keep the player at the sector centre (Z = 0).
+    // Warp-deburst arrivals at starbase sectors add 100u of Y so the deburst
+    // flight path clears the 82u shield radius before the player descends to dock.
+    const PLAYER_SPAWN_Z = _hasStarbase ? 500 : 0;
+    const arrivalY       = (_hasStarbase && _warpDebursting) ? 100 : 0;
+    _camera.position.set(off.x ?? 0, arrivalY, PLAYER_SPAWN_Z + (off.z ?? 0));
     // When arriving from a warp burst, pre-offset so the deburst travel cancels out
-    // and the player lands at the arrivalOffset position (near centre for accurate jump).
+    // and the player lands at the intended arrival position.
     // Deburst travels (99999 + WARP_VELOCITY) / 2 ≈ 50049 units in -Z (forward).
     // Pull back by that full distance so the ship ends up back at the intended spot.
     if (_warpDebursting) {
@@ -3299,6 +3542,7 @@ const SectorView = (() => {
     _zylons = [];
     if (_beaconMesh && _scene) _scene.remove(_beaconMesh);
     _beaconMesh = null;
+    _beaconRef  = null;
     _scene = null;
     _asteroids = [];
     _cargoShips.forEach(cs => cs.mesh && _removeCargoMesh(cs.mesh));
