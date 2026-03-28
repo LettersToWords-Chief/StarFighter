@@ -68,6 +68,24 @@
       <div id="combat-hud">
         <button id="exit-combat">◀ GALAXY MAP</button>
       </div>
+
+      <!-- Damage Report Overlay — opens on D (docking) or R (read-only) -->
+      <div id="damage-report" style="display:none;">
+        <div id="dr-panel">
+          <div id="dr-header">
+            <span id="dr-title">DAMAGE REPORT</span>
+            <span id="dr-mode-badge">DOCK PENDING</span>
+          </div>
+          <div id="dr-content">
+            <div id="dr-budget"></div>
+            <div id="dr-rows"></div>
+          </div>
+          <div id="dr-footer">
+            <span id="dr-hint">Check/uncheck repairs below. Apply at dock completion.</span>
+            <button id="dr-close">CLOSE</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Warp tunnel overlay — full-screen, above sector, below galaxy map -->

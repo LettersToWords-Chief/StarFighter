@@ -49,7 +49,7 @@ class Starbase {
       engineParts:   isCapital ? Math.floor(tgt.engineParts   / 2) : 1,
       cannonParts:   isCapital ? Math.floor(tgt.cannonParts   / 2) : 1,
       shieldParts:   isCapital ? Math.floor(tgt.shieldParts   / 2) : 1,
-      computerParts: isCapital ? Math.floor(tgt.computerParts / 2) : 1,
+      computerParts: isCapital ? Math.floor(tgt.computerParts / 2) : 2,
       torpedoes:     isCapital ? Math.floor(tgt.torpedoes     / 2) : 50,
       spareParts:    isCapital ? Math.floor(tgt.spareParts    / 2) : 1,
     };
@@ -75,10 +75,14 @@ class Starbase {
     this._mfgQueues = isCapital
       ? GameConfig.capital.recipes.map(recipe => ({
           recipe,
-          active:   false,   // true = cycle in progress
-          progress: 0,       // seconds elapsed in current cycle
+          active:   false,
+          progress: 0,
         }))
       : null;
+
+    // ---- Ship build queue (capital only) ----
+    this._buildInProgress = null;  // the SupplyShip being rebuilt
+    this._buildTimer      = 0;     // seconds remaining on current build
   }
 
   // ------------------------------------------------------------------
@@ -205,6 +209,70 @@ class Starbase {
         q.active   = false;
         q.progress = 0;
       }
+    }
+  }
+
+  /**
+   * Capital ship build queue.
+   * Detects destroyed ships, checks inventory, commissions a replacement.
+   * Called from GalaxyMap._updateSupplyShips() with the full ships array.
+   *
+   * @param {number}       dt
+   * @param {SupplyShip[]} ships
+   */
+  _shipBuildTick(dt, ships) {
+    if (!this.isCapital || this.state !== 'active') return;
+    const recipe = GameConfig.supplyShip.buildRecipe;
+    if (!recipe) return;
+
+    // Advance current build
+    if (this._buildInProgress) {
+      this._buildTimer -= dt;
+      if (this._buildTimer <= 0) {
+        // ── Build complete: reset ship to full health at capital endpoint ──
+        const ship        = this._buildInProgress;
+        ship.health       = GameConfig.supplyShip.maxHealth;
+        ship.destroyed    = false;
+        ship.pathIndex    = 0;                   // back at capital
+        ship.forward      = true;                // heading toward outer base
+        ship.state        = 'recharge';
+        ship.stateTimer   = ship.baseRecharge;
+        ship.fuel         = GameConfig.supplyShip.fuelCapacity;
+        ship._pendingFuelDelivery = 0;
+        ship._pendingRepairHp     = 0;
+        if (GameConfig.testMode) {
+          const sid = ship.outerBase?.name || ship.resource || 'CARGO';
+          const clk = window.SubspaceComm?.clockStr?.() || '?';
+          window.SubspaceComm?.send('CARGO BUILT', clk,
+            `[${sid}] NEW SHIP COMMISSIONED`);
+        }
+        this._buildInProgress = null;
+      }
+      return; // one build at a time
+    }
+
+    // Look for the first destroyed ship on any route
+    const destroyed = ships.find(s => s.destroyed);
+    if (!destroyed) return;
+
+    // Check recipe ingredients are available
+    const inv = this.inventory;
+    if ((inv.spareParts    ?? 0) < recipe.spareParts    ||
+        (inv.engineParts   ?? 0) < recipe.engineParts   ||
+        (inv.computerParts ?? 0) < recipe.computerParts) return;
+
+    // Consume parts and start build
+    inv.spareParts    -= recipe.spareParts;
+    inv.engineParts   -= recipe.engineParts;
+    inv.computerParts -= recipe.computerParts;
+    this._buildInProgress = destroyed;
+    this._buildTimer      = recipe.buildSeconds;
+
+    if (GameConfig.testMode) {
+      const sid = destroyed.outerBase?.name || destroyed.resource || 'CARGO';
+      const clk = window.SubspaceComm?.clockStr?.() || '?';
+      window.SubspaceComm?.send('CARGO BUILD', clk,
+        `[${sid}] BUILD STARTED — ${recipe.buildSeconds}s`);
     }
   }
 

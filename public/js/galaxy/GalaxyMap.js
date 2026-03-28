@@ -657,6 +657,11 @@ class GalaxyMap {
     for (const ship of this.supplyShips) {
       ship.update(dt);
     }
+
+    // Capital ship build queue — check after all ticks so inventory is current
+    const capital = this.starbases.find(s => s.isCapital);
+    if (capital) capital._shipBuildTick(dt, this.supplyShips);
+
     // Recompute visibility every frame — ships move, so fog must stay current
     this._updateVisibility();
   }

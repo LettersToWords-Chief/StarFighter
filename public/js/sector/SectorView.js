@@ -215,10 +215,21 @@ const SectorView = (() => {
   let _plugEndPos = new THREE.Vector3(); // world-space attach point (lower-right of view)
   let _connectTimer = 0;
 
+  // ---- Repair plan (player docking repair system) ----
+  let _repairPlan     = [];    // [{id, label, hp, maxHP, partKey, checked, damaged, apply}]
+  let _repairReserved = {};   // { engineParts: N, ... } — total taken from base at dock-start
+  let _repairDockMode = false; // true=docking, false=read-only (R key)
+  let _repairPanelOpen = false;
+
+  // ---- Mouse-in-view tracking ----
+  let _mouseInView       = true;  // assume mouse starts in view (corrected by mouseleave)
+  let _windowFocused     = true;  // false while user is in another app/tab
+  let _skipNextMousedown = false; // true after window regains focus — absorbs return-click
+
 
   // ---- Input ----
   function _onMM(e) {
-    if (!_canvas) return;
+    if (!_canvas || !_mouseInView) return;  // ignore mouse movement outside the game
     const r     = _canvas.getBoundingClientRect();
     const DH    = 130; // dashboard height — must match _drawHUD
     const scale = r.width * 0.45;
@@ -227,6 +238,8 @@ const SectorView = (() => {
     _mny = Math.max(-1, Math.min(1, (e.clientY - viewCy)               / scale));
   }
   function _onMD(e) {
+    // Absorb the first click after the browser tab regains focus
+    if (_skipNextMousedown) { _skipNextMousedown = false; return; }
     if (e.button === 0) { _fireLeft();  } // left  click = left  front cannon
     if (e.button === 2) { _fireRight(); } // right click = right front cannon
   }
@@ -254,7 +267,21 @@ const SectorView = (() => {
           // Choose dock type based on starbase state
           _dockIsKickstart = (_currentStarbase?.state === 'dormant');
           _dockState = 'outbound';
+          // Build repair plan and open overlay (drone departs simultaneously)
+          if (!_dockIsKickstart) {
+            _buildRepairPlan(true);
+            _openDamageReport();
+          }
         }
+      }
+    }
+    if (e.code === 'KeyR') {
+      // Damage report — read-only view at any time
+      if (!_repairPanelOpen) {
+        _buildRepairPlan(false);
+        _openDamageReport();
+      } else {
+        _closeDamageReport();
       }
     }
     if (e.code === 'Space') { e.preventDefault(); _fireAft(); } // Space = AFT cannon
@@ -267,6 +294,27 @@ const SectorView = (() => {
     if (e.deltaY < 0) { _rearView = false; _computerOn = true; }
     else              { _rearView = true;  _computerOn = true; }
   }
+  let _combatViewEl = null; // cached #combat-view element for enter/leave listeners
+  function _onMouseEnter() {
+    _mouseInView = true;
+  }
+  function _onMouseLeave() {
+    _mouseInView = false;
+    _mnx = 0;   // stop rotation when mouse leaves the playing field
+    _mny = 0;
+  }
+  function _onWinFocus() {
+    _windowFocused     = true;
+    _skipNextMousedown = true;  // first click back restores focus — don’t fire cannon
+  }
+  function _onWinBlur() {
+    _windowFocused     = false;
+    _skipNextMousedown = false; // reset (no pending return click)
+    _mouseInView = false;
+    _mnx = 0;
+    _mny = 0;
+  }
+
   function _bind() {
     if (_inputBound) return;
     _inputBound = true;
@@ -277,6 +325,14 @@ const SectorView = (() => {
     window.addEventListener('resize',      _onResize);
     window.addEventListener('contextmenu', _onCM);
     window.addEventListener('wheel',       _onW, { passive: false });
+    window.addEventListener('focus', _onWinFocus);
+    window.addEventListener('blur',  _onWinBlur);
+    _combatViewEl = document.getElementById('combat-view');
+    if (_combatViewEl) {
+      _mouseInView = _combatViewEl.matches?.(':hover') ?? true;
+      _combatViewEl.addEventListener('mouseenter', _onMouseEnter);
+      _combatViewEl.addEventListener('mouseleave', _onMouseLeave);
+    }
     if (_canvas) {
       _canvas.addEventListener('contextmenu', _onCM);
     }
@@ -291,6 +347,12 @@ const SectorView = (() => {
     window.removeEventListener('resize',      _onResize);
     window.removeEventListener('contextmenu', _onCM);
     window.removeEventListener('wheel',       _onW);
+    window.removeEventListener('focus', _onWinFocus);
+    window.removeEventListener('blur',  _onWinBlur);
+    if (_combatViewEl) {
+      _combatViewEl.removeEventListener('mouseenter', _onMouseEnter);
+      _combatViewEl.removeEventListener('mouseleave', _onMouseLeave);
+    }
     if (_canvas) {
       _canvas.removeEventListener('contextmenu', _onCM);
     }
@@ -557,7 +619,249 @@ const SectorView = (() => {
     _scene.add(_sbGroup);
   }
 
-  // ---- Repair & Refuel ----
+  // ============================================================
+  // REPAIR PLAN — build, render, apply, abort
+  // ============================================================
+
+  function _buildRepairPlan(dockMode) {
+    _repairDockMode = dockMode;
+    _repairReserved = {};
+
+    // All ship systems in priority order
+    const allSystems = [
+      // ── PROPULSION ──
+      { id:'warpDrive',  label:'WARP DRIVE',      group:'PROPULSION', sortPriority:0,
+        hp: _warpDriveHP,       maxHP: 100, partKey:'engineParts',
+        apply: () => { _warpDriveHP = 100; } },
+      { id:'engine0',    label:'ENGINE 1',         group:'PROPULSION', sortPriority:1,
+        hp: _engines[0].hp,    maxHP: 100, partKey:'engineParts',
+        apply: () => { _engines[0].hp = 100; } },
+      { id:'engine1',    label:'ENGINE 2',         group:'PROPULSION', sortPriority:1,
+        hp: _engines[1].hp,    maxHP: 100, partKey:'engineParts',
+        apply: () => { _engines[1].hp = 100; } },
+      { id:'engine2',    label:'ENGINE 3',         group:'PROPULSION', sortPriority:1,
+        hp: _engines[2].hp,    maxHP: 100, partKey:'engineParts',
+        apply: () => { _engines[2].hp = 100; } },
+      { id:'engine3',    label:'ENGINE 4',         group:'PROPULSION', sortPriority:1,
+        hp: _engines[3].hp,    maxHP: 100, partKey:'engineParts',
+        apply: () => { _engines[3].hp = 100; } },
+      // ── COMPUTERS ──
+      { id:'comp_warp',  label:'WARP AUTOPILOT',   group:'COMPUTERS',  sortPriority:0,
+        hp: _computer.warpAutopilot, maxHP: 100, partKey:'computerParts',
+        apply: () => { _computer.warpAutopilot = 100; } },
+      { id:'comp_tgt',   label:'TARGETING COMP',   group:'COMPUTERS',  sortPriority:1,
+        hp: _computer.targeting,     maxHP: 100, partKey:'computerParts',
+        apply: () => { _computer.targeting = 100; } },
+      { id:'comp_radio', label:'RADIO SYSTEM',     group:'COMPUTERS',  sortPriority:2,
+        hp: _computer.radio,         maxHP: 100, partKey:'computerParts',
+        apply: () => { _computer.radio = 100; } },
+      { id:'comp_scan',  label:'SCANNER ARRAY',    group:'COMPUTERS',  sortPriority:3,
+        hp: _computer.scanner,       maxHP: 100, partKey:'computerParts',
+        apply: () => { _computer.scanner = 100; } },
+      { id:'comp_dash',  label:'DASHBOARD',        group:'COMPUTERS',  sortPriority:4,
+        hp: _computer.dashboard,     maxHP: 100, partKey:'computerParts',
+        apply: () => { _computer.dashboard = 100; } },
+      // ── CANNONS ──
+      { id:'cannon_fL',  label:'FWD CANNON L',     group:'WEAPONS',    sortPriority:0,
+        hp: _cannon.fL.hp,           maxHP: 100, partKey:'cannonParts',
+        apply: () => { _cannon.fL.hp = 100; } },
+      { id:'cannon_fR',  label:'FWD CANNON R',     group:'WEAPONS',    sortPriority:0,
+        hp: _cannon.fR.hp,           maxHP: 100, partKey:'cannonParts',
+        apply: () => { _cannon.fR.hp = 100; } },
+      { id:'cannon_aft', label:'AFT CANNON',       group:'WEAPONS',    sortPriority:0,
+        hp: _cannon.aft.hp,          maxHP: 100, partKey:'cannonParts',
+        apply: () => { _cannon.aft.hp = 100; } },
+      // ── SHIELDS ──
+      { id:'shields',    label:'SHIELD GENERATOR', group:'SHIELDS',    sortPriority:0,
+        hp: _shieldCapacity, maxHP: 400, partKey:'shieldParts',
+        apply: () => { _shieldCapacity = 400; _shieldRechargeRate = 67; } },
+    ];
+
+    // Annotate damaged flag + initial checked = false
+    allSystems.forEach(s => {
+      s.damaged = s.hp < s.maxHP;
+      s.checked = false;
+    });
+
+    if (dockMode && _currentStarbase) {
+      // Group damaged items by partKey, sort most-damaged first within each group
+      // (warpDrive is first in the array so it wins ties over regular engines)
+      const byKey = {};
+      for (const s of allSystems) {
+        if (!s.damaged) continue;
+        if (!byKey[s.partKey]) byKey[s.partKey] = [];
+        byKey[s.partKey].push(s);
+      }
+      for (const [key, items] of Object.entries(byKey)) {
+        // Sort: sortPriority first (warpDrive=0 always beats engines=1),
+        // then most-damaged (lowest hp%) within the same priority tier
+        items.sort((a, b) => {
+          const pDiff = (a.sortPriority ?? 0) - (b.sortPriority ?? 0);
+          if (pDiff !== 0) return pDiff;
+          return (a.hp / a.maxHP) - (b.hp / b.maxHP);
+        });
+        const avail   = Math.floor(_currentStarbase.inventory[key] ?? 0);
+        const canFix  = Math.min(avail, items.length);
+        if (canFix > 0) {
+          _currentStarbase.inventory[key] -= canFix;  // reserve from base
+          _repairReserved[key] = canFix;
+        }
+        items.forEach((item, idx) => { item.checked = idx < canFix; });
+      }
+    }
+
+    _repairPlan = allSystems;
+  }
+
+  function _checkedCount(partKey) {
+    return _repairPlan.filter(s => s.partKey === partKey && s.checked).length;
+  }
+
+  function _openDamageReport() {
+    _repairPanelOpen = true;
+    const el = document.getElementById('damage-report');
+    if (el) el.style.display = 'flex';
+    _renderDamageReport();
+
+    const closeBtn = document.getElementById('dr-close');
+    if (closeBtn) {
+      closeBtn.onclick = _closeDamageReport;
+    }
+  }
+
+  function _closeDamageReport() {
+    _repairPanelOpen = false;
+    const el = document.getElementById('damage-report');
+    if (el) el.style.display = 'none';
+  }
+
+  function _renderDamageReport() {
+    const badge = document.getElementById('dr-mode-badge');
+    const hint  = document.getElementById('dr-hint');
+    const budgetEl = document.getElementById('dr-budget');
+    const rowsEl   = document.getElementById('dr-rows');
+    if (!rowsEl) return;
+
+    if (badge) {
+      if (_repairDockMode) {
+        badge.textContent = 'DOCK IN PROGRESS';
+        badge.classList.remove('dr-readonly');
+        if (hint) hint.textContent = 'Uncheck to skip a repair — unused parts return to base.';
+      } else {
+        badge.textContent = 'STATUS ONLY';
+        badge.classList.add('dr-readonly');
+        if (hint) hint.textContent = 'Read-only view. Dock to initiate repairs.';
+      }
+    }
+
+    // Budget bar
+    if (budgetEl) {
+      const partLabels = {
+        engineParts:   'ENGINES', computerParts: 'COMPUTERS',
+        cannonParts:   'CANNONS', shieldParts:   'SHIELDS',
+      };
+      const partsWithDamage = {};
+      for (const s of _repairPlan) {
+        if (s.damaged) partsWithDamage[s.partKey] = true;
+      }
+      let budgetHtml = '';
+      for (const [key, label] of Object.entries(partLabels)) {
+        if (!partsWithDamage[key]) continue;
+        const reserved = _repairReserved[key] ?? 0;
+        const checked  = _checkedCount(key);
+        const inv      = _currentStarbase ? Math.floor(_currentStarbase.inventory[key] ?? 0) : 0;
+        budgetHtml += `<span class="dr-budget-item">${label}: <span>${checked}/${reserved}</span> reserved`;
+        if (!_repairDockMode) budgetHtml += ` &nbsp;(${reserved + inv} avail)`;
+        budgetHtml += `</span>`;
+      }
+      budgetEl.innerHTML = budgetHtml || '<span style="color:rgba(0,180,255,0.4)">NO DAMAGE DETECTED</span>';
+    }
+
+    // System rows grouped
+    const groups = ['PROPULSION', 'COMPUTERS', 'WEAPONS', 'SHIELDS'];
+    let html = '';
+    for (const g of groups) {
+      const items = _repairPlan.filter(s => s.group === g);
+      if (!items.length) continue;
+      html += `<div class="dr-group-header">${g}</div>`;
+      for (const item of items) {
+        const pct  = Math.round((item.hp / item.maxHP) * 100);
+        const barClass = pct >= 75 ? 'ok' : pct >= 40 ? 'warn' : pct > 0 ? 'danger' : 'dead';
+        const dmg  = item.damaged ? ' dr-damaged' : '';
+        const reserved = _repairReserved[item.partKey] ?? 0;
+        const checked  = _checkedCount(item.partKey);
+        // Checkbox: enabled only if item is damaged AND (checked OR there's a free reserved slot)
+        const canCheck = item.damaged && (item.checked || checked < reserved);
+        const chkDisabled = (!item.damaged || (!item.checked && checked >= reserved)) ? 'disabled' : '';
+        const chkChecked  = item.checked ? 'checked' : '';
+        // In read-only mode, all checkboxes disabled
+        const disabled = (!_repairDockMode || !canCheck) ? 'disabled' : chkDisabled;
+        const checkboxHtml = item.damaged
+          ? `<input type="checkbox" class="dr-check" data-id="${item.id}" ${chkChecked} ${disabled}>`
+          : `<input type="checkbox" class="dr-check" disabled>`;
+        html += `<div class="dr-row${dmg}">
+          <div class="dr-row-name">${item.label}</div>
+          <div>
+            <div class="dr-bar-wrap"><div class="dr-bar ${barClass}" style="width:${pct}%"></div></div>
+            <div class="dr-row-hp">${item.hp}/${item.maxHP}</div>
+          </div>
+          ${checkboxHtml}
+          <div style="font-size:9px;color:rgba(160,204,238,0.4);text-align:center">${item.damaged && item.checked ? '✓' : item.damaged ? '—' : 'OK'}</div>
+        </div>`;
+      }
+    }
+    rowsEl.innerHTML = html;
+
+    // Attach checkbox listeners
+    rowsEl.querySelectorAll('.dr-check:not([disabled])').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const item = _repairPlan.find(s => s.id === cb.dataset.id);
+        if (!item) return;
+        const key = item.partKey;
+        const count = _checkedCount(key);
+        const reserved = _repairReserved[key] ?? 0;
+        if (cb.checked && count < reserved) item.checked = true;
+        else if (!cb.checked) item.checked = false;
+        else cb.checked = item.checked; // revert if over budget
+        _renderDamageReport();
+      });
+    });
+  }
+
+  /** Abort: return ALL reserved parts to base and close panel. */
+  function _returnRepairPlanParts() {
+    if (_currentStarbase) {
+      for (const [key, count] of Object.entries(_repairReserved)) {
+        _currentStarbase.inventory[key] = (_currentStarbase.inventory[key] ?? 0) + count;
+      }
+    }
+    _repairPlan = [];
+    _repairReserved = {};
+    _closeDamageReport();
+  }
+
+  /** Dock-end: apply checked repairs, return unused reserved parts to base. */
+  function _applyRepairPlan() {
+    // Apply checked items
+    for (const item of _repairPlan) {
+      if (item.checked && item.damaged) item.apply();
+    }
+    // Return unused reserved parts
+    if (_currentStarbase) {
+      for (const [key, reserved] of Object.entries(_repairReserved)) {
+        const used = _repairPlan.filter(s => s.partKey === key && s.checked).length;
+        const back = reserved - used;
+        if (back > 0) {
+          _currentStarbase.inventory[key] = (_currentStarbase.inventory[key] ?? 0) + back;
+        }
+      }
+    }
+    _repairPlan = [];
+    _repairReserved = {};
+    _closeDamageReport();
+  }
+
+  // ---- Repair & Refuel (energy + torpedoes only) ----
   function _repairAndRefuel() {
     const sb  = _currentStarbase;
     const cfg = GameConfig.player;
@@ -585,40 +889,6 @@ const SectorView = (() => {
       if (deliver < needed && avail === 0) log.push('NO TORPEDOES in stock');
     } else {
       _torpedoCount = cfg.maxTorpedoes;
-    }
-
-    // ── 3. COMPONENT REPLACEMENT ──
-    // Processed in order — warp drive is FIRST so it always wins the engineParts
-    // pool when stock is limited.  Array order = replacement priority.
-    const compMap = [
-      { label: 'WARP DRIVE', hp: () => _warpDriveHP,  invKey: 'engineParts',
-        reset: () => _resetWarpDrive() },
-      { label: 'ENGINES',    hp: () => _systems.E,     invKey: 'engineParts',
-        reset: () => { _systems.E = 100; _resetEngines(); } },
-      { label: 'CANNONS',    hp: () => _systems.P,     invKey: 'cannonParts',
-        reset: () => { _systems.P = 100; _resetCannons(); } },
-      { label: 'SHIELDS',    hp: () => _systems.S,     invKey: 'shieldParts',
-        reset: () => { _systems.S = 100;
-          _shieldCapacity = 400; _shieldRechargeRate = 67; _shieldCharge = 400; } },
-      { label: 'COMPUTERS',  hp: () => _systems.C,     invKey: 'computerParts',
-        reset: () => { _systems.C = 100; _resetComputer(); } },
-    ];
-
-    for (const { label, hp, invKey, reset } of compMap) {
-      const curHP = hp();
-      if (curHP >= cfg.skipAt * 100) continue;       // > 90% — skip
-      if (curHP > cfg.replaceAt * 100) continue;     // 50–90% — not bad enough
-      if (sb) {
-        const avail = sb.inventory[invKey] ?? 0;
-        if (avail >= 1) {
-          sb.inventory[invKey] = avail - 1;
-          reset();
-        } else {
-          log.push(`NO ${label} PARTS`);
-        }
-      } else {
-        reset();
-      }
     }
 
     // ── 5. Log if anything was short ──
@@ -784,6 +1054,7 @@ const SectorView = (() => {
 
     // Abort if player starts moving
     if (_currentVelocity >= 0.5 && (_dockState === 'outbound' || _dockState === 'connected')) {
+      if (!_dockIsKickstart && _repairPlan.length) _returnRepairPlanParts();
       _dockState = 'returning';
     }
 
@@ -816,6 +1087,8 @@ const SectorView = (() => {
             _kickstartPending = false;
           }
         } else {
+          // Apply player repair plan (checked items), then refuel
+          _applyRepairPlan();
           _repairAndRefuel();
         }
         _dockState = 'returning';
@@ -1676,10 +1949,16 @@ const SectorView = (() => {
 
     // ── Cargo ships ──
     for (let i = _cargoShips.length - 1; i >= 0; i--) {
-      const cs = _cargoShips[i];
-      if (_camera.position.distanceTo(cs.pos) < SHIP_R) {
+      const cs   = _cargoShips[i];
+      const dist = _camera.position.distanceTo(cs.pos);
+      if (dist < SHIP_R) {
+        // Push cargo ship out of overlap — player stays, freighter gets shunted
+        const pushDir = cs.pos.clone().sub(_camera.position);
+        if (pushDir.lengthSq() < 0.0001) pushDir.set(0, 0, 1); // degenerate fallback
+        else pushDir.normalize();
+        cs.pos.addScaledVector(pushDir, SHIP_R + 2 - dist); // clear sphere + 2u buffer
+
         const shipId = cs.ship.outerBase?.name || cs.ship.resource || 'CARGO';
-        // Deal collision damage to the cargo ship
         cs.ship.health = Math.max(0, cs.ship.health - COLLISION_DMG);
         _spawnExplosion(cs.pos.clone(),
           { scale: 1.2, debris: 4, fireColor: 0xff8800, debrisColor: 0xcc4400 });
@@ -2069,15 +2348,17 @@ const SectorView = (() => {
       oc.fillText('AFT VIEW', cx, cy - 36);
       _lockState = 0;
     } else if (_computerOn && _systems.C > 0) {
+      // Orange = browser unfocused (click will restore focus, not fire); green = ready
+      const xhairBase = _windowFocused ? '0,255,200' : '255,140,0';
       const alpha = _fireFlash > 0 ? 1.0 : 0.82;
-      oc.strokeStyle = `rgba(0,255,200,${alpha})`; oc.lineWidth = _fireFlash > 0 ? 2 : 1.2;
+      oc.strokeStyle = `rgba(${xhairBase},${alpha})`; oc.lineWidth = _fireFlash > 0 ? 2 : 1.2;
       oc.beginPath();
       oc.moveTo(cx-cr*1.8, cy); oc.lineTo(cx-cr*0.4, cy);
       oc.moveTo(cx+cr*0.4, cy); oc.lineTo(cx+cr*1.8, cy);
       oc.moveTo(cx, cy-cr*1.8); oc.lineTo(cx, cy-cr*0.4);
       oc.moveTo(cx, cy+cr*0.4); oc.lineTo(cx, cy+cr*1.8);
       oc.stroke();
-      const dotCol = _fireFlash > 0 ? 'rgba(255,255,255,0.95)' : 'rgba(0,255,200,0.9)';
+      const dotCol = _fireFlash > 0 ? 'rgba(255,255,255,0.95)' : `rgba(${xhairBase},0.9)`;
       oc.fillStyle = dotCol; oc.beginPath(); oc.arc(cx, cy, _fireFlash > 0 ? 4 : 2, 0, Math.PI*2); oc.fill();
       if (_fireFlash > 0) {
         const bAlpha = Math.min(1, _fireFlash/0.12);
