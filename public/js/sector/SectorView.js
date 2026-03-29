@@ -3397,7 +3397,7 @@ const SectorView = (() => {
   let _warpDecelTimer = 0;  // kept for compat — actual decel uses _warpMult
 
   // ---- Public ----
-  function enter({ canvas, sector, arrivalOffset = null, arrivalSpeed = 0, arrivalVelocity, throttleSpeed, onExit, onMapToggle }) {
+  function enter({ canvas, sector, arrivalOffset = null, arrivalSpeed = 0, arrivalVelocity, throttleSpeed, onExit, onMapToggle, seekerGalaxyRefs = [], warriorGalaxyRefs = [] }) {
     if (_running) return;
     _canvas       = canvas;
     _onExit       = onExit;
@@ -3477,20 +3477,30 @@ const SectorView = (() => {
       Math.cos(_zEntryAngle) * _zEntryDist, 0, Math.sin(_zEntryAngle) * _zEntryDist);
 
     for (let i = 0; i < seekerCount; i++) {
+      // Link both ships in this seeker pair to the same galaxy ZylonSeeker (if provided)
+      const seekerRef = seekerGalaxyRefs[i] ?? null;
       ['seeker_tie', 'seeker_bird'].forEach(type => {
         const jAngle   = Math.random() * Math.PI * 2;
         const jitter   = 30 + Math.random() * 50;  // 30–80u scatter
         const spawnPos = _zEntryBase.clone().addScaledVector(
           new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-        _zylons.push(new ZylonShip(_scene, spawnPos, type));
+        const ship = new ZylonShip(_scene, spawnPos, type);
+        if (seekerRef) ship.setGalaxyRef(seekerRef);
+        _zylons.push(ship);
       });
     }
+    // Warriors at sector entry come from galaxy ZylonWarriors; they are linked
+    // when they arrive via onWarriorArrived → spawnZylons(1, 'warrior', ref).
+    // The warriorCount loop below spawns any warriors already present at entry.
     for (let i = 0; i < warriorCount; i++) {
-      const jAngle = Math.random() * Math.PI * 2;
-      const jitter = 30 + Math.random() * 50;
-      const wSpawn = _zEntryBase.clone().addScaledVector(
+      const jAngle   = Math.random() * Math.PI * 2;
+      const jitter   = 30 + Math.random() * 50;
+      const wSpawn   = _zEntryBase.clone().addScaledVector(
         new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-      _zylons.push(new ZylonShip(_scene, wSpawn, 'warrior'));
+      const wShip    = new ZylonShip(_scene, wSpawn, 'warrior');
+      const wRef     = warriorGalaxyRefs[i] ?? null;
+      if (wRef) wShip.setGalaxyRef(wRef);
+      _zylons.push(wShip);
     }
     if (totalZylons > 0 && typeof showMessage === 'function') {
       showMessage('RED ALERT', '', `${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED`);
@@ -3669,7 +3679,7 @@ const SectorView = (() => {
   }
 
   /** Spawn Zylon ships of mixed types for testing or galaxy-map triggers */
-  function spawnZylons(count, forceType) {
+  function spawnZylons(count, forceType, galaxyRef) {
     if (!_scene || !_running) return;
     const types = ['seeker_tie', 'seeker_bird', 'warrior'];
     for (let i = 0; i < count; i++) {
@@ -3680,7 +3690,10 @@ const SectorView = (() => {
         (Math.random() - 0.5) * 200,
         Math.sin(angle) * dist);
       const type = forceType ?? (i % 3 === 2 ? 'warrior' : types[i % 2]);
-      _zylons.push(new ZylonShip(_scene, pos, type));
+      const ship = new ZylonShip(_scene, pos, type);
+      // Link to galaxy-level unit so killing the 3D ship marks it dead on the map
+      if (galaxyRef) ship.setGalaxyRef(galaxyRef);
+      _zylons.push(ship);
     }
     _targets  += count;
     _redAlert  = true;

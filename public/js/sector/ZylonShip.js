@@ -22,9 +22,10 @@ class ZylonShip {
   // ─────────────────────────────────── constructor ───────────────────────────
 
   constructor(scene, startPos, type) {
-    this._scene = scene;
-    this._type  = type || 'seeker_tie';
-    this._dead  = false;
+    this._scene      = scene;
+    this._type       = type || 'seeker_tie';
+    this._dead       = false;
+    this._galaxyRef  = null;  // galaxy-level ZylonWarrior or ZylonSeeker
 
     const cfg = GameConfig.zylon;
 
@@ -601,9 +602,19 @@ class ZylonShip {
 
   // ─────────────────────────────────── cleanup ───────────────────────────────
 
+  /** Link this 3D ship to its galaxy-level unit (ZylonWarrior or ZylonSeeker). */
+  setGalaxyRef(ref) {
+    this._galaxyRef = ref;
+  }
+
   destroy() {
     if (this._scene && this.mesh) this._scene.remove(this.mesh);
     this._dead = true;
+    // Mark the galaxy-level unit dead so it disappears from the map
+    if (this._galaxyRef) {
+      this._galaxyRef.destroy();
+      this._galaxyRef = null;
+    }
   }
 
   // ─────────────────────────────────── accessors ─────────────────────────────

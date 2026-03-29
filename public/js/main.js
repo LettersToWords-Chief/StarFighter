@@ -86,7 +86,7 @@
       if (!_sectorLive) return;
       const pos = galaxyMap.playerPos;
       if (warrior.q === pos.q && warrior.r === pos.r) {
-        SectorView.spawnZylons(1, 'warrior');
+        SectorView.spawnZylons(1, 'warrior', warrior);
       }
     };
 
@@ -163,12 +163,17 @@
     };
 
     _sectorLive = true;
+    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
+    const seekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r) ?? [];
+    const warriors = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === pos.q && w.r === pos.r) ?? [];
     SectorView.enter({
       canvas:      document.getElementById('combat-canvas'),
       sector,
       arrivalOffset: 0,
       onMapToggle: openMap,
       onExit:      () => { _sectorLive = false; if (!_warping) openMap(); },
+      seekerGalaxyRefs:  seekers,
+      warriorGalaxyRefs: warriors,
     });
   }
 
@@ -274,14 +279,19 @@
     };
 
     _sectorLive = true;
+    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
+    const arrSeekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r) ?? [];
+    const arrWarriors = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === destination.q && w.r === destination.r) ?? [];
     SectorView.enter({
       canvas:          document.getElementById('combat-canvas'),
       sector,
       arrivalOffset:   arrivalOffset || 0,
-      arrivalVelocity: 99999,           // arrive at burst peak, deburst to WARP_VELOCITY
-      throttleSpeed:   departureSpeed,  // target throttle to settle at
+      arrivalVelocity: 99999,
+      throttleSpeed:   departureSpeed,
       onMapToggle:     openMap,
       onExit:          () => { _sectorLive = false; if (!_warping) openMap(); },
+      seekerGalaxyRefs:  arrSeekers,
+      warriorGalaxyRefs: arrWarriors,
     });
     // Arrive looking forward
     closeMap('front');
