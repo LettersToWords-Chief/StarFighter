@@ -702,6 +702,7 @@ class GalaxyMap {
     const step = GameConfig.zylon.fastForwardStepSec;
     const MAX_STEPS = 2000; // safety cap (~500 simulated minutes)
     let steps = 0;
+    this.fastForwarding = true;
     // The Spawner fires redAlert + onRedAlert() automatically when the beacon is deployed.
     while (
       !this.zylonBeacons.some(b => b.active && b.type === 'starbase') &&
@@ -710,6 +711,7 @@ class GalaxyMap {
       this._updateZylons(step);
       steps++;
     }
+    this.fastForwarding = false;
   }
 
   /** Tick all Zylon units. Called every frame (and during fast-forward). */

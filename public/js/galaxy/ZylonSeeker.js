@@ -11,10 +11,18 @@
  *    continuing 1 step at a time until both candidates are on the map.
  *
  * States:
- *   SEARCHING  — moving through the galaxy, looking for something
+ *   SEARCHING  — moving through the galaxy; pachinko or cargo-following
  *   GUARDING   — beacon deployed; defending it in-sector
- *   FOLLOWING  — locked onto a cargo ship, pursuing it sector to sector
  *   FALLBACK   — beacon was destroyed; now attacking starbase / ships freely
+ *
+ * Cargo-ship tracking (real-time only, not during fast-forward seeding):
+ *   When a seeker enters a sector that has no starbase or resource node but
+ *   does have cargo ships, it snapshots those ships at the moment of arrival.
+ *   After 5 real-time seconds, any of those ships still in the sector become
+ *   "followable."  When a followable ship departs, the seeker records its
+ *   destination and jumps there when its own 45 s move interval fires.
+ *   If all followable ships are still present when the interval fires (damaged
+ *   ship taking longer than normal), the seeker holds and keeps waiting.
  */
 
 class ZylonSeeker {
@@ -35,12 +43,17 @@ class ZylonSeeker {
 
     this.state   = 'SEARCHING';
     this.beacon  = null;         // ZylonBeacon once deployed
-    this.target  = null;         // tracked cargo ship { q, r } or sector
     this.alive   = true;
 
     // Galaxy-move timer
     this._moveTimer    = 0;
     this._moveInterval = GameConfig.zylon.seekerMoveIntervalSec;
+
+    // Cargo-ship tracking state (real-time only)
+    this._cargoSnapshot   = [];  // ships present at the moment of sector entry
+    this._trackTimer      = 0;   // seconds since entry (counts up to 5)
+    this._followableShips = [];  // subset still in sector at T=5s
+    this._followDest      = null; // {q,r} recorded when a followable ship departs
 
     // In-sector combat (managed by SectorView when player is present)
     this.hp        = 1;        // one hit and they die
@@ -62,15 +75,75 @@ class ZylonSeeker {
     // Interval is always the real game value — the caller scales dt during fast-forward
     this._moveInterval = GameConfig.zylon.seekerMoveIntervalSec;
 
+    // ── Cargo tracking (real-time only) ───────────────────────────────────────
+    if (!galaxy.fastForwarding) {
+
+      // Phase 1: count up to 5s — then lock in followable set
+      if (this._cargoSnapshot.length > 0 && this._trackTimer < 5) {
+        this._trackTimer += dt;
+        if (this._trackTimer >= 5) {
+          // Keep only ships still in this sector at the 5-second mark
+          this._followableShips = this._cargoSnapshot.filter(s =>
+            !s.destroyed &&
+            s.currentHex?.q === this.q &&
+            s.currentHex?.r === this.r
+          );
+          this._cargoSnapshot = []; // done with snapshot
+        }
+      }
+
+      // Phase 2: watch for a followable ship to depart (runs independently of Phase 1)
+      if (!this._followDest && this._followableShips.length > 0) {
+        const departed = this._followableShips.find(s =>
+          s.destroyed ||
+          s.currentHex?.q !== this.q ||
+          s.currentHex?.r !== this.r
+        );
+        if (departed && !departed.destroyed) {
+          // Record the hex the ship just jumped to
+          this._followDest = {
+            q: departed.currentHex.q,
+            r: departed.currentHex.r,
+          };
+        } else if (departed && departed.destroyed) {
+          // Ship was destroyed — remove from followable list
+          this._followableShips = this._followableShips.filter(s => s !== departed);
+        }
+      }
+    }
+
+    // ── Move-interval check ───────────────────────────────────────────────────
     this._moveTimer += dt;
     if (this._moveTimer < this._moveInterval) return;
-    this._moveTimer = 0;
 
-    if (this.state === 'FOLLOWING') {
-      this._followTarget(galaxy);
-    } else {
-      this._searchMove(galaxy);
+    // If a followable ship has already departed → jump to its destination
+    if (this._followDest) {
+      this._moveTo(this._followDest.q, this._followDest.r);
+      this._clearTracking();
+      this._moveTimer = 0;
+      this._evaluateSector(galaxy);
+      return;
     }
+
+    // If followable ships exist but none have left yet → hold (damaged-ship case)
+    if (this._followableShips.length > 0) {
+      const anyStillHere = this._followableShips.some(s =>
+        !s.destroyed &&
+        s.currentHex?.q === this.q &&
+        s.currentHex?.r === this.r
+      );
+      if (anyStillHere) {
+        // Reset timer and wait another cycle
+        this._moveTimer = 0;
+        return;
+      }
+      // All followable ships gone but none caught departing → fall through to pachinko
+      this._clearTracking();
+    }
+
+    // Normal pachinko move
+    this._moveTimer = 0;
+    this._searchMove(galaxy);
   }
 
   // ─────────────────────────────────────────────
@@ -149,23 +222,6 @@ class ZylonSeeker {
     ];
   }
 
-  _followTarget(galaxy) {
-    if (!this.target) { this.state = 'SEARCHING'; return; }
-
-    // If target ship is in same sector, stay and attack (handled in sector view)
-    if (this.target.q === this.q && this.target.r === this.r) return;
-
-    // Move one hex toward the target's last known sector
-    const step = HexMath.stepToward(
-      { q: this.q, r: this.r },
-      { q: this.target.q, r: this.target.r }
-    );
-    if (step) {
-      this._moveTo(step.q, step.r);
-      this._evaluateSector(galaxy);
-    }
-  }
-
   _moveTo(q, r) {
     this.q = q;
     this.r = r;
@@ -178,9 +234,12 @@ class ZylonSeeker {
 
   /**
    * Evaluate the current sector.
-   * Priority: starbase → resource node → cargo ship → empty
+   * Priority: starbase → resource node → cargo ships (real-time tracking) → empty
    */
   _evaluateSector(galaxy) {
+    // Always clear any stale tracking state when moving to a new sector
+    this._clearTracking();
+
     // Only deploy at outer, active starbases — never at the capital or already-fallen bases
     const starbase = galaxy.starbases.find(sb =>
       sb.q === this.q && sb.r === this.r && !sb.isCapital && sb.state === 'active'
@@ -198,16 +257,22 @@ class ZylonSeeker {
       return;
     }
 
-    const ship = galaxy.supplyShips.find(s =>
-      Math.round(s.galaxyQ) === this.q && Math.round(s.galaxyR) === this.r
-    );
-    if (ship) {
-      this.state  = 'FOLLOWING';
-      this.target = ship;
-      return;
+    // Cargo-ship tracking — real-time only; snapshot ships present right now
+    if (!galaxy.fastForwarding) {
+      const shipsHere = (galaxy.supplyShips ?? []).filter(s =>
+        !s.destroyed &&
+        s.currentHex?.q === this.q &&
+        s.currentHex?.r === this.r
+      );
+      if (shipsHere.length > 0) {
+        this._cargoSnapshot   = shipsHere;
+        this._trackTimer      = 0;
+        this._followableShips = [];
+        this._followDest      = null;
+      }
     }
 
-    // Empty — keep searching
+    // Empty (or fast-forward) — keep searching via pachinko
   }
 
   _deployBeacon(galaxy, type) {
@@ -230,6 +295,17 @@ class ZylonSeeker {
     this.state = 'GUARDING';
   }
 
+  // ─────────────────────────────────────────────
+  // CARGO TRACKING HELPERS
+  // ─────────────────────────────────────────────
+
+  /** Reset all cargo-tracking state (called on every sector move). */
+  _clearTracking() {
+    this._cargoSnapshot   = [];
+    this._trackTimer      = 0;
+    this._followableShips = [];
+    this._followDest      = null;
+  }
 
   // ─────────────────────────────────────────────
   // COMBAT EVENTS (called by SectorView)
