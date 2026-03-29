@@ -54,6 +54,11 @@ class ZylonWarrior {
     if (this.state === 'WARPING') {
       this._warpTimer += dt;
       if (this._warpTimer >= this._warpDuration) {
+        // If the beacon was destroyed while we were in hyperspace, disband.
+        if (!this.beacon?.active) {
+          this.alive = false;
+          return;
+        }
         this.state = 'ASSAULTING';
         // Notify the galaxy map that a warrior has arrived in this sector
         galaxy._onWarriorArrived(this);

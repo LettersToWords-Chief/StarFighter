@@ -45,7 +45,10 @@ class ZylonShip {
       this._wphase      = 'approach'; // 'approach' | 'orbit'
       this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
     } else {
-      this._hp = cfg.seekerHP;
+      // Seeker: HP pool (takes ~3 hits) + guard AI state
+      this._hp       = cfg.seekerHP ?? 400;
+      this._sphase   = 'guard';  // 'guard' | 'attack' | 'return' | 'patrol'
+      this._sguardDir = Math.random() < 0.5 ? 1 : -1;  // orbit direction
     }
 
     // ── Cannon cooldown ──
@@ -257,70 +260,8 @@ class ZylonShip {
     // ── Warrior: orbit & fire (separate state machine from seekers) ──
     if (this._type === 'warrior') return this._updateWarrior(dt, playerPos, context);
 
-    // ── Seeker flight AI (PURSUE / BREAK / CIRCLE) ──
-    const SPEED     = cfg.zylonBaseSpeed;
-    const PASS_R    = cfg.zylonPassRange;
-    const CIRCLE_T  = 3.5;  // seconds to complete arc-around
-
-    if (this._phase === 'pursue') {
-      // Fly straight at player
-      this._vel.copy(dirToP).multiplyScalar(SPEED);
-      if (dist < PASS_R) {
-        // Too close — initiate break
-        this._phase = 'break';
-        // Pick a random perpendicular axis to orbit around
-        const perp = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.5, Math.random() - 0.5)
-          .cross(dirToP).normalize();
-        this._circleAxis.copy(perp.length() > 0.01 ? perp : new THREE.Vector3(0, 1, 0));
-      }
-
-    } else if (this._phase === 'break') {
-      // Veer away hard, then transition to circle
-      const away = dirToP.clone().negate();
-      const side = this._circleAxis.clone().cross(dirToP).normalize();
-      this._vel.copy(away).addScaledVector(side, 1.4).normalize().multiplyScalar(SPEED * 1.6);
-      this._circleTimer += dt;
-      if (this._circleTimer > 1.2) {
-        this._circleTimer = 0;
-        this._phase = 'circle';
-      }
-
-    } else if (this._phase === 'circle') {
-      // Arc around in a wide sweep to re-approach from behind player
-      this._circleTimer += dt;
-      // Rotate velocity direction around circleAxis
-      const angle = (Math.PI * 2 / CIRCLE_T) * dt;
-      this._vel.applyAxisAngle(this._circleAxis, angle);
-      if (this._vel.lengthSq() < 0.1) this._vel.set(0, 0, SPEED);
-      this._vel.normalize().multiplyScalar(SPEED);
-      if (this._circleTimer > CIRCLE_T) {
-        this._circleTimer = 0;
-        this._phase = 'pursue';
-      }
-    }
-
-    pos.addScaledVector(this._vel, dt);
-
-    // Face player — Object3D.lookAt makes +Z face the target
-    const target = playerPos.clone();
-    target.y = pos.y; // keep level for cleaner look
-    if (pos.distanceTo(target) > 0.1) {
-      this.mesh.lookAt(target);
-    }
-
-    // ── Firing ──
-    this._fireCd -= dt;
-    // +Z faces the player after lookAt — dot vs dirToP should be ~+1 when aligned
-    const dot = dirToP.dot(
-      new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion)
-    );
-    if (this._fireCd <= 0 && dist < 500 && dot > 0.8) {
-      this._fireCd = cfg.zylonFireCooldownMin +
-        Math.random() * (cfg.zylonFireCooldownMax - cfg.zylonFireCooldownMin);
-      const vel = dirToP.clone().multiplyScalar(cfg.zylonTorpedoSpeed);
-      return { pos: pos.clone(), vel, isZylon: true };
-    }
-    return null;
+    // ── Seeker: guard / attack / return AI ──
+    return this._updateSeeker(dt, playerPos, context);
   }
 
   // ─────────────────────────────────── damage ────────────────────────────────
@@ -336,10 +277,17 @@ class ZylonShip {
     if (this._type === 'warrior') {
       return this._takeDamageWarrior(amount);
     } else {
-      // Seeker: no shields — one hit kills
-      this._hp = 0;
-      this._dead = true;
-      return true;
+      // Seeker: HP pool — takes several hits to destroy
+      this._hp = Math.max(0, this._hp - amount);
+      if (this._hp <= 0) {
+        this._dead = true;
+        return true;
+      }
+      if (this._light) {
+        this._light.intensity = 3.0;
+        setTimeout(() => { if (this._light) this._light.intensity = 0.5; }, 120);
+      }
+      return false;
     }
   }
 
@@ -388,6 +336,186 @@ class ZylonShip {
       return true;
     }
     return false;
+  }
+
+  // ─────────────────────────────────── seeker guard AI ───────────────────────
+
+  /**
+   * Three-phase seeker AI:
+   *   GUARD  — drift within a 50–150u proximity band around the beacon.
+   *            Steer toward it when >150u, away when <50u, free-drift in band.
+   *   ATTACK — fly at player; break at 15u; circle back. Fires when aligned.
+   *   RETURN — fly back to beacon; re-enter GUARD when within 100u.
+   */
+  _updateSeeker(dt, playerPos, context) {
+    const cfg   = GameConfig.zylon;
+    const pos   = this.mesh.position;
+    const SPEED  = cfg.seekerGuardSpeed ?? 50;
+    const G_IN   = cfg.seekerGuardInner  ?? 50;
+    const G_OUT  = cfg.seekerGuardOuter  ?? 150;
+    const ENG_R  = cfg.seekerEngageRadius ?? 200;
+    const BRK_R  = cfg.seekerBreakRadius  ?? 15;
+    const TURN_R = (cfg.seekerTurnRate ?? 120) * Math.PI / 180 * dt; // max radians this frame
+
+    // Initialise drift velocity on first frame
+    if (this._vel.lengthSq() < 0.001) {
+      this._vel.set(Math.random() - 0.5, 0, Math.random() - 0.5)
+               .normalize().multiplyScalar(SPEED);
+    }
+
+    const beaconPos    = context?.beaconPos ?? null;
+    const toPlayer     = playerPos.clone().sub(pos);
+    const dist         = toPlayer.length();
+    const dirToP       = dist > 0.01 ? toPlayer.clone().normalize()
+                                     : new THREE.Vector3(0, 0, -1);
+
+    // ── Beacon-dead / new-beacon state corrections ──
+    if (!beaconPos) {
+      // Beacon gone: guard/return have nowhere to go — enter patrol orbit
+      if (this._sphase === 'guard' || this._sphase === 'return') {
+        this._sphase = 'patrol';
+      }
+    } else {
+      // New beacon arrived: leave patrol and resume guard
+      if (this._sphase === 'patrol') this._sphase = 'guard';
+    }
+
+    // ── Top-level state transitions ──
+    if ((this._sphase === 'guard' || this._sphase === 'patrol') && dist < ENG_R) {
+      this._sphase = 'attack';
+      this._phase  = 'pursue';
+      this._circleTimer = 0;
+    } else if (this._sphase === 'attack' && dist > ENG_R) {
+      this._sphase = beaconPos ? 'return' : 'patrol';
+    }
+
+    // ── GUARD ──
+    if (this._sphase === 'guard') {
+      if (beaconPos) {
+        const dB  = pos.distanceTo(beaconPos);
+        const toB = beaconPos.clone().sub(pos).normalize();
+        if      (dB > G_OUT) this._steer(toB,                  SPEED, TURN_R);
+        else if (dB < G_IN)  this._steer(toB.clone().negate(), SPEED, TURN_R);
+        // in band [50–150]: free drift — no steering correction
+      }
+      this._vel.normalize().multiplyScalar(SPEED);
+      pos.addScaledVector(this._vel, dt);
+      const fwd = pos.clone().add(this._vel.clone().normalize());
+      this.mesh.lookAt(fwd.x, pos.y, fwd.z);
+      return null;
+    }
+
+    // ── RETURN ──
+    if (this._sphase === 'return') {
+      if (beaconPos) {
+        if (pos.distanceTo(beaconPos) < 100) {
+          this._sphase = 'guard';
+        } else {
+          const toB = beaconPos.clone().sub(pos).normalize();
+          this._steer(toB, SPEED, TURN_R);
+          pos.addScaledVector(this._vel, dt);
+          this.mesh.lookAt(beaconPos.x, pos.y, beaconPos.z);
+        }
+      } else {
+        this._sphase = 'patrol';
+      }
+      return null;
+    }
+
+    // ── PATROL: orbit sector origin at 700–800u when beacon is dead ──
+    if (this._sphase === 'patrol') {
+      const PATROL_IN  = 700;
+      const PATROL_OUT = 800;
+      const dOrigin = Math.sqrt(pos.x * pos.x + pos.z * pos.z); // dist from sector center
+      const radial  = new THREE.Vector3(pos.x, 0, pos.z);
+      if (dOrigin > 0.1) radial.normalize();
+      if (dOrigin > PATROL_OUT) {
+        this._steer(radial.clone().negate(), SPEED, TURN_R);
+      } else if (dOrigin < PATROL_IN) {
+        this._steer(radial, SPEED, TURN_R);
+      } else {
+        const tangent = new THREE.Vector3(-radial.z, 0, radial.x).multiplyScalar(this._sguardDir);
+        this._steer(tangent, SPEED, TURN_R);
+      }
+      this._vel.normalize().multiplyScalar(SPEED);
+      pos.addScaledVector(this._vel, dt);
+      const fwd = pos.clone().add(this._vel.clone().normalize());
+      this.mesh.lookAt(fwd.x, pos.y, fwd.z);
+      return null;
+    }
+
+    // ── ATTACK: PURSUE → BREAK → CIRCLE ──
+    if (this._phase === 'pursue') {
+      this._steer(dirToP, SPEED, TURN_R);
+      if (dist < BRK_R) {
+        this._phase = 'break';
+        const perp = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.5, Math.random() - 0.5)
+          .cross(dirToP).normalize();
+        this._circleAxis.copy(perp.length() > 0.01 ? perp : new THREE.Vector3(0, 1, 0));
+        this._circleTimer = 0;
+      }
+    } else if (this._phase === 'break') {
+      const away     = dirToP.clone().negate();
+      const side     = this._circleAxis.clone().cross(dirToP).normalize();
+      const breakDir = away.addScaledVector(side, 1.4).normalize();
+      this._steer(breakDir, SPEED * 1.6, TURN_R * 2); // sharper break allowed
+      this._circleTimer += dt;
+      if (this._circleTimer > 1.2) { this._circleTimer = 0; this._phase = 'circle'; }
+    } else if (this._phase === 'circle') {
+      this._circleTimer += dt;
+      this._vel.applyAxisAngle(this._circleAxis, (Math.PI * 2 / 3.5) * dt);
+      if (this._vel.lengthSq() < 0.1) this._vel.set(0, 0, SPEED);
+      this._vel.normalize().multiplyScalar(SPEED);
+      if (this._circleTimer > 3.5) { this._circleTimer = 0; this._phase = 'pursue'; }
+    }
+
+    pos.addScaledVector(this._vel, dt);
+    const lookAt = playerPos.clone(); lookAt.y = pos.y;
+    if (pos.distanceTo(lookAt) > 0.1) this.mesh.lookAt(lookAt);
+
+    // Fire when aligned
+    this._fireCd -= dt;
+    const dot = dirToP.dot(new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion));
+    if (this._fireCd <= 0 && dist < 500 && dot > 0.8) {
+      this._fireCd = (cfg.zylonFireCooldownMin ?? 1.5) +
+        Math.random() * ((cfg.zylonFireCooldownMax ?? 3.0) - (cfg.zylonFireCooldownMin ?? 1.5));
+      return { pos: pos.clone(), vel: dirToP.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
+    }
+    return null;
+  }
+
+  // ─────────────────────────── steering helper ────────────────────────────────
+
+  /**
+   * Rotate this._vel toward targetDir by at most maxRad radians (this frame),
+   * then set its magnitude to `speed`.  All seeker states use this so direction
+   * changes are rate-limited instead of instant (organic banking turns).
+   */
+  _steer(targetDir, speed, maxRad) {
+    const cur = this._vel.clone().normalize();
+    if (cur.lengthSq() < 1e-6) {
+      // No current heading — snap immediately
+      this._vel.copy(targetDir).normalize().multiplyScalar(speed);
+      return;
+    }
+    const dot   = Math.max(-1, Math.min(1, cur.dot(targetDir)));
+    const angle = Math.acos(dot);
+    if (angle <= maxRad) {
+      // Within tolerance — snap to desired
+      this._vel.copy(targetDir).normalize().multiplyScalar(speed);
+      return;
+    }
+    // Rotate cur toward targetDir by maxRad around the perpendicular axis
+    const axis = new THREE.Vector3().crossVectors(cur, targetDir);
+    if (axis.lengthSq() < 1e-8) {
+      // Nearly anti-parallel — pick an arbitrary perpendicular to break the deadlock
+      const ref  = Math.abs(cur.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+      const perp = new THREE.Vector3().crossVectors(ref, cur).normalize();
+      this._vel.copy(cur).applyAxisAngle(perp, maxRad).multiplyScalar(speed);
+      return;
+    }
+    axis.normalize();
+    this._vel.copy(cur).applyAxisAngle(axis, maxRad).multiplyScalar(speed);
   }
 
   // ─────────────────────────────────── warrior orbit AI ────────────────────

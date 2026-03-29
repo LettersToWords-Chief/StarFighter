@@ -365,7 +365,7 @@ class Starbase {
   hitByPhoton() {
     if (this.state !== 'active') return;
     this.underAttack  = true;
-    const damage      = 500;
+    const damage      = GameConfig.zylon.torpedoDamage ?? 185;
     this.shieldCharge = Math.max(0, this.shieldCharge - damage);
     this.shields      = Math.round(this.shieldCharge / 10);
     if (this.shieldCharge <= 0) {
@@ -375,15 +375,20 @@ class Starbase {
 
   /**
    * Called by SectorView when a Warrior cannon round hits the starbase shield.
-   * Uses the same torpedo damage value (185) as all other combat hits.
+   * Phase 1 — energy > 0: drain inventory.energy (shields held at full by _shieldRechargeTick).
+   * Phase 2 — energy = 0: drain shieldCharge directly (same as a player photon hit),
+   *            triggering dormant when charge reaches 0.
    */
-  takeCombatHit(shieldDamage) {
+  takeCombatHit(damage) {
     if (this.state !== 'active') return;
-    this.underAttack    = true;
-    this.shieldCharge   = Math.max(0, this.shieldCharge - shieldDamage);
-    this.shields        = Math.round(this.shieldCharge / 10);
-    this.distressActive = this.shields < 40;
-    if (this.shieldCharge <= 0) this._onShieldsFailed();
+    this.underAttack = true;
+    if ((this.inventory.energy ?? 0) > 0) {
+      this.inventory.energy = Math.max(0, this.inventory.energy - damage);
+    } else {
+      // Energy gone — hit the shields directly
+      this.shieldCharge = Math.max(0, this.shieldCharge - damage);
+      if (this.shieldCharge <= 0) this._onShieldsFailed();
+    }
   }
 
   /** Shields have failed — starbase goes dormant; must be kickstarted by the player. */

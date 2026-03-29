@@ -303,7 +303,22 @@ const GameConfig = Object.freeze({
 
     // ---- Sector combat ----
     // Seeker
-    seekerHP:                    25,   // 1 hit to kill
+    seekerHP:                   400,   // ~3 hits to kill (185 dmg/hit)
+    seekerGuardInner:            50,   // u — turn AWAY from beacon if closer
+    seekerGuardOuter:           150,   // u — turn TOWARD beacon if farther
+    seekerEngageRadius:         200,   // u — switch GUARD → ATTACK
+    seekerBreakRadius:           15,   // u — steer away from player (no ramming)
+    seekerGuardSpeed:            50,   // u/s — all seeker states
+    seekerTurnRate:             120,   // deg/s — max heading change per second (organic turns)
+
+    // Beacon
+    beaconShieldMax:            400,   // shield HP (separate from warrior shield)
+    beaconNormalSpeed:           25,   // u/s — base orbit
+    beaconSpeedTier1:            35,   // u/s — player within 200u
+    beaconSpeedTier2:            45,   // u/s — player within 150u
+    beaconSpeedTier3:            55,   // u/s — player within 100u
+    beaconSpeedTier4:            65,   // u/s — player within 50u
+    // Evasion on hit uses BEACON_SPEED const (100 u/s) for 10s — unchanged
 
     // Warrior shield model
     warriorShieldMax:           300,
@@ -325,15 +340,19 @@ const GameConfig = Object.freeze({
     zylonBaseSpeed:               8,  // u/s — keeps pace with player throttle 3 (6 u/s)
     zylonPassRange:              12,  // break-off distance when approaching player
 
-    // Warrior orbit
-    warriorOrbitRadiusMin:      100,  // u — inner orbit distance from starbase
-    warriorOrbitRadiusMax:      150,  // u — outer orbit distance from starbase
-    warriorOrbitSpeed:           50,  // u/s — tangential orbit speed (also used for approach)
+    // Warrior orbit (+50% from original 100/150u)
+    warriorOrbitRadiusMin:      150,  // u — inner orbit distance from starbase
+    warriorOrbitRadiusMax:      225,  // u — outer orbit distance from starbase
+    warriorOrbitSpeed:           50,  // u/s — tangential orbit speed (also for approach)
     warriorFireIntervalSec:       5,  // s — delay between cannon shots
 
     // Warrior cannon projectile
     warriorCannonSpeed:         200,  // u/s — matches player torpedo speed
     warriorCannonLife:          2.5,  // s — projectile lifetime → 500u effective range
+
+    // Warrior dispatch
+    warriorWarpDelaySec:          0,  // s — hyperspace transit to beacon sector (0 = instant)
+    warriorHp:                    3,  // hits to kill a warrior (used by galaxy ZylonWarrior)
   },
 
   // =========================================================

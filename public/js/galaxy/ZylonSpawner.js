@@ -162,15 +162,20 @@ class ZylonSpawner {
     if (!beacon?.active) return; // beacon was destroyed while warriors were queued
     if (this._warriorPairsSpawned >= this._maxWarriorPairs) return;
 
-    const warrior = new ZylonWarrior({
-      q: beacon.q,
-      r: beacon.r,
-      beacon,
-      spawner: this,
-    });
-    this._warriors.push(warrior);
-    galaxy.zylonWarriors.push(warrior);
-    this._warriorPairsSpawned++;
+    // Spawn TWO warriors per pair — staggered warp delays so they don't arrive at the exact same tick
+    for (let i = 0; i < 2; i++) {
+      const warrior = new ZylonWarrior({
+        q: beacon.q,
+        r: beacon.r,
+        beacon,
+        spawner: this,
+      });
+      // Small fixed stagger so the pair don't appear on the exact same tick
+      warrior._warpTimer = -(i * 2); // second warrior arrives ~2s after the first
+      this._warriors.push(warrior);
+      galaxy.zylonWarriors.push(warrior);
+    }
+    this._warriorPairsSpawned++; // counts pairs, not individual warriors
   }
 
   _spawnSubSpawner(beacon, galaxy) {
