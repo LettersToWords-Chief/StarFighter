@@ -1,21 +1,15 @@
 /**
  * ZylonShip.js — Sector-level Zylon enemy ships.
  *
- * Three types:
- *   seeker_tie  — TIE-fighter silhouette, no shields, 1-hit kill
- *   seeker_bird — Horseshoe / bird silhouette, no shields, 1-hit kill
- *   warrior     — Flying saucer, shield + generator + hull model
+ * Four types:
+ *   seeker_tie    — TIE-fighter silhouette, no shields, multi-hit kill
+ *   seeker_bird   — Horseshoe / bird silhouette, no shields, multi-hit kill
+ *   seeker_beacon — The Beacon ship; orbits sector center; no weapons; stops warrior warp when killed
+ *   warrior       — Flying saucer, shield + generator + hull model
  *
- * Warrior shield model (all values from GameConfig.zylon):
- *   shieldCharge 300 → 150 : absorbs 100% of incoming damage
- *   shieldCharge 150 → 0   : absorbs 75%, 25% bleeds to generatorHP
- *   generatorHP 100 → 0    : once depleted, regen stops permanently
- *   hullHP 185             : after shield=0 w/ no generator, 1 shot kills
- *
- * AI (Phase 1):
- *   PURSUE  — fly straight at player
- *   BREAK   — veer hard when within passRange
- *   CIRCLE  — arc around to re-enter from behind
+ * All three seeker types share the same galaxy-level ZylonSeeker reference.
+ * Killing the beacon sets _isBeacon=true and calls seeker.onComponentDestroyed(true).
+ * Only when all three are killed does the seeker die on the galaxy map.
  */
 class ZylonShip {
 
@@ -25,7 +19,8 @@ class ZylonShip {
     this._scene      = scene;
     this._type       = type || 'seeker_tie';
     this._dead       = false;
-    this._galaxyRef  = null;  // galaxy-level ZylonWarrior or ZylonSeeker
+    this._galaxyRef  = null;   // galaxy-level ZylonWarrior or ZylonSeeker
+    this._isBeacon   = false;  // true for seeker_beacon type (affects kill callback)
 
     const cfg = GameConfig.zylon;
 
@@ -45,6 +40,15 @@ class ZylonShip {
       this._worbitDir   = Math.random() < 0.5 ? 1 : -1;
       this._wphase      = 'approach'; // 'approach' | 'orbit'
       this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
+    } else if (this._type === 'seeker_beacon') {
+      // Beacon uses the beacon shield pool
+      this._hp           = cfg.beaconShieldMax ?? 400;
+      this._isBeacon     = true;
+      // Orbit state — initialise from start position angle
+      this._bOrbitAngle  = Math.atan2(startPos.z, startPos.x);
+      this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
+      this._bEvasion     = 0;  // seconds of fast-orbit evasion remaining
+      this._bHitDelay    = 0;  // seconds of post-hit pause (beacon stops, then flees)
     } else {
       // Seeker: HP pool (takes ~3 hits) + guard AI state
       this._hp       = cfg.seekerHP ?? 400;
@@ -229,6 +233,30 @@ class ZylonShip {
     return g;
   }
 
+  // ───────────────────────────────── beacon mesh builder ─────────────────
+
+  /** Icosahedral red beacon — identical to the legacy _buildBeaconMesh() in SectorView. */
+  _build_seeker_beacon() {
+    const g = new THREE.Group();
+    // Dark red outer shell
+    g.add(new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8, 0),
+      new THREE.MeshBasicMaterial({ color: 0x330000 })));
+    // Bright red wireframe overlay
+    g.add(new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8.1, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true })));
+    // Inner glow core
+    g.add(new THREE.Mesh(
+      new THREE.IcosahedronGeometry(3, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff4400 })));
+    // Lights
+    this._light = new THREE.PointLight(0xff3300, 3.0, 80);
+    g.add(this._light);
+    g.add(new THREE.PointLight(0xff1100, 1.2, 50));
+    return g;
+  }
+
   // ─────────────────────────────────── update ────────────────────────────────
 
   /**
@@ -258,12 +286,58 @@ class ZylonShip {
       }
     }
 
-    // ── Warrior: orbit & fire (separate state machine from seekers) ──
-    if (this._type === 'warrior') return this._updateWarrior(dt, playerPos, context);
-
-    // ── Seeker: guard / attack / return AI ──
+    // Dispatcher
+    if (this._type === 'warrior')       return this._updateWarrior(dt, playerPos, context);
+    if (this._type === 'seeker_beacon') return this._updateBeaconShip(dt, playerPos);
     return this._updateSeeker(dt, playerPos, context);
   }
+
+  // ─────────────────────────────── beacon ship AI ──────────────────────────
+
+  /**
+   * Beacon ship: orbits sector center at beaconPlacementUnits radius.
+   * Speed increases with player proximity. Evades (reverses orbit direction) when hit.
+   * Does not fire weapons.
+   */
+  _updateBeaconShip(dt, playerPos) {
+    const cfg      = GameConfig.zylon;
+    const ORBIT_R  = cfg.beaconPlacementUnits ?? 750;
+    const pos      = this.mesh.position;
+
+    // Post-hit pause: beacon stops briefly, then flees at full speed
+    if (this._bHitDelay > 0) {
+      this._bHitDelay -= dt;
+      return null; // hold position during the stun
+    }
+
+    // Proximity-based orbit speed (evasion overrides)
+    const dToPlayer = playerPos.distanceTo(pos);
+    let orbitSpeed;
+    if (this._bEvasion > 0) {
+      this._bEvasion -= dt;
+      orbitSpeed = 100; // BEACON_SPEED — full evasion orbit
+    } else if (dToPlayer < 50)  { orbitSpeed = cfg.beaconSpeedTier4 ?? 65; }
+    else if   (dToPlayer < 100) { orbitSpeed = cfg.beaconSpeedTier3 ?? 55; }
+    else if   (dToPlayer < 150) { orbitSpeed = cfg.beaconSpeedTier2 ?? 45; }
+    else if   (dToPlayer < 200) { orbitSpeed = cfg.beaconSpeedTier1 ?? 35; }
+    else                        { orbitSpeed = cfg.beaconNormalSpeed ?? 25; }
+
+    const omega = orbitSpeed / Math.max(50, ORBIT_R);
+    this._bOrbitAngle += this._bOrbitDir * omega * dt;
+    pos.set(
+      Math.cos(this._bOrbitAngle) * ORBIT_R,
+      0,
+      Math.sin(this._bOrbitAngle) * ORBIT_R
+    );
+
+    // Slow spin animation
+    this.mesh.rotation.y += 0.5 * dt;
+    this.mesh.rotation.x += 0.3 * dt;
+
+    return null; // beacon does not fire
+  }
+
+
 
   // ─────────────────────────────────── damage ────────────────────────────────
 
@@ -277,8 +351,25 @@ class ZylonShip {
 
     if (this._type === 'warrior') {
       return this._takeDamageWarrior(amount);
+    } else if (this._type === 'seeker_beacon') {
+      // Beacon uses an HP pool; hit triggers evasion
+      this._hp = Math.max(0, this._hp - amount);
+      // Trigger: 0.2s pause, then orbit at full evasion speed for 10s;
+      // randomise direction each hit (mirrors original _hitBeacon behaviour)
+      this._bHitDelay = 0.2;
+      this._bEvasion  = 10;
+      this._bOrbitDir = Math.random() < 0.5 ? 1 : -1;
+      if (this._light) {
+        this._light.intensity = 5.0;
+        setTimeout(() => { if (this._light) this._light.intensity = 3.0; }, 120);
+      }
+      if (this._hp <= 0) {
+        this._dead = true;
+        return true;
+      }
+      return false;
     } else {
-      // Seeker: HP pool — takes several hits to destroy
+      // seeker_tie / seeker_bird: HP pool — takes several hits to destroy
       this._hp = Math.max(0, this._hp - amount);
       if (this._hp <= 0) {
         this._dead = true;
@@ -372,12 +463,14 @@ class ZylonShip {
 
     // ── Beacon-dead / new-beacon state corrections ──
     if (!beaconPos) {
-      // Beacon gone: guard/return have nowhere to go — enter patrol orbit
+      // Beacon destroyed: guards have no post to defend — go right for the player
       if (this._sphase === 'guard' || this._sphase === 'return') {
-        this._sphase = 'patrol';
+        this._sphase = 'attack';
+        this._phase  = 'pursue';
+        this._circleTimer = 0;
       }
     } else {
-      // New beacon arrived: leave patrol and resume guard
+      // Beacon back: leave patrol and resume guard
       if (this._sphase === 'patrol') this._sphase = 'guard';
     }
 
@@ -610,11 +703,26 @@ class ZylonShip {
   destroy() {
     if (this._scene && this.mesh) this._scene.remove(this.mesh);
     this._dead = true;
-    // Mark the galaxy-level unit dead so it disappears from the map
+    // Notify the galaxy-level unit via the unified onComponentDestroyed pathway
     if (this._galaxyRef) {
-      this._galaxyRef.destroy();
+      if (typeof this._galaxyRef.onComponentDestroyed === 'function') {
+        this._galaxyRef.onComponentDestroyed(this._isBeacon ?? false);
+      } else {
+        // Fallback for any legacy ref that still has destroy()
+        this._galaxyRef.destroy();
+      }
       this._galaxyRef = null;
     }
+  }
+
+  /**
+   * Remove this ship's 3D mesh from the scene WITHOUT notifying the galaxy-level unit.
+   * Called when the player warps out — the seeker group stays alive on the galaxy map.
+   */
+  detach() {
+    if (this._scene && this.mesh) this._scene.remove(this.mesh);
+    this._dead = true;
+    this._galaxyRef = null; // sever link silently
   }
 
   // ─────────────────────────────────── accessors ─────────────────────────────

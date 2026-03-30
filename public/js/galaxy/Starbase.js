@@ -32,7 +32,12 @@ class Starbase {
     this.shields          = 100;   // 0–100 display (derived from shieldCharge)
     this.underAttack      = false;
     this.distressActive   = false;
-    // Note: 'underAssault' is no longer a valid state; only 'active' and 'dormant' exist.
+
+    // ---- Subspace messaging state ----
+    this._attackCooldown  = 0;     // seconds until next "under attack" message may fire
+    this._seekerDetected  = false; // true while Zylons are present in this sector
+    this._energyLowSent   = false; // true after "defenses low" message; resets above 10000
+    this._energyCritSent  = false; // true after "defenses critical" message; resets above 2000
 
     // Upgrade levels
     this.sensorLevel  = sensorRange;
@@ -43,16 +48,17 @@ class Starbase {
     // Outer bases: primed with 1 of each spare part — normal operating day, not day 1.
     // Capital: starts at half its safety-stock targets.
     const tgt = isCapital ? GameConfig.capital.target : GameConfig.starbase.outerTarget;
+    const capStart = GameConfig.capital.capitalStart ?? {};
     this.inventory = {
       energy:        isCapital
-        ? Math.floor(tgt.energy / 2)
+        ? (capStart.energy        ?? Math.floor(tgt.energy / 2))
         : (GameConfig.testMode ? GameConfig.zylon.testMode_starbaseEnergy : Math.floor(tgt.energy / 2)),
-      engineParts:   isCapital ? Math.floor(tgt.engineParts   / 2) : 1,
-      cannonParts:   isCapital ? Math.floor(tgt.cannonParts   / 2) : 1,
-      shieldParts:   isCapital ? Math.floor(tgt.shieldParts   / 2) : 1,
-      computerParts: isCapital ? Math.floor(tgt.computerParts / 2) : 2,
-      torpedoes:     isCapital ? Math.floor(tgt.torpedoes     / 2) : 50,
-      spareParts:    isCapital ? Math.floor(tgt.spareParts    / 2) : 1,
+      engineParts:   isCapital ? (capStart.engineParts   ?? Math.floor(tgt.engineParts   / 2)) : 1,
+      cannonParts:   isCapital ? (capStart.cannonParts   ?? Math.floor(tgt.cannonParts   / 2)) : 1,
+      shieldParts:   isCapital ? (capStart.shieldParts   ?? Math.floor(tgt.shieldParts   / 2)) : 1,
+      computerParts: isCapital ? (capStart.computerParts ?? Math.floor(tgt.computerParts / 2)) : 2,
+      torpedoes:     isCapital ? (capStart.torpedoes     ?? Math.floor(tgt.torpedoes     / 2)) : 50,
+      spareParts:    isCapital ? (capStart.spareParts    ?? Math.floor(tgt.spareParts    / 2)) : 1,
     };
 
     // Raws: capital primed with 1 full delivery (2000 units) of each raw.
@@ -106,9 +112,37 @@ class Starbase {
     } else if (this.state === 'active') {
       this._maintenanceTick(dt);
       this._shieldRechargeTick(dt);
+      this._messagingTick(dt);
     } else if (this.state === 'dormant') {
       // Even when dormant, run the recharge tick so a supply ship can restore us
       this._shieldRechargeTick(dt);
+    }
+  }
+
+  /**
+   * Check energy thresholds and fire subspace messages when crossed.
+   * Also ticks down the attack-notification cooldown.
+   */
+  _messagingTick(dt) {
+    // Attack cooldown
+    if (this._attackCooldown > 0) this._attackCooldown = Math.max(0, this._attackCooldown - dt);
+
+    const energy = this.inventory.energy ?? 0;
+
+    // Defenses Low: energy falls below 10 000
+    if (energy < 10000 && !this._energyLowSent) {
+      this._energyLowSent = true;
+      this._sendMessage('DEFENSES LOW — ENERGY RESERVES INSUFFICIENT');
+    } else if (energy >= 10000 && this._energyLowSent) {
+      this._energyLowSent = false; // reset so message can fire again if energy drops again
+    }
+
+    // Defenses Critical: energy falls below 2 000
+    if (energy < 2000 && !this._energyCritSent) {
+      this._energyCritSent = true;
+      this._sendMessage('DEFENSES CRITICAL — IMMEDIATE ASSISTANCE REQUIRED');
+    } else if (energy >= 2000 && this._energyCritSent) {
+      this._energyCritSent = false;
     }
   }
 
@@ -241,12 +275,12 @@ class Starbase {
         ship.fuel         = GameConfig.supplyShip.fuelCapacity;
         ship._pendingFuelDelivery = 0;
         ship._pendingRepairHp     = 0;
-        if (GameConfig.testMode) {
-          const sid = ship.outerBase?.name || ship.resource || 'CARGO';
-          const clk = window.SubspaceComm?.clockStr?.() || '?';
-          window.SubspaceComm?.send('CARGO BUILT', clk,
-            `[${sid}] NEW SHIP COMMISSIONED`);
-        }
+        // if (GameConfig.testMode) {
+        //   const sid = ship.outerBase?.name || ship.resource || 'CARGO';
+        //   const clk = window.SubspaceComm?.clockStr?.() || '?';
+        //   window.SubspaceComm?.send('CARGO BUILT', clk,
+        //     `[${sid}] NEW SHIP COMMISSIONED`);
+        // }
         this._buildInProgress = null;
       }
       return; // one build at a time
@@ -269,12 +303,12 @@ class Starbase {
     this._buildInProgress = destroyed;
     this._buildTimer      = recipe.buildSeconds;
 
-    if (GameConfig.testMode) {
-      const sid = destroyed.outerBase?.name || destroyed.resource || 'CARGO';
-      const clk = window.SubspaceComm?.clockStr?.() || '?';
-      window.SubspaceComm?.send('CARGO BUILD', clk,
-        `[${sid}] BUILD STARTED — ${recipe.buildSeconds}s`);
-    }
+    // if (GameConfig.testMode) {
+    //   const sid = destroyed.outerBase?.name || destroyed.resource || 'CARGO';
+    //   const clk = window.SubspaceComm?.clockStr?.() || '?';
+    //   window.SubspaceComm?.send('CARGO BUILD', clk,
+    //     `[${sid}] BUILD STARTED — ${recipe.buildSeconds}s`);
+    // }
   }
 
   /** Fraction by which an output item is below its target (0 = at target, 1 = empty). */
@@ -382,6 +416,13 @@ class Starbase {
   takeCombatHit(damage) {
     if (this.state !== 'active') return;
     this.underAttack = true;
+
+    // "Under attack" subspace message — fires when cooldown is off, then resets it
+    if (this._attackCooldown <= 0) {
+      this._sendMessage('UNDER ATTACK — SHIELDS TAKING FIRE');
+    }
+    this._attackCooldown = 60; // reset cooldown on every hit
+
     if ((this.inventory.energy ?? 0) > 0) {
       this.inventory.energy = Math.max(0, this.inventory.energy - damage);
     } else {
@@ -399,7 +440,44 @@ class Starbase {
     this.state            = 'dormant';
     this.underAttack      = false;
     this.distressActive   = false;
+    this._seekerDetected  = false;
+    this._attackCooldown  = 0;
+    this._sendMessage('DEFENSES LOST — STARBASE OFFLINE');
     if (this.onShieldsFailed) this.onShieldsFailed(this);
+  }
+
+  // ------------------------------------------------------------------
+  // SUBSPACE MESSAGING
+  // ------------------------------------------------------------------
+
+  /**
+   * Called by ZylonSeeker when it enters this sector.
+   * Sends a detection message the first time; subsequent arrivals are silent
+   * until the sector is cleared.
+   */
+  onSeekerEntered() {
+    if (this._seekerDetected) return;
+    this._seekerDetected = true;
+    const msg = this.isCapital
+      ? 'ZYLON FORCES DETECTED — CAPITAL UNDER THREAT'
+      : 'ZYLON FORCES DETECTED IN SECTOR';
+    this._sendMessage(msg);
+  }
+
+  /**
+   * Called by SectorView when the last Zylon is eliminated.
+   * Resets the detection flag so the next arrival triggers a fresh message.
+   */
+  onSectorCleared() {
+    this._seekerDetected = false;
+  }
+
+  /** Internal helper — sends via window.SubspaceComm if available. */
+  _sendMessage(text) {
+    const comm = window.SubspaceComm;
+    if (!comm) return;
+    const clk = comm.clockStr?.() || '?';
+    comm.send(this.name.toUpperCase(), clk, text);
   }
 
   /**

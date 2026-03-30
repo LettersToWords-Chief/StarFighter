@@ -740,6 +740,11 @@ class GalaxyMap {
     if (this.onWarriorArrived) this.onWarriorArrived(warrior);
   }
 
+  /** Called by ZylonSeeker._moveTo when it steps into a new sector. */
+  _onSeekerArrived(seeker) {
+    if (this.onSeekerArrived) this.onSeekerArrived(seeker);
+  }
+
   /** Called when a starbase's shields fail and it goes dormant. */
   _onStarbaseFallen(sb) {
     console.log(`[GalaxyMap] Starbase ${sb.name} has gone DORMANT.`);

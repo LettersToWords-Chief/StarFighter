@@ -114,18 +114,22 @@ class SupplyShip {
         if (this._pendingRepairHp > 0) {
           this.health = Math.min(GameConfig.supplyShip.maxHealth, this.health + this._pendingRepairHp);
           this._pendingRepairHp = 0;
-          if (GameConfig.testMode) {
-            const sid = this.outerBase?.name || this.resource || 'CARGO';
-            const clk = window.SubspaceComm?.clockStr?.() || '?';
-            window.SubspaceComm?.send('CARGO RPR', clk, `[${sid}]  HP: ${this.health}/1000`);
-          }
+          // if (GameConfig.testMode) {
+          //   const sid = this.outerBase?.name || this.resource || 'CARGO';
+          //   const clk = window.SubspaceComm?.clockStr?.() || '?';
+          //   window.SubspaceComm?.send('CARGO RPR', clk, `[${sid}]  HP: ${this.health}/1000`);
+          // }
         }
 
-        // Load raws for return trip (only from active base)
-        if (this.outerBase?.state === 'active') {
-          this.cargo = this.outerBase.buildDepartureCargo('inbound');
-        } else {
-          this.cargo = {};
+        // Load raws for return trip ONLY when leaving the outer base.
+        // When leaving the capital, _handleDock() already loaded the outbound
+        // manufactured goods into this.cargo — do NOT overwrite them here.
+        if (this.pathIndex !== 0) {
+          if (this.outerBase?.state === 'active') {
+            this.cargo = this.outerBase.buildDepartureCargo('inbound');
+          } else {
+            this.cargo = {};
+          }
         }
         this.forward    = !this.forward;
         this.state      = 'recharge';

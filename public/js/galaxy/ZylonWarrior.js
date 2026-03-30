@@ -1,24 +1,27 @@
 /**
- * ZylonWarrior.js — A Warrior pair dispatched by a Spawner to an active Beacon.
+ * ZylonWarrior.js — A Warrior pair produced by the Spawner.
  *
- * Warriors warp directly to a Beacon sector (instant galaxy transit).
- * Once present, they hold position and engage any player ship that enters.
- * When the player warps out, they remain on station.
+ * Warrior lifecycle:
+ *   SPAWNING  — managed entirely by ZylonSpawner (production timer).
+ *               The Warrior does not exist yet during this phase.
+ *   READY     — Warrior exists; waiting for an active Beacon signal to warp to.
+ *               Checks every 30 seconds for any active Beacon in the galaxy.
+ *               When one is found → warp is instant → ASSAULTING.
+ *   ASSAULTING — Warrior has arrived in the Beacon's sector; fighting.
+ *                Managed by SectorView once the player is present.
  *
- * States:
- *   WARPING    — in transit; will arrive after warpDelay seconds
- *   ASSAULTING — holding the beacon sector; fights player on contact
- *   COMBAT     — fighting the player (switched by SectorView)
- *   DEAD
+ * Notes:
+ *   - Warp is INSTANT. There is no in-transit state.
+ *   - Warriors survive Beacon death. They stay READY and wait for the next Beacon.
  */
 
 class ZylonWarrior {
   /**
    * @param {object} opts
-   * @param {number}       opts.q           — target beacon galaxy hex col
-   * @param {number}       opts.r           — target beacon galaxy hex row
-   * @param {ZylonBeacon}  opts.beacon      — the beacon they are warping to
-   * @param {ZylonSpawner} opts.spawner     — parent spawner
+   * @param {number}       opts.q        — initial galaxy hex col (spawner's location)
+   * @param {number}       opts.r        — initial galaxy hex row (spawner's location)
+   * @param {ZylonBeacon}  opts.beacon   — the beacon that triggered production (may go inactive)
+   * @param {ZylonSpawner} opts.spawner  — parent spawner
    */
   constructor({ q, r, beacon, spawner }) {
     this.q       = q;
@@ -26,16 +29,16 @@ class ZylonWarrior {
     this.beacon  = beacon;
     this.spawner = spawner;
 
-    this.state   = 'WARPING';
+    // Warrior begins existence as READY — waiting for a beacon signal
+    this.state   = 'READY';
     this.alive   = true;
 
     // How many hits to kill (Warriors are shielded)
     this.maxHp   = GameConfig.zylon.warriorHp;
     this.hp      = this.maxHp;
 
-    // Warp arrival timer
-    this._warpTimer    = 0;
-    this._warpDuration = GameConfig.zylon.warriorWarpDelaySec; // visual delay
+    // Check timer — start near-ready so first check fires quickly
+    this._waitTimer = 29;
 
     // In-sector
     this.sectorPos = null;   // { x, y } — set by SectorView on arrival
@@ -51,21 +54,52 @@ class ZylonWarrior {
   tick(dt, galaxy) {
     if (!this.alive) return;
 
-    if (this.state === 'WARPING') {
-      this._warpTimer += dt;
-      if (this._warpTimer >= this._warpDuration) {
-        // If the beacon was destroyed while we were in hyperspace, disband.
-        if (!this.beacon?.active) {
-          this.alive = false;
-          return;
+    // When ASSAULTING: deal galaxy-level damage if player is NOT in this sector.
+    // If player IS here, SectorView handles combat — skip galaxy tick.
+    if (this.state === 'ASSAULTING') {
+      const playerHere =
+        galaxy.playerPos?.q === this.q && galaxy.playerPos?.r === this.r;
+      if (!playerHere) {
+        this._combatTimer = (this._combatTimer ?? 0) + dt;
+        if (this._combatTimer >= GameConfig.zylon.warriorFireIntervalSec) {
+          this._combatTimer = 0;
+          const sb = galaxy.starbases.find(s =>
+            s.q === this.q && s.r === this.r && s.state === 'active'
+          );
+          if (sb) sb.takeCombatHit(GameConfig.zylon.zylonTorpedoDamage);
         }
-        this.state = 'ASSAULTING';
-        // Notify the galaxy map that a warrior has arrived in this sector
+      }
+      return;
+    }
+
+    if (this.state === 'COMBAT') return; // managed by SectorView
+
+    // READY: check every 30 seconds for any active beacon to warp to
+    this._waitTimer += dt;
+    if (this._waitTimer >= 30) {
+      this._waitTimer = 0;
+      // Prefer own beacon; fall back to any active beacon if ours was destroyed
+      const beacon = (this.beacon?.active ? this.beacon : null)
+        ?? galaxy.zylonBeacons.find(b => b.active);
+      if (beacon) {
+        const clk = window.SubspaceComm?.clockStr?.() ?? '?';
+        window.SubspaceComm?.send('WRR WARP', clk,
+          `[${this.q},${this.r}] \u2192 BEACON [${beacon.q},${beacon.r}]`);
+        // Warp is instant \u2014 move to beacon's sector and notify galaxy
+        this.beacon = beacon;
+        this.q      = beacon.q;
+        this.r      = beacon.r;
+        this.state  = 'ASSAULTING';
+        this._combatTimer = 0;
+        window.SubspaceComm?.send('WRR ARRIVED', clk,
+          `[${this.q},${this.r}] STATE: ASSAULTING`);
         galaxy._onWarriorArrived(this);
+      } else {
+        const clk = window.SubspaceComm?.clockStr?.() ?? '?';
+        window.SubspaceComm?.send('WRR READY', clk,
+          `[${this.q},${this.r}] NO BEACON FOUND`);
       }
     }
-    // In ASSAULTING state, Warriors hold their position.
-    // In COMBAT state, SectorView handles all timing and damage.
   }
 
   // ─────────────────────────────────────────────
@@ -94,5 +128,13 @@ class ZylonWarrior {
     this.alive    = false;
     this.inCombat = false;
     this.spawner.onWarriorDestroyed(this);
+  }
+
+  /**
+   * Called by ZylonShip.destroy() via the onComponentDestroyed pathway.
+   * Warriors are single-component units so this simply destroys them.
+   */
+  onComponentDestroyed(isBeacon = false) {
+    this.destroy();
   }
 }

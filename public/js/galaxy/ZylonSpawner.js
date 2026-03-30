@@ -70,30 +70,37 @@ class ZylonSpawner {
   }
 
   _processProductionCycle(galaxy) {
-    // ── Priority 1: initial bloom (6 pairs, one per direction) ──
+    // ── Priority 1: Warrior jobs — urgent beacon defence, don't wait for bloom ──
+    const warriorJob = this._queue.find(j => j.type === 'warrior');
+    if (warriorJob) {
+      if (this._warriorPairsSpawned < this._maxWarriorPairs) {
+        this._spawnWarriorPair(warriorJob.beaconRef, galaxy);
+        warriorJob.remaining--;
+        if (warriorJob.remaining <= 0) {
+          this._queue.splice(this._queue.indexOf(warriorJob), 1);
+        }
+      } else {
+        this._queue.splice(this._queue.indexOf(warriorJob), 1); // cap reached
+      }
+      this._checkExhaustion();
+      return;
+    }
+
+    // ── Priority 2: initial bloom (6 pairs, one per direction) ──
     if (this._bloomSent < 6 && this._bloomDirections.length > 0) {
       const dir = this._bloomDirections.shift();
       this._spawnSeekerPair(dir, galaxy);
       this._bloomSent++;
-      return; // one unit per cycle
+      return;
     }
 
-    // ── The queue now drives everything ──
+    // ── Priority 3: remaining queue items (replacement seekers, sub-spawners) ──
     if (this._queue.length === 0) return;
 
     const job = this._queue[0];
 
-    if (job.type === 'warrior') {
-      if (this._warriorPairsSpawned < this._maxWarriorPairs) {
-        this._spawnWarriorPair(job.beaconRef, galaxy);
-        job.remaining--;
-        if (job.remaining <= 0) this._queue.shift();
-      } else {
-        this._queue.shift(); // cap reached — skip
-      }
-    } else if (job.type === 'seeker') {
+    if (job.type === 'seeker') {
       if (this._seekerPairsSpawned < this._maxSeekerPairs) {
-        // Replacement seeker: pick any open direction or a random one
         const dir = this._pickReplacementDirection(galaxy);
         this._spawnSeekerPair(dir, galaxy);
       }
@@ -105,7 +112,6 @@ class ZylonSpawner {
       this._queue.shift();
     }
 
-    // Check if this Spawner has exhausted all limits
     this._checkExhaustion();
   }
 
@@ -127,6 +133,12 @@ class ZylonSpawner {
       // Queue 2 Warrior pairs for this beacon
       const pairs = GameConfig.zylon.warriorPairsPerBeacon; // 2
       this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairs });
+      // Reset the production timer — the beacon deployment IS the starting gun.
+      // Warriors should take exactly one full cycle (60s) from this moment.
+      this._produceTimer = 0;
+      const clk = window.SubspaceComm?.clockStr?.() ?? '?';
+      window.SubspaceComm?.send('WRR QUEUED', clk,
+        `[${beacon.q},${beacon.r}] ${pairs} PAIRS — QUEUE LEN: ${this._queue.length}`);
     } else if (beacon.type === 'resource') {
       this._queue.push({ type: 'spawner', beaconRef: beacon, remaining: 1 });
     }
@@ -159,23 +171,25 @@ class ZylonSpawner {
   }
 
   _spawnWarriorPair(beacon, galaxy) {
-    if (!beacon?.active) return; // beacon was destroyed while warriors were queued
     if (this._warriorPairsSpawned >= this._maxWarriorPairs) return;
 
-    // Spawn TWO warriors per pair — staggered warp delays so they don't arrive at the exact same tick
+    // Spawn TWO warriors per pair — they begin as READY and warp to any active beacon
     for (let i = 0; i < 2; i++) {
       const warrior = new ZylonWarrior({
-        q: beacon.q,
-        r: beacon.r,
+        q: this.q,   // start at spawner's sector
+        r: this.r,
         beacon,
         spawner: this,
       });
-      // Small fixed stagger so the pair don't appear on the exact same tick
-      warrior._warpTimer = -(i * 2); // second warrior arrives ~2s after the first
+      // Near-immediate first check so they warp right away if a beacon is already active
+      warrior._waitTimer = 29;
       this._warriors.push(warrior);
       galaxy.zylonWarriors.push(warrior);
     }
     this._warriorPairsSpawned++; // counts pairs, not individual warriors
+    const clk = window.SubspaceComm?.clockStr?.() ?? '?';
+    window.SubspaceComm?.send('WRR BORN', clk,
+      `SPAWNER [${this.q},${this.r}] → BEACON [${beacon?.q},${beacon?.r}] PAIRS: ${this._warriorPairsSpawned}/${this._maxWarriorPairs}`);
   }
 
   _spawnSubSpawner(beacon, galaxy) {

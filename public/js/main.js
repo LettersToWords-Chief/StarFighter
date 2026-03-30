@@ -64,13 +64,25 @@
   function openMap() {
     _mapOpen = true;
     $galaxy().classList.add('map-open');
-    SubspaceComm._renderLog();   // refresh message list each time the map opens
+    if (_sectorLive && window.SubspaceComm && SectorView.getZylonCount && SectorView.getSectorPos) {
+      const q = SectorView.getSectorPos().q;
+      const r = SectorView.getSectorPos().r;
+      const count = SectorView.getZylonCount();
+      SubspaceComm.send('DEBUG MAP OPEN', SubspaceComm.clockStr(), `[${q},${r}] ZYLONS ALIVE: ${count}`);
+    }
+    SubspaceComm._renderLog();
     if (_sectorLive) SectorView.suspendInput();
   }
 
   function closeMap(mode) {
     _mapOpen = false;
     $galaxy().classList.remove('map-open');
+    if (_sectorLive && window.SubspaceComm && SectorView.getZylonCount && SectorView.getSectorPos) {
+      const q = SectorView.getSectorPos().q;
+      const r = SectorView.getSectorPos().r;
+      const count = SectorView.getZylonCount();
+      SubspaceComm.send('DEBUG MAP CLOSE', SubspaceComm.clockStr(), `[${q},${r}] ZYLONS ALIVE: ${count}`);
+    }
     if (_sectorLive) SectorView.showView(mode); // rebind controls, set view direction
   }
 
@@ -87,6 +99,17 @@
       const pos = galaxyMap.playerPos;
       if (warrior.q === pos.q && warrior.r === pos.r) {
         SectorView.spawnZylons(1, 'warrior', warrior);
+      }
+    };
+
+    // When a Seeker group steps into the player's current sector, spawn all 3 ships.
+    galaxyMap.onSeekerArrived = (seeker) => {
+      if (!_sectorLive) return;
+      const pos = galaxyMap.playerPos;
+      if (seeker.q === pos.q && seeker.r === pos.r) {
+        SectorView.spawnZylons(1, 'seeker_tie',    seeker);
+        SectorView.spawnZylons(1, 'seeker_bird',   seeker);
+        SectorView.spawnZylons(1, 'seeker_beacon', seeker);
       }
     };
 
@@ -143,7 +166,7 @@
     const hexData  = galaxyMap.hexes.get(destKey);
     const starbase = galaxyMap.starbases.find(s => s.q === pos.q && s.r === pos.r);
     const seekerCount  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r).length ?? 0;
-    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === pos.q && w.r === pos.r).length ?? 0;
+    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === pos.q && w.r === pos.r).length ?? 0;
     const sector   = {
       q:           pos.q,
       r:           pos.r,
@@ -157,15 +180,13 @@
       allSupplyShips: galaxyMap.supplyShips,
       seekerCount,
       warriorCount,
-      zylons:         seekerCount + warriorCount, // legacy total
-      hasBeacon:      !!galaxyMap.zylonBeacons?.find(b => b.active && b.q === pos.q && b.r === pos.r),
-      beaconRef:      galaxyMap.zylonBeacons?.find(b => b.active && b.q === pos.q && b.r === pos.r) || null,
+      zylons:         seekerCount + warriorCount,
     };
 
     _sectorLive = true;
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const seekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r) ?? [];
-    const warriors = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === pos.q && w.r === pos.r) ?? [];
+    const warriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === pos.q && w.r === pos.r) ?? [];
     SectorView.enter({
       canvas:      document.getElementById('combat-canvas'),
       sector,
@@ -259,7 +280,7 @@
     const hexData  = galaxyMap.hexes.get(destKey);
     const starbase = galaxyMap.starbases.find(s => s.q === destination.q && s.r === destination.r);
     const seekerCount  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r).length ?? 0;
-    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === destination.q && w.r === destination.r).length ?? 0;
+    const warriorCount = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === destination.q && w.r === destination.r).length ?? 0;
     const sector   = {
       q:           destination.q,
       r:           destination.r,
@@ -273,15 +294,13 @@
       allSupplyShips: galaxyMap.supplyShips,
       seekerCount,
       warriorCount,
-      zylons:         seekerCount + warriorCount, // legacy total
-      hasBeacon:      !!galaxyMap.zylonBeacons?.find(b => b.active && b.q === destination.q && b.r === destination.r),
-      beaconRef:      galaxyMap.zylonBeacons?.find(b => b.active && b.q === destination.q && b.r === destination.r) || null,
+      zylons:         seekerCount + warriorCount,
     };
 
     _sectorLive = true;
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const arrSeekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r) ?? [];
-    const arrWarriors = galaxyMap.zylonWarriors?.filter(w => w.alive && w.state !== 'WARPING' && w.q === destination.q && w.r === destination.r) ?? [];
+    const arrWarriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === destination.q && w.r === destination.r) ?? [];
     SectorView.enter({
       canvas:          document.getElementById('combat-canvas'),
       sector,

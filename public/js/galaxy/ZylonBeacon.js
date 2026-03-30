@@ -1,39 +1,40 @@
 /**
- * ZylonBeacon.js — A placed object deployed by a Seeker pair when they enter a qualifying sector.
+ * ZylonBeacon.js — The warp-guidance device carried by every Seeker group.
  *
- * The Beacon serves two roles:
- *  1. Galaxy-map role: signals the Spawner what to produce next (starbase → Warriors, resource → Spawner)
- *  2. Sector-view role: physical object at a fixed position ~750 units from the starbase,
- *     guarded by the Seeker pair that deployed it.
+ * The Beacon is a permanent member of the Seeker group (TIE + BIRD + BEACON).
+ * It travels with the group and exists in every sector the player encounters them.
  *
- * Warriors can only warp to a Beacon — it is their galactic navigation system.
+ * Roles:
+ *  1. Galaxy-map: signals the Spawner once ACTIVATED at a qualifying sector.
+ *     Inactive while traveling — only appears on the galaxy map when active.
+ *  2. Sector-view: physical ship orbiting at ~750 units from sector center,
+ *     guarded by the TIE and BIRD. Killing it stops all warrior reinforcements.
+ *
+ * State:
+ *  active = false  — traveling with the seeker group (not yet at a destination)
+ *  active = true   — activated at a starbase or resource sector; summoning units
  */
 
 class ZylonBeacon {
   /**
    * @param {object} opts
-   * @param {number}  opts.q          — galaxy hex column
-   * @param {number}  opts.r          — galaxy hex row
-   * @param {string}  opts.type       — 'starbase' | 'resource'
+   * @param {number}       opts.q        — galaxy hex column
+   * @param {number}       opts.r        — galaxy hex row
+   * @param {string}       opts.type     — 'searching' | 'starbase' | 'resource'
    * @param {ZylonSpawner} opts.spawner  — the Spawner that owns this beacon's Seekers
-   * @param {object}  opts.sectorPos  — { x, y } pixel position in sector view (~750 units from starbase)
    */
-  constructor({ q, r, type, spawner, sectorPos = null }) {
+  constructor({ q, r, type = 'searching', spawner }) {
     this.q        = q;
     this.r        = r;
-    this.type     = type;      // 'starbase' | 'resource'
+    this.type     = type;
     this.spawner  = spawner;
 
-    // Sector-view position (set when sector is first rendered with this beacon present)
-    this.sectorPos = sectorPos;
-
-    // State
-    this.active     = true;
-    this.signalSent = false;   // true after Spawner has been notified (avoid double-dispatch)
+    // Inactive while traveling — activates when seeker reaches a qualifying sector
+    this.active   = false;
 
     // Animation
     this._pulseTimer = 0;
-    this._pulsePhase = Math.random() * Math.PI * 2; // stagger pulses if multiple beacons
+    this._pulsePhase = Math.random() * Math.PI * 2;
   }
 
   get key() { return `${this.q},${this.r}`; }
@@ -51,14 +52,34 @@ class ZylonBeacon {
     return 0.5 + 0.5 * Math.sin(this._pulseTimer * Math.PI + this._pulsePhase);
   }
 
-  /** Destroy this beacon — called when player weapons connect. */
+  /**
+   * Activate this beacon at a qualifying sector.
+   * Called by ZylonSeeker._evaluateSector() when the group reaches a target sector.
+   * Adds itself to galaxy.zylonBeacons (becomes visible on the galaxy map)
+   * and notifies the Spawner so it begins producing warriors or sub-spawners.
+   *
+   * @param {string}    type    — 'starbase' | 'resource'
+   * @param {GalaxyMap} galaxy  — live galaxy reference
+   */
+  activate(type, galaxy) {
+    if (this.active) return; // already activated
+    this.type   = type;
+    this.active = true;
+    // Add to galaxy beacon list so the galaxy map renders it and warriors can find it
+    galaxy.zylonBeacons.push(this);
+    // Notify spawner so it queues warriors / sub-spawner production
+    this.spawner.onBeaconDeployed(this, galaxy);
+  }
+
+  /** Destroy this beacon — called when the beacon ZylonShip is killed. */
   destroy() {
     this.active = false;
+    // Note: galaxy._updateZylons will filter it from zylonBeacons on next pass
   }
 
   /**
    * Compute the default sector-view position for a beacon relative to a starbase.
-   * Places the beacon ~750 units from the starbase, slightly offset so multiple
+   * Places the beacon ~750 units from the sector center, slightly offset so multiple
    * beacons in the same sector don't perfectly overlap.
    *
    * @param {number} sbX   — starbase sector-view x
@@ -68,7 +89,7 @@ class ZylonBeacon {
    */
   static defaultSectorPos(sbX, sbY, index = 0) {
     const DIST  = 750;
-    const angle = (index * Math.PI * 2 / 6) - Math.PI / 2; // evenly spread if multiple
+    const angle = (index * Math.PI * 2 / 6) - Math.PI / 2;
     return {
       x: sbX + Math.cos(angle) * DIST,
       y: sbY + Math.sin(angle) * DIST,

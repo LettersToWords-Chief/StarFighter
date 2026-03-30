@@ -41,9 +41,11 @@ class ZylonSeeker {
     this.spawner = spawner;
     this.galaxy  = galaxy;
 
-    this.state   = 'SEARCHING';
-    this.beacon  = null;         // ZylonBeacon once deployed
-    this.alive   = true;
+    this.state          = 'SEARCHING';
+    this.alive          = true;
+    // Beacon is permanent — born here, activated when seeker reaches a qualifying sector
+    this.beacon         = new ZylonBeacon({ q, r, type: 'searching', spawner });
+    this._liveComponents = 3; // TIE + BIRD + BEACON — seeker dies when all three are killed
 
     // Galaxy-move timer
     this._moveTimer    = 0;
@@ -69,7 +71,7 @@ class ZylonSeeker {
 
   tick(dt, galaxy) {
     if (!this.alive) return;
-    if (this.state === 'GUARDING' || this.state === 'FALLBACK') return;
+    if (this.state === 'GUARDING') return;
     if (this.inCombat) return;
 
     // Interval is always the real game value — the caller scales dt during fast-forward
@@ -223,9 +225,13 @@ class ZylonSeeker {
   }
 
   _moveTo(q, r) {
-    this.q = q;
-    this.r = r;
+    this.q       = q;
+    this.r       = r;
     this.sectorPos = null; // reset in-sector position on sector change
+    // Beacon travels with the group — keep its galaxy coords in sync
+    if (this.beacon) { this.beacon.q = q; this.beacon.r = r; }
+    // Notify galaxy so main.js can spawn 3D ships if player is in this sector
+    if (this.galaxy?._onSeekerArrived) this.galaxy._onSeekerArrived(this);
   }
 
   // ─────────────────────────────────────────────
@@ -240,20 +246,23 @@ class ZylonSeeker {
     // Always clear any stale tracking state when moving to a new sector
     this._clearTracking();
 
-    // Only deploy at outer, active starbases — never at the capital or already-fallen bases
+    // Deploy at any active starbase, including the capital
     const starbase = galaxy.starbases.find(sb =>
-      sb.q === this.q && sb.r === this.r && !sb.isCapital && sb.state === 'active'
+      sb.q === this.q && sb.r === this.r && sb.state === 'active'
     );
 
     if (starbase) {
-      this._deployBeacon(galaxy, 'starbase');
+      starbase.onSeekerEntered?.(); // notify starbase — triggers subspace detection message
+      this.beacon.activate('starbase', galaxy); // activates and joins galaxy.zylonBeacons
+      this.state = 'GUARDING';
       return;
     }
 
     const hex = galaxy.hexes.get(HexMath.key(this.q, this.r));
     const hasSpawner = galaxy.zylonSpawners.some(sp => sp.alive && sp.q === this.q && sp.r === this.r);
     if (hex?.isResource && !hasSpawner) {
-      this._deployBeacon(galaxy, 'resource');
+      this.beacon.activate('resource', galaxy);
+      this.state = 'GUARDING';
       return;
     }
 
@@ -275,26 +284,6 @@ class ZylonSeeker {
     // Empty (or fast-forward) — keep searching via pachinko
   }
 
-  _deployBeacon(galaxy, type) {
-    if (!this.beacon) {
-      const beaconIndex = galaxy.zylonBeacons.filter(
-        b => b.q === this.q && b.r === this.r && b.active
-      ).length;
-
-      this.beacon = new ZylonBeacon({
-        q: this.q,
-        r: this.r,
-        type,
-        spawner: this.spawner,
-        sectorPos: null,
-      });
-      this.beacon._beaconIndex = beaconIndex;
-      galaxy.zylonBeacons.push(this.beacon);
-      this.spawner.onBeaconDeployed(this.beacon, galaxy);
-    }
-    this.state = 'GUARDING';
-  }
-
   // ─────────────────────────────────────────────
   // CARGO TRACKING HELPERS
   // ─────────────────────────────────────────────
@@ -308,22 +297,30 @@ class ZylonSeeker {
   }
 
   // ─────────────────────────────────────────────
-  // COMBAT EVENTS (called by SectorView)
+  // COMPONENT DEATH (called by ZylonShip.destroy)
   // ─────────────────────────────────────────────
 
-  onBeaconDestroyed() {
-    this.beacon = null;
-    this.state  = 'FALLBACK';
+  /**
+   * Called by each of the three sector-view ships (TIE, BIRD, BEACON) when killed.
+   * Tracking: when all three are gone the galaxy-level seeker dies.
+   *
+   * @param {boolean} isBeacon — true when the BEACON ship was the one killed
+   */
+  onComponentDestroyed(isBeacon = false) {
+    if (isBeacon && this.beacon) {
+      this.beacon.destroy(); // stops warrior summoning immediately
+    }
+    this._liveComponents = Math.max(0, this._liveComponents - 1);
+    if (this._liveComponents <= 0) {
+      this.destroy();
+    }
   }
 
-  hit() {
-    this.hp--;
-    if (this.hp <= 0) this.destroy();
-  }
-
+  /** Final death — only called once all three sector-view ships are gone. */
   destroy() {
     this.alive    = false;
     this.inCombat = false;
+    if (this.beacon) this.beacon.destroy(); // ensure beacon is inactive
     this.spawner.onSeekerDestroyed(this);
   }
 }

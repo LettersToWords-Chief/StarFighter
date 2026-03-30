@@ -126,6 +126,17 @@ const GameConfig = Object.freeze({
       spareParts:    40,
     }),
 
+    /** Capital starting inventory (day-one stock before manufacturing kicks in). */
+    capitalStart: Object.freeze({
+      energy:        50000,
+      engineParts:   7,
+      cannonParts:   5,
+      shieldParts:   3,
+      computerParts: 8,
+      torpedoes:     260,
+      spareParts:    25,
+    }),
+
     /**
      * Strategic reserve — the minimum the capital keeps for player repairs.
      * buildDepartureCargo will never ship quantities that would drop below these.
@@ -141,7 +152,7 @@ const GameConfig = Object.freeze({
     }),
 
     /** Plasma harvested per second from the capital's nebula sector (feeds manufacturing). */
-    plasmaHarvestPerSec: 2.8,
+    plasmaHarvestPerSec: 3.5,
 
     /** Cap on raw plasma stockpile at the capital (prevents unbounded accumulation). */
     plasmaRawCap: 500,
@@ -277,8 +288,8 @@ const GameConfig = Object.freeze({
     /** Energy the player must transfer to kickstart a dormant starbase (fully restores shields). */
     starbaseKickstartEnergy:   1000,
 
-    /** Test-mode outer base starting energy — low so player can drain shields with cannons. */
-    testMode_starbaseEnergy:   2000,
+    /** Test-mode outer base starting energy. */
+    testMode_starbaseEnergy:   12000,
 
 
     /** Sector-view distance from starbase where Beacon is placed (units). */
