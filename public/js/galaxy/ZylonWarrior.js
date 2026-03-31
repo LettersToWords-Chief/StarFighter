@@ -40,6 +40,10 @@ class ZylonWarrior {
     // Check timer — start near-ready so first check fires quickly
     this._waitTimer = 29;
 
+    // Approach tracking — distance from sector entry point to orbit.
+    // Set to 900 on arrival; decrements at 50u/s until orbit (200u) is reached.
+    this._distToStarbase = null;
+
     // In-sector
     this.sectorPos = null;   // { x, y } — set by SectorView on arrival
     this.inCombat  = false;  // true when fighting the player
@@ -54,19 +58,37 @@ class ZylonWarrior {
   tick(dt, galaxy) {
     if (!this.alive) return;
 
-    // When ASSAULTING: deal galaxy-level damage if player is NOT in this sector.
+    // When ASSAULTING: fly in to orbit, then deal galaxy-level damage.
     // If player IS here, SectorView handles combat — skip galaxy tick.
     if (this.state === 'ASSAULTING') {
       const playerHere =
         galaxy.playerPos?.q === this.q && galaxy.playerPos?.r === this.r;
       if (!playerHere) {
+        // Approach phase: close distance at 50u/s until orbit reached
+        if (this._distToStarbase > 200) {
+          this._distToStarbase = Math.max(200, this._distToStarbase - 50 * dt);
+          return;
+        }
+        // Orbit phase: fire every warriorFireIntervalSec
         this._combatTimer = (this._combatTimer ?? 0) + dt;
         if (this._combatTimer >= GameConfig.zylon.warriorFireIntervalSec) {
           this._combatTimer = 0;
-          const sb = galaxy.starbases.find(s =>
+          const dmg = GameConfig.zylon.zylonTorpedoDamage;
+          const sb  = galaxy.starbases.find(s =>
             s.q === this.q && s.r === this.r && s.state === 'active'
           );
-          if (sb) sb.takeCombatHit(GameConfig.zylon.zylonTorpedoDamage);
+          // Each cargo ship in the sector has a 1/6 chance of intercepting the shot
+          // (they represent ~1/6 of the warrior's orbit arc — closest target wins).
+          const cargoShips = galaxy.shipsInSector(this.q, this.r);
+          let intercepted = false;
+          for (const ship of cargoShips) {
+            if (Math.random() < 1 / 6) {
+              ship.takeDamage(dmg);
+              intercepted = true;
+              break;
+            }
+          }
+          if (!intercepted && sb) sb.takeCombatHit(dmg);
         }
       }
       return;
@@ -82,22 +104,14 @@ class ZylonWarrior {
       const beacon = (this.beacon?.active ? this.beacon : null)
         ?? galaxy.zylonBeacons.find(b => b.active);
       if (beacon) {
-        const clk = window.SubspaceComm?.clockStr?.() ?? '?';
-        window.SubspaceComm?.send('WRR WARP', clk,
-          `[${this.q},${this.r}] \u2192 BEACON [${beacon.q},${beacon.r}]`);
-        // Warp is instant \u2014 move to beacon's sector and notify galaxy
-        this.beacon = beacon;
-        this.q      = beacon.q;
-        this.r      = beacon.r;
-        this.state  = 'ASSAULTING';
-        this._combatTimer = 0;
-        window.SubspaceComm?.send('WRR ARRIVED', clk,
-          `[${this.q},${this.r}] STATE: ASSAULTING`);
+        // Warp is instant — move to beacon's sector and notify galaxy
+        this.beacon            = beacon;
+        this.q                 = beacon.q;
+        this.r                 = beacon.r;
+        this.state             = 'ASSAULTING';
+        this._distToStarbase   = 900;
+        this._combatTimer      = 0;
         galaxy._onWarriorArrived(this);
-      } else {
-        const clk = window.SubspaceComm?.clockStr?.() ?? '?';
-        window.SubspaceComm?.send('WRR READY', clk,
-          `[${this.q},${this.r}] NO BEACON FOUND`);
       }
     }
   }

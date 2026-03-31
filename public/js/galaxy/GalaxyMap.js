@@ -447,7 +447,8 @@ class GalaxyMap {
       const k = HexMath.key(this.hoveredHex.q, this.hoveredHex.r);
       if (!this.hexes.has(k)) return;
 
-      this.targetPos = { ...this.hoveredHex };
+      this.targetPos    = { ...this.hoveredHex };
+      this._selectedHex = { ...this.hoveredHex }; // store for live refresh
       document.getElementById('hud-status').textContent = 'TARGET LOCKED';
       this._updateResourcesPanel(this.hoveredHex);
     });
@@ -486,7 +487,8 @@ class GalaxyMap {
     window.addEventListener('keydown', e => {
       // H is owned by main.js — do not handle here
       if (e.key === 'Escape') {
-        this.targetPos = null;
+        this.targetPos    = null;
+        this._selectedHex = null;
         document.getElementById('hud-status').textContent = 'STANDBY';
         this._updateResourcesPanel(null);
       }
@@ -636,6 +638,15 @@ class GalaxyMap {
         // Always update ships regardless of map visibility
         this._updateSupplyShips(dt);
         this._updateZylons(dt);
+
+        // Refresh the selected-sector resources panel every 2 seconds
+        if (this._selectedHex) {
+          this._lastPanelRefresh = (this._lastPanelRefresh ?? 0) + dt;
+          if (this._lastPanelRefresh >= 2) {
+            this._lastPanelRefresh = 0;
+            this._updateResourcesPanel(this._selectedHex);
+          }
+        }
 
         // Skip draw when canvas has no size (map overlay hidden)
         if (this.canvas.width === 0 || this.canvas.height === 0) return;

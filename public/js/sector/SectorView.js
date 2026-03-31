@@ -3374,16 +3374,28 @@ const SectorView = (() => {
       _zylons.push(beaconShip);
     }
     // Warriors at sector entry come from galaxy ZylonWarriors in ASSAULTING/COMBAT state.
+    // Spawn each at its real approach distance so the player sees them in the right place.
     for (let i = 0; i < warriorCount; i++) {
-      const jAngle   = Math.random() * Math.PI * 2;
-      const jitter   = 30 + Math.random() * 50;
-      const wSpawn   = _zEntryBase.clone().addScaledVector(
-        new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-      const wShip    = new ZylonShip(_scene, wSpawn, 'warrior');
-      const wRef     = warriorGalaxyRefs[i] ?? null;
+      const wRef = warriorGalaxyRefs[i] ?? null;
+      const dist = wRef?._distToStarbase ?? 200;
+      let wSpawn;
+      if (dist <= 200) {
+        // Already at orbit — place at random angle on the 200u orbit circle
+        const orbAngle = Math.random() * Math.PI * 2;
+        wSpawn = new THREE.Vector3(Math.cos(orbAngle) * 200, 0, Math.sin(orbAngle) * 200);
+      } else {
+        // Still approaching — place at current distance along entry angle with jitter
+        const jAngle = Math.random() * Math.PI * 2;
+        const jitter = 30 + Math.random() * 50;
+        wSpawn = new THREE.Vector3(
+          Math.cos(_zEntryAngle) * dist, 0, Math.sin(_zEntryAngle) * dist
+        ).addScaledVector(new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+      }
+      const wShip = new ZylonShip(_scene, wSpawn, 'warrior');
       if (wRef) wShip.setGalaxyRef(wRef);
       _zylons.push(wShip);
     }
+
     if (totalZylons > 0 && typeof showMessage === 'function') {
       // showMessage('RED ALERT', '', `${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED`);
     }

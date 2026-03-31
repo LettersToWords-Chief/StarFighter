@@ -136,9 +136,6 @@ class ZylonSpawner {
       // Reset the production timer — the beacon deployment IS the starting gun.
       // Warriors should take exactly one full cycle (60s) from this moment.
       this._produceTimer = 0;
-      const clk = window.SubspaceComm?.clockStr?.() ?? '?';
-      window.SubspaceComm?.send('WRR QUEUED', clk,
-        `[${beacon.q},${beacon.r}] ${pairs} PAIRS — QUEUE LEN: ${this._queue.length}`);
     } else if (beacon.type === 'resource') {
       this._queue.push({ type: 'spawner', beaconRef: beacon, remaining: 1 });
     }
@@ -187,9 +184,6 @@ class ZylonSpawner {
       galaxy.zylonWarriors.push(warrior);
     }
     this._warriorPairsSpawned++; // counts pairs, not individual warriors
-    const clk = window.SubspaceComm?.clockStr?.() ?? '?';
-    window.SubspaceComm?.send('WRR BORN', clk,
-      `SPAWNER [${this.q},${this.r}] → BEACON [${beacon?.q},${beacon?.r}] PAIRS: ${this._warriorPairsSpawned}/${this._maxWarriorPairs}`);
   }
 
   _spawnSubSpawner(beacon, galaxy) {
