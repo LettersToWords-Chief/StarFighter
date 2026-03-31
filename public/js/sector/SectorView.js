@@ -68,8 +68,11 @@ const SectorView = (() => {
   let _lockState = 0;          // 0=none 1=partial-top 2=partial-bottom 3=full
   let _starbaseLocked = false;  // true when SB dot is inside inner scope box
   let _targetLocked   = false;  // true when any combat contact is fully locked
-  let _lockedContactPos = null; // 3D world position of the locked contact
-  let _lockedContactVel = new THREE.Vector3(); // velocity of the locked contact (for lead aiming)
+  let _aftLocked      = false;  // true when a rear enemy is within 500u and centered on scope
+  let _lockedContactPos    = null;               // 3D world position of the front-locked contact
+  let _lockedContactVel    = new THREE.Vector3(); // velocity of the front-locked contact
+  let _aftLockedContactPos = null;               // 3D world position of the aft-locked contact
+  let _aftLockedContactVel = new THREE.Vector3(); // velocity of the aft-locked contact
   const _keys = new Set();
 
   let _sectorType = 'void', _sectorName = '', _hasStarbase = false;
@@ -1789,15 +1792,25 @@ const SectorView = (() => {
     const pos = _camera.position.clone()
                   .addScaledVector(right, xOffset)
                   .addScaledVector(down, 1.5);
-    // Aim: when combat-locked, lead the target; otherwise fire forward
+    // Aim: when combat-locked, lead the target; otherwise fire in the cannon's natural direction
     let vel;
     if (!aft && _targetLocked && _lockedContactPos) {
       const toTarget = _lockedContactPos.clone().sub(pos);
       const dist     = toTarget.length();
       if (dist > 0.1) {
-        // First-order intercept: aim at where target will be when torpedo arrives
         const travelTime = dist / TORPEDO_SPEED;
         const leadPos    = _lockedContactPos.clone().addScaledVector(_lockedContactVel, travelTime);
+        vel = leadPos.sub(pos).normalize().multiplyScalar(TORPEDO_SPEED);
+      } else {
+        vel = fireDir.multiplyScalar(TORPEDO_SPEED);
+      }
+    } else if (aft && _aftLocked && _aftLockedContactPos) {
+      // Aft lead aiming: same first-order intercept, firing backward toward the rear target
+      const toTarget = _aftLockedContactPos.clone().sub(pos);
+      const dist     = toTarget.length();
+      if (dist > 0.1) {
+        const travelTime = dist / TORPEDO_SPEED;
+        const leadPos    = _aftLockedContactPos.clone().addScaledVector(_aftLockedContactVel, travelTime);
         vel = leadPos.sub(pos).normalize().multiplyScalar(TORPEDO_SPEED);
       } else {
         vel = fireDir.multiplyScalar(TORPEDO_SPEED);
@@ -2702,6 +2715,7 @@ const SectorView = (() => {
       // Contact dots + lock detection
       let scopeLock = 0;
       _starbaseLocked = false;
+      _aftLocked      = false; // reset each frame
       for (const ct of contacts) {
         if (ct.dist < 0.1) continue;
         const sx2 = scopeCx + Math.max(-maxH, Math.min(maxH, ct.rDot * maxH * 1.4));
@@ -2723,6 +2737,10 @@ const SectorView = (() => {
         if (ct.fwd > 0 && ct.label === 'SB' && Math.abs(dx) < sibW && Math.abs(dy) < sibH) {
           _starbaseLocked = true;
         }
+        // Rear lock: enemy behind player, within 500u, centered on scope
+        if (ct.fwd < 0 && isEnemy && ct.dist < 500) {
+          if (Math.abs(dx) < sibW && Math.abs(dy) < sibH) _aftLocked = true;
+        }
       }
       _lockState = scopeLock;
 
@@ -2738,6 +2756,18 @@ const SectorView = (() => {
       } else {
         _lockedContactPos = null;
         _lockedContactVel.set(0, 0, 0);
+      }
+
+      // Aft lock: find the most-centered rear enemy for lead aiming
+      if (_aftLocked) {
+        const bestAft = contacts
+          .filter(ct => ct.fwd < 0 && (ct.label.startsWith('ZY') || ct.label === 'BN') && ct.dist < 500)
+          .sort((a, b) => (Math.abs(a.rDot) + Math.abs(a.uDot)) - (Math.abs(b.rDot) + Math.abs(b.uDot)))[0];
+        _aftLockedContactPos = bestAft ? bestAft.pos.clone() : null;
+        _aftLockedContactVel = bestAft?.vel ? bestAft.vel.clone() : new THREE.Vector3();
+      } else {
+        _aftLockedContactPos = null;
+        _aftLockedContactVel.set(0, 0, 0);
       }
 
       // Drone dot on scope when plug is in transit
@@ -2773,6 +2803,19 @@ const SectorView = (() => {
           oc.moveTo(scopeX + 2,          scopeCy + dashGap); oc.lineTo(scopeX + dashLen,          scopeCy + dashGap);
           oc.moveTo(scopeX + scopeW - 2, scopeCy + dashGap); oc.lineTo(scopeX + scopeW - dashLen, scopeCy + dashGap);
         }
+        oc.stroke(); oc.globalAlpha = 1;
+      }
+
+      // Aft lock indicator: amber diagonal lines through inner-square corners
+      if (_aftLocked) {
+        const pulse = 0.6 + 0.4 * Math.sin(Date.now() * 0.006);
+        oc.strokeStyle = 'rgba(255,160,0,0.90)'; oc.lineWidth = 1.5; oc.globalAlpha = pulse;
+        oc.beginPath();
+        // Each line runs from just inside a scope outer corner to the matching inner-square corner
+        oc.moveTo(scopeX + 4,              scopeY + 4);              oc.lineTo(scopeCx - sibW, scopeCy - sibH); // TL
+        oc.moveTo(scopeX + scopeW - 4,    scopeY + 4);              oc.lineTo(scopeCx + sibW, scopeCy - sibH); // TR
+        oc.moveTo(scopeX + 4,              scopeY + scopeH - 4);    oc.lineTo(scopeCx - sibW, scopeCy + sibH); // BL
+        oc.moveTo(scopeX + scopeW - 4,    scopeY + scopeH - 4);    oc.lineTo(scopeCx + sibW, scopeCy + sibH); // BR
         oc.stroke(); oc.globalAlpha = 1;
       }
       // Docking status above scope — kept minimal, detail is in the scope indicator
@@ -3400,12 +3443,8 @@ const SectorView = (() => {
       // showMessage('RED ALERT', '', `${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED`);
     }
 
-    if (window.SubspaceComm) {
-       const aliveCount = _zylons.filter(zShip => !zShip.dead).length;
-       const tc = Math.floor(_galacticClock || 0);
-       const clk = `${String(Math.floor(tc/3600)).padStart(2,'0')}:${String(Math.floor((tc%3600)/60)).padStart(2,'0')}:${String(tc%60).padStart(2,'0')}`;
-       window.SubspaceComm.send('DEBUG ENTER', clk, `[${_sectorQ},${_sectorR}] ZYLONS ALIVE: ${aliveCount}`);
-    }
+
+
 
 
 

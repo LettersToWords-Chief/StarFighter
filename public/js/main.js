@@ -64,12 +64,6 @@
   function openMap() {
     _mapOpen = true;
     $galaxy().classList.add('map-open');
-    if (_sectorLive && window.SubspaceComm && SectorView.getZylonCount && SectorView.getSectorPos) {
-      const q = SectorView.getSectorPos().q;
-      const r = SectorView.getSectorPos().r;
-      const count = SectorView.getZylonCount();
-      SubspaceComm.send('DEBUG MAP OPEN', SubspaceComm.clockStr(), `[${q},${r}] ZYLONS ALIVE: ${count}`);
-    }
     SubspaceComm._renderLog();
     if (_sectorLive) SectorView.suspendInput();
   }
@@ -77,12 +71,6 @@
   function closeMap(mode) {
     _mapOpen = false;
     $galaxy().classList.remove('map-open');
-    if (_sectorLive && window.SubspaceComm && SectorView.getZylonCount && SectorView.getSectorPos) {
-      const q = SectorView.getSectorPos().q;
-      const r = SectorView.getSectorPos().r;
-      const count = SectorView.getZylonCount();
-      SubspaceComm.send('DEBUG MAP CLOSE', SubspaceComm.clockStr(), `[${q},${r}] ZYLONS ALIVE: ${count}`);
-    }
     if (_sectorLive) SectorView.showView(mode); // rebind controls, set view direction
   }
 
