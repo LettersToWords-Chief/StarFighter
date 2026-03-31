@@ -2023,12 +2023,8 @@ const SectorView = (() => {
                 _kills++;
                 _targets = Math.max(0, _targets - 1);
                 
-                if (window.SubspaceComm) {
-                   const aliveCount = _zylons.filter(zShip => !zShip.dead).length;
-                   const tc = Math.floor(_galacticClock || 0);
-                   const clk = `${String(Math.floor(tc/3600)).padStart(2,'0')}:${String(Math.floor((tc%3600)/60)).padStart(2,'0')}:${String(tc%60).padStart(2,'0')}`;
-                   window.SubspaceComm.send('DEBUG KILL', clk, `[${_sectorQ},${_sectorR}] ZYLONS ALIVE: ${aliveCount}`);
-                }
+
+
               }
               hit = true;
               break;

@@ -15,6 +15,16 @@ const GameConfig = Object.freeze({
   // Set true to observe Zylon AI in real-time (no fast-forward, units visible on map)
   testMode: true,
 
+  // =========================================================
+  // DEBUG FLAGS — toggle without touching feature code
+  // =========================================================
+  debug: {
+    warrior:  false,   // warrior lifecycle: warp, born, arrived, ready
+    combat:   false,   // kill events, torpedo hits
+    sector:   false,   // sector enter/exit, map open/close
+    spawner:  false,   // spawner production cycles, beacon events
+  },
+
 
   // =========================================================
   // SUPPLY SHIP (cargo ship NPC)
