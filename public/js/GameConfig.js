@@ -332,6 +332,20 @@ const GameConfig = Object.freeze({
     seekerGuardSpeed:            50,   // u/s — all seeker states
     seekerTurnRate:             120,   // deg/s — max heading change per second (organic turns)
 
+    // Dogfight AI (TIE and Bird in attack mode — joystick arc-turn model)
+    dogfightTurnRate:            45,   // deg/s — fixed arc turn rate per axis
+    dogfightManeuverMin:        1.2,   // s     — min committed maneuver duration
+    dogfightManeuverMax:        2.8,   // s     — max committed maneuver duration
+    dogfightLearnRate:         0.05,   // weight delta per scoring event
+    dogfightColAvoidR:           30,   // u     — collision override radius
+    dogfightFrontFireR:         500,   // u     — front cannon max fire range
+    dogfightRearFireR:          400,   // u     — rear cannon max fire range
+    dogfightFrontCoolMin:       2.0,   // s     — front cannon recharge (min)
+    dogfightFrontCoolMax:       4.0,   // s     — front cannon recharge (max)
+    dogfightRearCoolMin:        2.5,   // s     — rear cannon recharge (min)
+    dogfightRearCoolMax:        5.0,   // s     — rear cannon recharge (max)
+
+
     // Beacon
     beaconShieldMax:            400,   // shield HP (separate from warrior shield)
     beaconNormalSpeed:           25,   // u/s — base orbit

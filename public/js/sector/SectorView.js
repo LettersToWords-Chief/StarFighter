@@ -1323,43 +1323,90 @@ const SectorView = (() => {
     if (_renderer && _scene) _renderer.render(_scene, _camera);
     _drawHUD();
     if (_lrsOn) _drawLRS();
-    if (GameConfig.testMode && _hasStarbase && _currentStarbase) _drawStarbaseDebug();
+    if (GameConfig.testMode) _drawStarbaseDebug();
     if (_entryTimer > 0) _entryTimer -= dt;
   }
 
   function _drawStarbaseDebug() {
-    const oc = _overlayCtx; if (!oc || !_currentStarbase) return;
-    const sb = _currentStarbase;
-    const energy    = sb.inventory?.energy ?? 0;
-    const energyOn  = energy >= 1;
-    const shieldChg = sb.shieldCharge ?? 0;
-    const shieldsOn = shieldChg >= 1;
-    const status    = sb.state ?? '?';
+    const oc = _overlayCtx; if (!oc) return;
 
-    const lines = [
-      `SB: ${sb.name}`,
-      `ENERGY : ${Math.floor(energy)}  [${energyOn ? 'ON' : 'OFF'}]`,
-      `SHIELDS: ${Math.floor(shieldChg)}  [${shieldsOn ? 'ON' : 'OFF'}]`,
-      `STATUS : ${status.toUpperCase()}`,
-    ];
+    // ── Starbase section ──
+    const sbLines = [];
+    if (_currentStarbase) {
+      const sb        = _currentStarbase;
+      const energy    = sb.inventory?.energy ?? 0;
+      const shieldChg = sb.shieldCharge ?? 0;
+      sbLines.push(`SB: ${sb.name}`);
+      sbLines.push(`ENERGY : ${Math.floor(energy)}  [${energy >= 1 ? 'ON' : 'OFF'}]`);
+      sbLines.push(`SHIELDS: ${Math.floor(shieldChg)}  [${shieldChg >= 1 ? 'ON' : 'OFF'}]`);
+      sbLines.push(`STATUS : ${(sb.state ?? '?').toUpperCase()}`);
+    }
 
-    const pad = 10, lh = 16, panW = 210, panH = pad * 2 + lh * lines.length;
+    // ── Seeker group section ──
+    const seekerLines = [];
+    const groups = new Map();
+    for (const z of _zylons) {
+      if (z.dead || !z._galaxyRef || z.type === 'warrior') continue;
+      const ref = z._galaxyRef;
+      if (!groups.has(ref)) {
+        groups.set(ref, {
+          clanId:      ref.clanId ?? '?',
+          hasTIE:      false,
+          hasBird:     false,
+          hasBeacon:   false,
+          beaconActive: ref.beacon?.active ?? false,
+          tracking:    ref._isTracking ?? false,
+        });
+      }
+      const g = groups.get(ref);
+      if (z.type === 'seeker_tie')    g.hasTIE    = true;
+      if (z.type === 'seeker_bird')   g.hasBird   = true;
+      if (z.type === 'seeker_beacon') g.hasBeacon = true;
+    }
+    if (groups.size > 0) {
+      seekerLines.push(`SEEKERS: ${groups.size} GROUP${groups.size > 1 ? 'S' : ''}`);
+      for (const [, g] of groups) {
+        const ships  = [g.hasTIE ? 'TIE' : null, g.hasBird ? 'BRD' : null, g.hasBeacon ? 'BCN' : null]
+                       .filter(Boolean).join('+') || '(none)';
+        const status = g.beaconActive ? '*ACTIVE*' : g.tracking ? 'TRACKING' : 'SEARCHING';
+        const pad    = String(g.clanId).padStart(2, '0');
+        seekerLines.push(`CL${pad}: ${ships.padEnd(11)} ${status}`);
+      }
+    }
+
+    const sep      = sbLines.length && seekerLines.length ? ['─────────────────────'] : [];
+    const allLines = [...sbLines, ...sep, ...seekerLines];
+    if (allLines.length === 0) return;
+
+    const padPx = 10, lh = 15, panW = 240;
+    const panH  = padPx * 2 + lh * allLines.length;
     const x = 10, y = 10;
 
     oc.save();
-    oc.fillStyle = 'rgba(0,0,0,0.65)';
+    oc.fillStyle   = 'rgba(0,0,0,0.68)';
     oc.fillRect(x, y, panW, panH);
-    oc.strokeStyle = energyOn ? '#00ff88' : '#ff4444';
-    oc.lineWidth = 1;
+    const borderCol = _currentStarbase
+      ? (((_currentStarbase.inventory?.energy ?? 0) >= 1) ? '#00ff88' : '#ff4444')
+      : (groups.size > 0 ? '#88aaff' : '#555555');
+    oc.strokeStyle = borderCol;
+    oc.lineWidth   = 1;
     oc.strokeRect(x, y, panW, panH);
 
-    oc.font = '11px Share Tech Mono, monospace';
-    oc.textAlign = 'left'; oc.textBaseline = 'top';
-    lines.forEach((line, i) => {
-      const isOff = line.includes('[OFF]');
-      const isDormant = line.includes('DORMANT');
-      oc.fillStyle = isOff || isDormant ? '#ff4444' : '#00ff88';
-      oc.fillText(line, x + pad, y + pad + i * lh);
+    oc.font        = '11px Share Tech Mono, monospace';
+    oc.textAlign   = 'left';
+    oc.textBaseline = 'top';
+    allLines.forEach((line, i) => {
+      const isOff      = line.includes('[OFF]');
+      const isDormant  = line.includes('DORMANT');
+      const isActive   = line.includes('*ACTIVE*');
+      const isTracking = line.includes('TRACKING');
+      const isSep      = line.startsWith('─');
+      oc.fillStyle =
+        isSep      ? 'rgba(180,180,180,0.25)' :
+        isActive   ? '#ffff55' :
+        isTracking ? '#44aaff' :
+        isOff || isDormant ? '#ff4444' : '#00ff88';
+      oc.fillText(line, x + padPx, y + padPx + i * lh);
     });
     oc.restore();
   }
@@ -1486,14 +1533,13 @@ const SectorView = (() => {
     if (!_zylons.length) return;
     const playerPos = _camera.position.clone();
 
-    // Build targeting context for warrior orbit AI
-    const context = {
+    // Base context (warrior orbit AI; seeker TIE/Bird get per-ship beaconPos below)
+    const baseContext = {
       starbase:   (_hasStarbase && _currentStarbase)
                   ? { pos: SB_POS.clone(), shieldCharge: _currentStarbase.shieldCharge ?? 0 }
                   : null,
       cargoShips: _cargoShips.map(cs => ({ pos: cs.pos.clone() })),
       drones:     _cargoDrones.map(d  => ({ pos: d.pos.clone() })),
-      beaconPos:  (() => { const bs = _zylons.find(z => !z.dead && z.type === 'seeker_beacon'); return bs ? bs.position.clone() : null; })(),
     };
 
     let anyAlive = false;
@@ -1501,7 +1547,20 @@ const SectorView = (() => {
       const z = _zylons[i];
       if (z.dead) { _zylons.splice(i, 1); continue; }
       anyAlive = true;
-      const result = z.update(dt, playerPos, _currentVelocity, context);
+
+      let ctx = baseContext;
+      if (z.type === 'seeker_tie' || z.type === 'seeker_bird') {
+        // Each TIE/Bird guards only its OWN group's beacon — fixes cross-group homing bug
+        const ownBeacon = _zylons.find(b =>
+          !b.dead && b.type === 'seeker_beacon' && b._galaxyRef === z._galaxyRef
+        );
+        const playerFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
+        ctx = { ...baseContext, beaconPos: ownBeacon ? ownBeacon.position.clone() : null, playerFwd };
+      } else {
+        ctx = { ...baseContext, beaconPos: null };
+      }
+
+      const result = z.update(dt, playerPos, _currentVelocity, ctx);
       if (result) {
         _spawnZylonTorpedo(result.pos, result.vel, result.isWarriorCannon ?? false);
       }
@@ -2590,22 +2649,24 @@ const SectorView = (() => {
         if (!z.dead) {
           // Compute contact velocity: beacon uses orbit tangent; warriors compute from orbit; seekers use _vel
           let zVel = new THREE.Vector3();
-          if (z._bOrbitDir !== undefined) {
-            // Beacon ship: tangential velocity — same proximity tiers as _updateBeaconShip
+          if (z._bOrbitDir !== undefined && z._orbitU && z._orbitV) {
+            // Beacon ship: 3D tangential velocity using the actual orbital plane
             const bp = z.mesh.position;
-            const br = new THREE.Vector3(bp.x, 0, bp.z);
-            if (br.length() > 0.1) {
-              br.normalize();
-              const cfg = GameConfig.zylon;
-              const dP  = _camera.position.distanceTo(bp);
-              let bSpeed;
-              if      (z._bEvasion > 0) bSpeed = 100;
-              else if (dP < 50)         bSpeed = cfg.beaconSpeedTier4 ?? 65;
-              else if (dP < 100)        bSpeed = cfg.beaconSpeedTier3 ?? 55;
-              else if (dP < 150)        bSpeed = cfg.beaconSpeedTier2 ?? 45;
-              else if (dP < 200)        bSpeed = cfg.beaconSpeedTier1 ?? 35;
-              else                      bSpeed = cfg.beaconNormalSpeed ?? 25;
-              zVel.set(-br.z, 0, br.x).multiplyScalar(bSpeed * z._bOrbitDir);
+            const cfg = GameConfig.zylon;
+            const dP  = _camera.position.distanceTo(bp);
+            let bSpeed;
+            if      (z._bEvasion > 0) bSpeed = 100;
+            else if (dP < 50)         bSpeed = cfg.beaconSpeedTier4 ?? 65;
+            else if (dP < 100)        bSpeed = cfg.beaconSpeedTier3 ?? 55;
+            else if (dP < 150)        bSpeed = cfg.beaconSpeedTier2 ?? 45;
+            else if (dP < 200)        bSpeed = cfg.beaconSpeedTier1 ?? 35;
+            else                      bSpeed = cfg.beaconNormalSpeed ?? 25;
+            // Tangent = cross(planeNormal, radialDir) — works for any orbital plane
+            const planeNormal = new THREE.Vector3().crossVectors(z._orbitU, z._orbitV);
+            const radial      = bp.clone().normalize();
+            if (radial.length() > 0.01) {
+              zVel.crossVectors(planeNormal, radial).normalize()
+                  .multiplyScalar(bSpeed * z._bOrbitDir);
             }
           } else if (z._worbitDir !== undefined) {
             // Warrior: tangential velocity from orbit
@@ -3400,7 +3461,7 @@ const SectorView = (() => {
         const jitter   = 30 + Math.random() * 50;
         const spawnPos = _zEntryBase.clone().addScaledVector(
           new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-        const ship = new ZylonShip(_scene, spawnPos, type);
+        const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
         if (seekerRef) ship.setGalaxyRef(seekerRef);
         _zylons.push(ship);
       });
@@ -3408,7 +3469,7 @@ const SectorView = (() => {
       const BEACON_DIST  = GameConfig.zylon.beaconPlacementUnits ?? 750;
       const beaconStart  = new THREE.Vector3(
         Math.cos(_zEntryAngle) * BEACON_DIST, 0, Math.sin(_zEntryAngle) * BEACON_DIST);
-      const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon');
+      const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon', seekerRef?.clanId ?? 0);
       if (seekerRef) beaconShip.setGalaxyRef(seekerRef);
       _zylons.push(beaconShip);
     }
@@ -3430,7 +3491,7 @@ const SectorView = (() => {
           Math.cos(_zEntryAngle) * dist, 0, Math.sin(_zEntryAngle) * dist
         ).addScaledVector(new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
       }
-      const wShip = new ZylonShip(_scene, wSpawn, 'warrior');
+      const wShip = new ZylonShip(_scene, wSpawn, 'warrior', wRef?.clanId ?? 0);
       if (wRef) wShip.setGalaxyRef(wRef);
       _zylons.push(wShip);
     }
@@ -3597,7 +3658,7 @@ const SectorView = (() => {
         (Math.random() - 0.5) * (isBeacon ? 10 : 200),
         Math.sin(angle) * dist);
       const type = forceType ?? (i % 3 === 2 ? 'warrior' : types[i % 2]);
-      const ship = new ZylonShip(_scene, pos, type);
+      const ship = new ZylonShip(_scene, pos, type, galaxyRef?.clanId ?? 0);
       if (galaxyRef) ship.setGalaxyRef(galaxyRef);
       _zylons.push(ship);
     }

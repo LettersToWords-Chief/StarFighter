@@ -28,6 +28,7 @@ class ZylonWarrior {
     this.r       = r;
     this.beacon  = beacon;
     this.spawner = spawner;
+    this.clanId  = spawner.clanId;  // inherit clan from parent spawner
 
     // Warrior begins existence as READY — waiting for a beacon signal
     this.state   = 'READY';

@@ -28,6 +28,7 @@ class ZylonBeacon {
     this.r        = r;
     this.type     = type;
     this.spawner  = spawner;
+    this.clanId   = spawner.clanId;  // inherit clan from parent spawner
 
     // Inactive while traveling — activates when seeker reaches a qualifying sector
     this.active   = false;
@@ -63,6 +64,11 @@ class ZylonBeacon {
    */
   activate(type, galaxy) {
     if (this.active) return; // already activated
+    // Hard cap: never allow more than 2 active beacons at the same sector
+    const alreadyHere = (galaxy.zylonBeacons ?? []).filter(
+      b => b.active && b.q === this.q && b.r === this.r
+    ).length;
+    if (alreadyHere >= 2) return; // cap reached — silently refuse
     this.type   = type;
     this.active = true;
     // Add to galaxy beacon list so the galaxy map renders it and warriors can find it

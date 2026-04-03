@@ -19,10 +19,11 @@ class ZylonSpawner {
    * @param {GalaxyMap} opts.galaxy   — reference for callbacks
    */
   constructor({ q, r, galaxy }) {
-    this.q      = q;
-    this.r      = r;
-    this.galaxy = galaxy;
-    this.alive  = true;
+    this.q       = q;
+    this.r       = r;
+    this.galaxy  = galaxy;
+    this.alive   = true;
+    this.clanId  = ZylonSpawner._nextClanId++;
 
     // ── Lifetime counters ──────────────────────────────────
     const cfg = GameConfig.zylon;
@@ -59,8 +60,12 @@ class ZylonSpawner {
   tick(dt, galaxy) {
     if (!this.alive) return;
 
-    // Interval is always the real game value — the caller scales dt during fast-forward
-    this._produceInterval = GameConfig.zylon.spawnerSpawnIntervalSec;
+    // During fast-forward, bloom seekers every FF tick (15s) so all 6 are dispatched
+    // before red alert fires. All other production keeps the normal 60s rate.
+    const isFastForwardBloom = galaxy.fastForwarding && this._bloomSent < 6;
+    this._produceInterval = isFastForwardBloom
+      ? GameConfig.zylon.fastForwardStepSec
+      : GameConfig.zylon.spawnerSpawnIntervalSec;
 
     this._produceTimer += dt;
     if (this._produceTimer < this._produceInterval) return;
@@ -245,3 +250,6 @@ class ZylonSpawner {
     this._queue = [];
   }
 }
+
+// Global clan counter — increments each time a new Spawner (initial or sub) is created.
+ZylonSpawner._nextClanId = 0;
