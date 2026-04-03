@@ -33,6 +33,10 @@ class ZylonBeacon {
     // Inactive while traveling — activates when seeker reaches a qualifying sector
     this.active   = false;
 
+    // Galaxy reference — set when activated so tick() can count warriors
+    this._galaxy       = null;
+    this._resupplyTimer = 0;
+
     // Animation
     this._pulseTimer = 0;
     this._pulsePhase = Math.random() * Math.PI * 2;
@@ -40,9 +44,35 @@ class ZylonBeacon {
 
   get key() { return `${this.q},${this.r}`; }
 
-  /** Called each frame for animation state. dt in seconds. */
+  /** Called each frame for animation state and resupply logic. dt in seconds. */
   tick(dt) {
     this._pulseTimer += dt;
+
+    if (!this.active || !this._galaxy) return;
+
+    // ── Resupply check ──────────────────────────────────────────────
+    const cfg       = GameConfig.zylon;
+    const checkSec  = cfg.warriorResupplyCheckSec  ?? 30;
+    const target    = cfg.warriorResupplyTarget     ?? 4;
+    this._resupplyTimer += dt;
+    if (this._resupplyTimer >= checkSec) {
+      this._resupplyTimer = 0;
+      // Count alive same-clan warriors in this sector (fighting or assigned and waiting)
+      const present = this._galaxy.zylonWarriors.filter(w =>
+        w.alive && w.clanId === this.clanId && (
+          // In this sector and actively fighting
+          ((w.state === 'ASSAULTING' || w.state === 'COMBAT') &&
+           w.q === this.q && w.r === this.r) ||
+          // READY and already assigned to this beacon (will warp on next 30s check)
+          (w.state === 'READY' && w.beacon === this)
+        )
+      ).length;
+
+      if (present < target) {
+        const pairsNeeded = Math.ceil((target - present) / 2);
+        this.spawner.onResupplyRequested(this, pairsNeeded, this._galaxy);
+      }
+    }
   }
 
   /**
@@ -69,8 +99,9 @@ class ZylonBeacon {
       b => b.active && b.q === this.q && b.r === this.r
     ).length;
     if (alreadyHere >= 2) return; // cap reached — silently refuse
-    this.type   = type;
-    this.active = true;
+    this.type    = type;
+    this.active  = true;
+    this._galaxy = galaxy;   // store for resupply checks in tick()
     // Add to galaxy beacon list so the galaxy map renders it and warriors can find it
     galaxy.zylonBeacons.push(this);
     // Notify spawner so it queues warriors / sub-spawner production

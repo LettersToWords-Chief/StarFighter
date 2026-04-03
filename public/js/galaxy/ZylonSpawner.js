@@ -215,6 +215,26 @@ class ZylonSpawner {
     this._warriors = this._warriors.filter(w => w !== warrior);
   }
 
+  /**
+   * Called by an active Beacon when its warrior count drops below the target.
+   * Queues additional warrior pairs through the existing production pipeline.
+   * If a warrior job for this beacon is already queued, tops it up rather than
+   * adding a duplicate entry.
+   */
+  onResupplyRequested(beacon, pairsNeeded, galaxy) {
+    if (!this.alive) return;
+    if (!beacon.active) return;
+    if (this._warriorPairsSpawned >= this._maxWarriorPairs) return; // lifetime cap reached
+
+    const existing = this._queue.find(j => j.type === 'warrior' && j.beaconRef === beacon);
+    if (existing) {
+      // Increase the pending count if the deficit grew since last request
+      existing.remaining = Math.max(existing.remaining, pairsNeeded);
+    } else {
+      this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairsNeeded });
+    }
+  }
+
   // ─────────────────────────────────────────────
   // HELPERS
   // ─────────────────────────────────────────────
