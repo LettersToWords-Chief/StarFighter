@@ -1473,7 +1473,9 @@ const SectorView = (() => {
     } else if (_warpDebursting) {
       // Post-arrival: decel from 99999 → WARP_VELOCITY in 1 second, locked
       _currentVelocity = Math.max(WARP_VELOCITY, _currentVelocity - 99900 * dt);
-      if (_currentVelocity <= WARP_VELOCITY) _warpDebursting = false;
+      if (_currentVelocity <= WARP_VELOCITY) {
+        _warpDebursting = false;
+      }
     } else {
       // Normal throttle ramping — each engine contributes SPD_VALS[min(speed, engMaxIdx)] / 4
       const targetVel = _engines
@@ -3469,23 +3471,34 @@ const SectorView = (() => {
 
     for (let i = 0; i < seekerCount; i++) {
       const seekerRef = seekerGalaxyRefs[i] ?? null;
-      // TIE and BIRD enter with jitter around the entry point
-      ['seeker_tie', 'seeker_bird'].forEach(type => {
-        const jAngle   = Math.random() * Math.PI * 2;
-        const jitter   = 30 + Math.random() * 50;
-        const spawnPos = _zEntryBase.clone().addScaledVector(
-          new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-        const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
-        if (seekerRef) ship.setGalaxyRef(seekerRef);
-        _zylons.push(ship);
-      });
+
       // BEACON ship starts at its orbit position (750u) along the entry angle
       const BEACON_DIST  = GameConfig.zylon.beaconPlacementUnits ?? 750;
       const beaconStart  = new THREE.Vector3(
         Math.cos(_zEntryAngle) * BEACON_DIST, 0, Math.sin(_zEntryAngle) * BEACON_DIST);
       const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon', seekerRef?.clanId ?? 0);
       if (seekerRef) beaconShip.setGalaxyRef(seekerRef);
+      // Snap beacon to its true tilted orbit position so TIE/Bird spawn at the right spot
+      const _bc = Math.cos(beaconShip._bOrbitAngle) * BEACON_DIST;
+      const _bs = Math.sin(beaconShip._bOrbitAngle) * BEACON_DIST;
+      beaconShip.mesh.position.set(
+        beaconShip._orbitU.x * _bc + beaconShip._orbitV.x * _bs,
+        beaconShip._orbitU.y * _bc + beaconShip._orbitV.y * _bs,
+        beaconShip._orbitU.z * _bc + beaconShip._orbitV.z * _bs
+      );
       _zylons.push(beaconShip);
+
+      // TIE and Bird spawn within 100u of the beacon's TRUE orbit position
+      const beaconActual = beaconShip.mesh.position;
+      ['seeker_tie', 'seeker_bird'].forEach(type => {
+        const jAngle   = Math.random() * Math.PI * 2;
+        const jitter   = Math.random() * 100;
+        const spawnPos = beaconActual.clone().addScaledVector(
+          new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+        const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
+        if (seekerRef) ship.setGalaxyRef(seekerRef);
+        _zylons.push(ship);
+      });
     }
     // Warriors at sector entry come from galaxy ZylonWarriors in ASSAULTING/COMBAT state.
     // Spawn each at its real approach distance so the player sees them in the right place.
@@ -3662,18 +3675,53 @@ const SectorView = (() => {
     if (!_scene || !_running) return;
     const types = ['seeker_tie', 'seeker_bird', 'warrior'];
     for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
       const isBeacon = forceType === 'seeker_beacon';
-      const dist  = isBeacon
-        ? (GameConfig.zylon.beaconPlacementUnits ?? 750)
-        : 350 + Math.random() * 400;
-      const pos   = new THREE.Vector3(
-        Math.cos(angle) * dist,
-        (Math.random() - 0.5) * (isBeacon ? 10 : 200),
-        Math.sin(angle) * dist);
+      const isSeeker = forceType === 'seeker_tie' || forceType === 'seeker_bird';
+
+      let pos;
+      if (isBeacon) {
+        // Place beacon at its standard orbit distance on a random angle
+        const angle = Math.random() * Math.PI * 2;
+        const dist  = GameConfig.zylon.beaconPlacementUnits ?? 750;
+        pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+        // Snap beacon to its true tilted orbit position
+        // (the constructor sets _orbitU/_orbitV/_bOrbitAngle from a random tilted plane)
+        // We must compute the real position before TIE/Bird spawn near it.
+        // We do this AFTER creating the ship below, then update pos — see after ship creation.
+      } else if (isSeeker) {
+        // Find the already-spawned beacon from the same seeker group and spawn near it
+        const beacon = _zylons.find(z =>
+          !z.dead && z.type === 'seeker_beacon' && z._galaxyRef === galaxyRef
+        );
+        const jAngle  = Math.random() * Math.PI * 2;
+        const jitter  = Math.random() * 100;
+        const origin  = beacon ? beacon.position.clone()
+          : new THREE.Vector3(Math.cos(jAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750), 0,
+                              Math.sin(jAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750));
+        pos = origin.clone().addScaledVector(
+          new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+      } else {
+        // Warriors and other types: random placement
+        const angle = Math.random() * Math.PI * 2;
+        const dist  = 350 + Math.random() * 400;
+        pos = new THREE.Vector3(
+          Math.cos(angle) * dist, (Math.random() - 0.5) * 200, Math.sin(angle) * dist);
+      }
+
       const type = forceType ?? (i % 3 === 2 ? 'warrior' : types[i % 2]);
       const ship = new ZylonShip(_scene, pos, type, galaxyRef?.clanId ?? 0);
       if (galaxyRef) ship.setGalaxyRef(galaxyRef);
+      // Snap beacon to its true tilted orbit position immediately after creation
+      if (isBeacon) {
+        const ORBIT_R = GameConfig.zylon.beaconPlacementUnits ?? 750;
+        const _bc = Math.cos(ship._bOrbitAngle) * ORBIT_R;
+        const _bs = Math.sin(ship._bOrbitAngle) * ORBIT_R;
+        ship.mesh.position.set(
+          ship._orbitU.x * _bc + ship._orbitV.x * _bs,
+          ship._orbitU.y * _bc + ship._orbitV.y * _bs,
+          ship._orbitU.z * _bc + ship._orbitV.z * _bs
+        );
+      }
       _zylons.push(ship);
     }
     _targets  += count;

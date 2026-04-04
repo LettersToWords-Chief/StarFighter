@@ -330,10 +330,16 @@ const GameConfig = Object.freeze({
     seekerHP:                   400,   // ~3 hits to kill (185 dmg/hit)
     seekerGuardInner:            50,   // u — turn AWAY from beacon if closer
     seekerGuardOuter:           150,   // u — turn TOWARD beacon if farther
-    seekerEngageRadius:         200,   // u — switch GUARD → ATTACK
+    seekerEngageRadius:         200,   // u — autonomous engage (beacon dead)
     seekerBreakRadius:           15,   // u — steer away from player (no ramming)
     seekerGuardSpeed:            50,   // u/s — all seeker states
-    seekerTurnRate:             120,   // deg/s — max heading change per second (organic turns)
+    seekerTurnRate:              60,   // deg/s — max heading change per second
+
+    // Beacon-controlled engage/break thresholds (player-to-beacon distance)
+    seekerBirdEngageR:          750,   // u — Bird engages when player is within this of beacon
+    seekerBirdBreakR:          1000,   // u — Bird disengages when player exceeds this
+    seekerTIEEngageR:           600,   // u — TIE  engages when player is within this of beacon
+    seekerTIEBreakR:            850,   // u — TIE  disengages when player exceeds this
 
     // ── Dogfight AI (TIE and Bird in attack mode — simple priority rules) ────
     //
@@ -356,7 +362,7 @@ const GameConfig = Object.freeze({
     //
     dogfightAttackSpeedTIE:      50,   // u/s — TIE attack speed
     dogfightAttackSpeedBird:     65,   // u/s — Bird attack speed (slightly faster)
-    dogfightTurnRate:           120,   // deg/s — max heading change per second
+    dogfightTurnRate:            60,   // deg/s — max heading change per second
     dogfightRamAvoidDist:        20,   // u     — Rule 1 collision avoidance threshold
     dogfightReversalDist:       200,   // u     — Rule 2 reversal engagement distance
     dogfightEvadeConeAngleDeg:   30,   // deg   — Rule 3 player fire-cone half-angle

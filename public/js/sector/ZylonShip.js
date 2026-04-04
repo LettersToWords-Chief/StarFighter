@@ -643,12 +643,12 @@ class ZylonShip {
     const ATTACK_SPEED = isBird                         // Bird attacks faster
       ? (cfg.dogfightAttackSpeedBird ?? 65)
       : (cfg.dogfightAttackSpeedTIE  ?? 50);
-    // Player-to-beacon engage thresholds (beacon-controlled mode)
-    const BEACON_ENG_R = isBird ? 350 : 200;
+    // Player-to-beacon engage/break thresholds (type-specific, with hysteresis)
+    const ENG_R_BEACON = isBird ? (cfg.seekerBirdEngageR ?? 750) : (cfg.seekerTIEEngageR ?? 600);
+    const BRK_R_BEACON = isBird ? (cfg.seekerBirdBreakR  ?? 1000) : (cfg.seekerTIEBreakR  ?? 850);
     const G_IN   = cfg.seekerGuardInner  ?? 50;
     const G_OUT  = cfg.seekerGuardOuter  ?? 150;
-    const ENG_R  = cfg.seekerEngageRadius ?? 200;  // autonomous fallback
-    const BRK_R  = cfg.seekerBreakRadius  ?? 15;
+    const ENG_R  = cfg.seekerEngageRadius ?? 200;  // autonomous fallback (beacon dead)
     const TURN_R = (cfg.seekerTurnRate ?? 120) * Math.PI / 180 * dt;
 
     // Initialise drift velocity on first frame
@@ -665,8 +665,8 @@ class ZylonShip {
 
     // ── Beacon-dead / new-beacon state corrections ──
     if (!beaconPos) {
-      // Beacon destroyed: guards have no post to defend — go right for the player
-      if (this._sphase === 'guard' || this._sphase === 'return') {
+      // Beacon destroyed: always attack — no post to defend, no disengagement
+      if (this._sphase !== 'attack') {
         this._sphase = 'attack';
         this._phase  = 'pursue';
         this._circleTimer = 0;
@@ -677,11 +677,11 @@ class ZylonShip {
     }
 
     // ── Top-level state transitions ──
-    // Engage/disengage: beacon-controlled when beacon alive (player-to-beacon distance),
-    // autonomous (player-to-self distance) when beacon is dead.
-    const _dFromBeacon   = beaconPos ? pos.distanceTo(beaconPos) : Infinity;
-    const _playerInZone  = beaconPos ? _dFromBeacon < BEACON_ENG_R : dist < ENG_R;
-    const _playerOutZone = beaconPos ? _dFromBeacon > BEACON_ENG_R : dist > ENG_R;
+    // Engage/disengage uses PLAYER-to-beacon distance when beacon alive (hysteresis),
+    // or player-to-self distance when beacon is dead (autonomous mode).
+    const _playerToBcn   = beaconPos ? playerPos.distanceTo(beaconPos) : Infinity;
+    const _playerInZone  = beaconPos ? _playerToBcn < ENG_R_BEACON : dist < ENG_R;
+    const _playerOutZone = beaconPos ? _playerToBcn > BRK_R_BEACON : false; // beacon dead = never disengage
     if ((this._sphase === 'guard' || this._sphase === 'patrol') && _playerInZone) {
       this._sphase = 'attack';
       this._phase  = 'pursue';
@@ -772,6 +772,7 @@ class ZylonShip {
     // ── RULE 1 — Collision avoidance ──────────────────────────────────────────
     const ramDist = cfg.dogfightRamAvoidDist ?? 20;
     if (s.dist < ramDist && s.fwd >= 0) {
+      this._dbgRule = 'R1-AVOID';
       if (this._avoidTimer <= 0)
         this._avoidTimer = (Math.PI / 2) / ((cfg.dogfightTurnRate ?? 120) * Math.PI / 180);
       this._avoidTimer -= dt;
@@ -787,13 +788,13 @@ class ZylonShip {
 
     // ── RULE 2 — Reversal ─────────────────────────────────────────────────────
     const reversalDist = cfg.dogfightReversalDist ?? 200;
-    if (s.fwd < 0 && s.dist < reversalDist) this._reversing = true;
+    if (s.fwd < 0 && s.dist > reversalDist) this._reversing = true;
     if (this._reversing) {
       if (s.fwd >= 0) {
         this._reversing = false;
       } else {
-        _applySteer(1);
-        this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+        this._dbgRule = `R2-REVERSE(d=${Math.round(s.dist)})`;
+        this._steer(s.dir, ATTACK_SPEED, turnRad);
         pos.addScaledVector(this._vel, dt);
         const fT2 = pos.clone().add(this._vel.clone().normalize());
         if (pos.distanceTo(fT2) > 0.01) this.mesh.lookAt(fT2);
@@ -803,12 +804,12 @@ class ZylonShip {
 
     // ── RULE 3 — Danger zone evasion ──────────────────────────────────────────
     if (s.dangerFront || s.dangerRear) {
+      this._dbgRule = `R3-EVADE(F=${s.dangerFront},R=${s.dangerRear})`;
       _applySteer(-1);
     } else {
-      // ── RULE 4 — Offensive aim ──────────────────────────────────────────────
-      // fwd >= 0: player ahead → aim front cannon (steer toward)
-      // fwd <  0: player behind → aim rear cannon (steer away = tail to player)
-      _applySteer(s.fwd >= 0 ? 1 : -1);
+      // ── RULE 4 — Always approach player ─────────────────────────────────────
+      this._dbgRule = `R4-AIM(fwd=${s.fwd.toFixed(2)},d=${Math.round(s.dist)})`;
+      this._steer(s.dir, ATTACK_SPEED, turnRad);
     }
 
     this._vel.normalize().multiplyScalar(ATTACK_SPEED);
@@ -862,7 +863,7 @@ class ZylonShip {
     const dist = rel.length();
     const dir  = dist > 0.01 ? rel.clone().normalize() : new THREE.Vector3(0, 0, -1);
 
-    const myFwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+    const myFwd   = new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion);
     const myRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.mesh.quaternion);
     const myUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(this.mesh.quaternion);
 

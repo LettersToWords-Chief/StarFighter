@@ -95,9 +95,9 @@
       if (!_sectorLive) return;
       const pos = galaxyMap.playerPos;
       if (seeker.q === pos.q && seeker.r === pos.r) {
+        SectorView.spawnZylons(1, 'seeker_beacon', seeker);
         SectorView.spawnZylons(1, 'seeker_tie',    seeker);
         SectorView.spawnZylons(1, 'seeker_bird',   seeker);
-        SectorView.spawnZylons(1, 'seeker_beacon', seeker);
       }
     };
 
