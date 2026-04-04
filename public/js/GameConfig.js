@@ -335,14 +335,34 @@ const GameConfig = Object.freeze({
     seekerGuardSpeed:            50,   // u/s — all seeker states
     seekerTurnRate:             120,   // deg/s — max heading change per second (organic turns)
 
-    // Dogfight AI (TIE and Bird in attack mode — joystick arc-turn model)
-    dogfightTurnRate:            45,   // deg/s — fixed arc turn rate per axis
-    dogfightManeuverMin:        1.2,   // s     — min committed maneuver duration
-    dogfightManeuverMax:        2.8,   // s     — max committed maneuver duration
-    dogfightLearnRate:         0.05,   // weight delta per scoring event
-    dogfightColAvoidR:           30,   // u     — collision override radius
+    // ── Dogfight AI (TIE and Bird in attack mode — simple priority rules) ────
+    //
+    // Rule 1 — Collision avoidance (highest priority)
+    //   Trigger : dist < dogfightRamAvoidDist  AND  player in Zylon front hemisphere
+    //   Action  : turn 90° on closest perpendicular axis; resume normal AI after
+    //
+    // Rule 2 — Reversal
+    //   Trigger : player in Zylon REAR hemisphere  AND  dist < dogfightReversalDist
+    //   Action  : turn shortest-way to bring player back to front; sustain until done
+    //
+    // Rule 3 — Evade player firing zone (higher priority than offense)
+    //   Trigger : Zylon lies inside the player's front OR rear fire cone
+    //             (cone half-angle = dogfightEvadeConeAngleDeg)
+    //   Action  : steer perpendicular to player's forward axis (closest direction)
+    //
+    // Rule 4 — Offensive aim (lowest priority / default)
+    //   Player in Zylon front  → steer to put front cannon on player
+    //   Player in Zylon rear   → steer to put aft on player
+    //
+    dogfightAttackSpeedTIE:      50,   // u/s — TIE attack speed
+    dogfightAttackSpeedBird:     65,   // u/s — Bird attack speed (slightly faster)
+    dogfightTurnRate:           120,   // deg/s — max heading change per second
+    dogfightRamAvoidDist:        20,   // u     — Rule 1 collision avoidance threshold
+    dogfightReversalDist:       200,   // u     — Rule 2 reversal engagement distance
+    dogfightEvadeConeAngleDeg:   30,   // deg   — Rule 3 player fire-cone half-angle
     dogfightFrontFireR:         500,   // u     — front cannon max fire range
     dogfightRearFireR:          400,   // u     — rear cannon max fire range
+    dogfightJoystickThreshold:  0.15,  // — axis dead-zone (rDot/uDot must exceed to steer that axis)
     dogfightFrontCoolMin:       2.0,   // s     — front cannon recharge (min)
     dogfightFrontCoolMax:       4.0,   // s     — front cannon recharge (max)
     dogfightRearCoolMin:        2.5,   // s     — rear cannon recharge (min)

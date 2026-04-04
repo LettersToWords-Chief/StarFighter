@@ -71,23 +71,16 @@ class ZylonShip {
       this._sphase    = 'guard';  // 'guard' | 'attack' | 'return' | 'patrol'
       this._sguardDir = Math.random() < 0.5 ? 1 : -1;  // orbit direction
 
-      // ── Dogfight brain ──────────────────────────────────────────────────────
-      // 25 zone-pair states × 9 joystick maneuvers = 225 weights (all start equal)
-      this._dfWeights  = new Float32Array(225).fill(1.0);
-      // timer starts at 999 so the very first tick immediately picks a maneuver
-      this._dfManeuver = {
-        pitchDir: 0, yawDir: 0, duration: 0, timer: 999,
-        manIdx: 4, startState: null, startRange: 0,
-        damageTaken: 0, frontFired: 0, frontHit: 0, rearFired: 0, rearHit: 0,
-      };
-      this._dfLog = [];   // per-session maneuver records, flushed to server on death
+      // ── Simple dogfight AI state ─────────────────────────────────────────
       // Independent front / rear cannon cooldowns
       this._frontCooldown = (cfg.dogfightFrontCoolMin ?? 2.0)
         + Math.random() * ((cfg.dogfightFrontCoolMax ?? 4.0) - (cfg.dogfightFrontCoolMin ?? 2.0));
       this._rearCooldown  = (cfg.dogfightRearCoolMin  ?? 2.5)
         + Math.random() * ((cfg.dogfightRearCoolMax  ?? 5.0) - (cfg.dogfightRearCoolMin  ?? 2.5));
-      // Async weight load — ship starts with equal defaults; persisted weights override on resolve
-      this._dfLoadWeights();
+      // Rule 1 — collision-avoidance turn state
+      this._avoidTimer = 0;   // seconds remaining in the evasion turn
+      // Rule 2 — reversal flag (sustain turn until player re-enters front hemisphere)
+      this._reversing  = false;
     }
 
     // ── Cannon cooldown ──
@@ -628,130 +621,17 @@ class ZylonShip {
 
   // ─────────────────────────────────── seeker guard AI ───────────────────────
 
-  // ─────────────────────────── dogfight brain ──────────────────────────────────
-
-  /**
-   * Classify where 'toTargetVec' sits relative to 'forwardVec' along the fore-aft axis.
-   * Returns zone index 0–4:
-   *   0 HOT_FRONT  dot >  0.8  — inside the forward fire cone
-   *   1 FRONT_Q    dot >  0.3  — forward hemisphere, outside cone
-   *   2 BEAM       dot > -0.3  — roughly perpendicular (the safe arc)
-   *   3 REAR_Q     dot > -0.8  — rear hemisphere, outside aft cone
-   *   4 HOT_REAR   dot ≤ -0.8  — inside the aft fire cone
-   */
-  _classifyZone(forwardVec, toTargetVec) {
-    const d = forwardVec.dot(toTargetVec.clone().normalize());
-    if (d >  0.8) return 0;
-    if (d >  0.3) return 1;
-    if (d > -0.3) return 2;
-    if (d > -0.8) return 3;
-    return 4;
-  }
-
-  /** Weighted-random pick of a maneuver index 0–8 for the given 25-cell state index. */
-  _dfPickManeuver(stateIdx) {
-    const start = stateIdx * 9;
-    let total = 0;
-    for (let i = 0; i < 9; i++) total += this._dfWeights[start + i];
-    let r = Math.random() * total;
-    for (let i = 0; i < 9; i++) {
-      r -= this._dfWeights[start + i];
-      if (r <= 0) return i;
-    }
-    return 8;
-  }
-
-  /**
-   * Convert maneuver index 0–8 to { pitchDir, yawDir }.
-   *   pitch = floor(idx/3) − 1  →  −1 (nose-down),  0 (level),    +1 (nose-up)
-   *   yaw   = (idx % 3) − 1     →  −1 (nose-left),  0 (straight), +1 (nose-right)
-   */
-  _dfManeuverDirs(idx) {
-    return { pitchDir: Math.floor(idx / 3) - 1, yawDir: (idx % 3) - 1 };
-  }
-
-  /**
-   * Score the just-completed maneuver, update its weight, and push a log record.
-   * Scoring signals: zone transition (myZone only), damage taken, shots fired.
-   */
-  _dfScore(stateIdx, manIdx, endStateIdx, endRange) {
-    const lr   = GameConfig.zylon.dogfightLearnRate ?? 0.05;
-    const base = stateIdx * 9 + manIdx;
-    const m    = this._dfManeuver;
-
-    // Zone transition: reward escaping HOT zones; penalise drifting into them
-    const startMyZone = Math.floor(stateIdx    / 5);
-    const endMyZone   = Math.floor(endStateIdx / 5);
-    const wasHot = (startMyZone === 0 || startMyZone === 4);
-    const isHot  = (endMyZone   === 0 || endMyZone   === 4);
-    if (wasHot  && !isHot) this._dfWeights[base] += lr;
-    if (!wasHot && isHot)  this._dfWeights[base] -= lr * 1.5;
-
-    // Damage taken this maneuver
-    if (m.damageTaken > 0) this._dfWeights[base] -= lr * 2;
-
-    // Shots fired (reward using a firing opportunity)
-    if (m.frontFired > 0 || m.rearFired > 0) this._dfWeights[base] += lr * 0.5;
-
-    // Clamp
-    this._dfWeights[base] = Math.max(0.01, Math.min(5.0, this._dfWeights[base]));
-
-    // Log record — range stored for future analysis, not used in current logic
-    this._dfLog.push({
-      shipType:    this._type,
-      maneuver:    { pitchDir: m.pitchDir, yawDir: m.yawDir, duration: m.duration },
-      startState:  stateIdx,
-      endState:    endStateIdx,
-      startRange:  m.startRange,
-      endRange,
-      frontFired:  m.frontFired,
-      frontHit:    m.frontHit,
-      rearFired:   m.rearFired,
-      rearHit:     m.rearHit,
-      damageTaken: m.damageTaken,
-    });
-  }
-
-  /** POST buffered maneuver records to the server then clear the local buffer. */
-  _dfFlushLog() {
-    if (!this._dfLog.length) return;
-    const records = this._dfLog.splice(0);
-    fetch('/api/zylon-log', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ records }),
-    }).catch(() => { /* non-critical */ });
-  }
-
-  /** POST current weight table to server (server merges with 90/10 smoothing). */
-  _dfSaveWeights() {
-    if (!this._dfWeights) return;
-    fetch('/api/zylon-weights', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: this._type, weights: Array.from(this._dfWeights) }),
-    }).catch(() => { /* non-critical */ });
-  }
-
-  /** Fetch persisted weights from the server and apply them (non-blocking). */
-  _dfLoadWeights() {
-    fetch(`/api/zylon-weights/${this._type}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (Array.isArray(data) && data.length === 225) {
-          this._dfWeights = new Float32Array(data);
-        }
-      })
-      .catch(() => { /* start with equal defaults */ });
-  }
-
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * Three-phase seeker AI:
    *   GUARD  — drift within a 50–150u proximity band around the beacon.
    *            Steer toward it when >150u, away when <50u, free-drift in band.
-   *   ATTACK — joystick arc-turn dogfight brain. Fires front + rear cannons.
+   *   ATTACK — 4-rule priority dogfight (highest priority first):
+   *              1) Collision avoidance: dist < 20u & player ahead → 90° evasion turn
+   *              2) Reversal: player in rear & dist < 200u → turn to bring player to front
+   *              3) Evade player firing zones (30° front/rear cones) → steer perpendicular
+   *              4) Offensive aim → nose to player (front cannon) or tail to player (rear)
    *   RETURN — fly back to beacon; re-enter GUARD when within 100u.
    */
   _updateSeeker(dt, playerPos, context) {
@@ -760,7 +640,9 @@ class ZylonShip {
     const pos   = this.mesh.position;
     const isBird       = this._type === 'seeker_bird';
     const GUARD_SPEED  = cfg.seekerGuardSpeed ?? 50;   // normal / patrol speed
-    const ATTACK_SPEED = isBird ? 65 : 50;             // Bird attacks faster
+    const ATTACK_SPEED = isBird                         // Bird attacks faster
+      ? (cfg.dogfightAttackSpeedBird ?? 65)
+      : (cfg.dogfightAttackSpeedTIE  ?? 50);
     // Player-to-beacon engage thresholds (beacon-controlled mode)
     const BEACON_ENG_R = isBird ? 350 : 200;
     const G_IN   = cfg.seekerGuardInner  ?? 50;
@@ -866,83 +748,137 @@ class ZylonShip {
       return null;
     }
 
-    // ── ATTACK: joystick arc-turn dogfight brain ──────────────────────────────
-    const myFwd     = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
-    const playerFwd = context?.playerFwd ?? new THREE.Vector3(0, 0, -1);
-
-    // Mutual zone classification → 25-cell combined state
-    const myZone     = this._classifyZone(myFwd, dirToP);
-    const playerZone = this._classifyZone(playerFwd, dirToP.clone().negate());
-    const stateIdx   = myZone * 5 + playerZone;
-
-    // ── Advance maneuver timer; score + pick when expired ────────────────────
-    this._dfManeuver.timer += dt;
-    if (this._dfManeuver.timer >= this._dfManeuver.duration) {
-      if (this._dfManeuver.startState !== null) {
-        this._dfScore(this._dfManeuver.startState, this._dfManeuver.manIdx, stateIdx, dist);
-      }
-      const newIdx = this._dfPickManeuver(stateIdx);
-      const dirs   = this._dfManeuverDirs(newIdx);
-      const dur    = (cfg.dogfightManeuverMin ?? 1.2)
-                   + Math.random() * ((cfg.dogfightManeuverMax ?? 2.8) - (cfg.dogfightManeuverMin ?? 1.2));
-      this._dfManeuver = {
-        pitchDir: dirs.pitchDir, yawDir: dirs.yawDir,
-        duration: dur, timer: 0,
-        manIdx: newIdx, startState: stateIdx, startRange: dist,
-        damageTaken: 0, frontFired: 0, frontHit: 0, rearFired: 0, rearHit: 0,
-      };
-    }
-
-    // ── Execute committed arc turn (fixed-rate joystick, both axes independent) ─
-    const turnRad  = (cfg.dogfightTurnRate ?? 45) * Math.PI / 180 * dt;
+    // ── ATTACK: sensor-driven 4-rule priority dogfight ────────────────────────
+    const s         = this._sense(playerPos, context);
+    const turnRad   = (cfg.dogfightTurnRate ?? 120) * Math.PI / 180 * dt;
     const shipRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.mesh.quaternion);
     const shipUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(this.mesh.quaternion);
-    const m         = this._dfManeuver;
-    if (m.pitchDir !== 0) this._vel.applyAxisAngle(shipRight,  m.pitchDir * turnRad);
-    if (m.yawDir   !== 0) this._vel.applyAxisAngle(shipUp,    -m.yawDir   * turnRad);
-    this._vel.normalize().multiplyScalar(ATTACK_SPEED);
 
-    // ── Collision avoidance override (always active, overrides committed turn) ─
-    const colR = cfg.dogfightColAvoidR ?? 30;
-    if (dist < colR) {
-      const awayV = dirToP.clone().negate().multiplyScalar(ATTACK_SPEED);
-      this._vel.lerp(awayV, Math.min(1, (colR - dist) / colR));
+    // 8-position joystick derived from sensor bearing.
+    // rDot / uDot must exceed threshold to engage that axis (dead-zone).
+    // If both in dead-zone, falls back to pitch-up to prevent stall on exact axis.
+    const JT       = cfg.dogfightJoystickThreshold ?? 0.15;
+    const yawDir   = s.rDot >  JT ? 1 : s.rDot < -JT ? -1 : 0;
+    const pitchDir = s.uDot >  JT ? 1 : s.uDot < -JT ? -1 : 0;
+
+    // sign: +1 = toward player,  -1 = away from player
+    const _applySteer = (sign) => {
+      const yr = sign * yawDir;
+      const pr = sign * (pitchDir || (yawDir === 0 ? 1 : 0));
+      if (yr) this._vel.applyAxisAngle(shipUp,    -yr * turnRad);
+      if (pr) this._vel.applyAxisAngle(shipRight,   pr * turnRad);
+    };
+
+    // ── RULE 1 — Collision avoidance ──────────────────────────────────────────
+    const ramDist = cfg.dogfightRamAvoidDist ?? 20;
+    if (s.dist < ramDist && s.fwd >= 0) {
+      if (this._avoidTimer <= 0)
+        this._avoidTimer = (Math.PI / 2) / ((cfg.dogfightTurnRate ?? 120) * Math.PI / 180);
+      this._avoidTimer -= dt;
+      _applySteer(-1);
       this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+      pos.addScaledVector(this._vel, dt);
+      const fT1 = pos.clone().add(this._vel.clone().normalize());
+      if (pos.distanceTo(fT1) > 0.01) this.mesh.lookAt(fT1);
+      return null;
+    } else {
+      this._avoidTimer = 0;
     }
 
-    pos.addScaledVector(this._vel, dt);
+    // ── RULE 2 — Reversal ─────────────────────────────────────────────────────
+    const reversalDist = cfg.dogfightReversalDist ?? 200;
+    if (s.fwd < 0 && s.dist < reversalDist) this._reversing = true;
+    if (this._reversing) {
+      if (s.fwd >= 0) {
+        this._reversing = false;
+      } else {
+        _applySteer(1);
+        this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+        pos.addScaledVector(this._vel, dt);
+        const fT2 = pos.clone().add(this._vel.clone().normalize());
+        if (pos.distanceTo(fT2) > 0.01) this.mesh.lookAt(fT2);
+        return null;
+      }
+    }
 
-    // Ship faces its velocity direction
+    // ── RULE 3 — Danger zone evasion ──────────────────────────────────────────
+    if (s.dangerFront || s.dangerRear) {
+      _applySteer(-1);
+    } else {
+      // ── RULE 4 — Offensive aim ──────────────────────────────────────────────
+      // fwd >= 0: player ahead → aim front cannon (steer toward)
+      // fwd <  0: player behind → aim rear cannon (steer away = tail to player)
+      _applySteer(s.fwd >= 0 ? 1 : -1);
+    }
+
+    this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+    pos.addScaledVector(this._vel, dt);
     const fwdTgt = pos.clone().add(this._vel.clone().normalize());
     if (pos.distanceTo(fwdTgt) > 0.01) this.mesh.lookAt(fwdTgt);
 
-    // ── Front cannon ─────────────────────────────────────────────────────────
+    // ── Front cannon ──────────────────────────────────────────────────────────
     this._frontCooldown -= dt;
-    const frontDot = myFwd.dot(dirToP);
-    if (this._frontCooldown <= 0 && dist < (cfg.dogfightFrontFireR ?? 500) && frontDot > 0.8) {
+    if (this._frontCooldown <= 0 && s.dist < (cfg.dogfightFrontFireR ?? 500) && s.fwd > 0.94) {
       this._frontCooldown = (cfg.dogfightFrontCoolMin ?? 2.0)
         + Math.random() * ((cfg.dogfightFrontCoolMax ?? 4.0) - (cfg.dogfightFrontCoolMin ?? 2.0));
-      m.frontFired++;
-      const fPos = pos.clone().addScaledVector(myFwd, 5);
-      return { pos: fPos, vel: dirToP.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
+      const myFwdN = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+      return { pos: pos.clone().addScaledVector(myFwdN, 5),
+               vel: s.dir.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
     }
 
-    // ── Rear cannon ──────────────────────────────────────────────────────────
+    // ── Rear cannon ───────────────────────────────────────────────────────────
     this._rearCooldown -= dt;
-    const myAft  = myFwd.clone().negate();
-    const aftDot = myAft.dot(dirToP);
-    if (this._rearCooldown <= 0 && dist < (cfg.dogfightRearFireR ?? 400) && aftDot > 0.8) {
+    if (this._rearCooldown <= 0 && s.dist < (cfg.dogfightRearFireR ?? 400) && s.fwd < -0.94) {
       this._rearCooldown = (cfg.dogfightRearCoolMin ?? 2.5)
         + Math.random() * ((cfg.dogfightRearCoolMax ?? 5.0) - (cfg.dogfightRearCoolMin ?? 2.5));
-      m.rearFired++;
-      const rPos = pos.clone().addScaledVector(myAft, 5);
-      return { pos: rPos, vel: dirToP.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
+      const myFwdN = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+      return { pos: pos.clone().addScaledVector(myFwdN.clone().negate(), 5),
+               vel: s.dir.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
     }
 
     return null;
   }
 
-  // ─────────────────────────── steering helper ────────────────────────────────
+
+
+  // ─────────────────────────── sense — Zylon sensor readout ─────────────────
+
+  /**
+   * Compute the Zylon's sensor readout for the player, mirroring the HUD
+   * bearing scope logic (same field names and conventions).
+   *
+   *   fwd   — dot(dirToPlayer, myForward)  +1 = dead ahead,  −1 = dead behind
+   *   rDot  — dot(dirToPlayer, myRight)    +1 = player right, −1 = player left
+   *   uDot  — dot(dirToPlayer, myUp)       +1 = player above, −1 = player below
+   *   theta — horizontal bearing angle °   0° = ahead,  ±180° = behind
+   *   dist  — range in units
+   *   dir   — unit vector from Zylon toward player (for torpedo velocity)
+   *   dangerFront — this Zylon is inside the player's FRONT fire cone + range
+   *   dangerRear  — this Zylon is inside the player's REAR  fire cone + range
+   */
+  _sense(playerPos, ctx) {
+    const pos  = this.mesh.position;
+    const rel  = playerPos.clone().sub(pos);   // vector: Zylon → player
+    const dist = rel.length();
+    const dir  = dist > 0.01 ? rel.clone().normalize() : new THREE.Vector3(0, 0, -1);
+
+    const myFwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+    const myRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.mesh.quaternion);
+    const myUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(this.mesh.quaternion);
+
+    const fwd   = dir.dot(myFwd);    // +1 = player dead ahead
+    const rDot  = dir.dot(myRight);  // +1 = player to my right
+    const uDot  = dir.dot(myUp);     // +1 = player above me
+    const theta = Math.atan2(rDot, fwd) * 180 / Math.PI; // bearing °
+
+    return {
+      fwd, rDot, uDot, theta, dist, dir,
+      dangerFront: ctx?.dangerFront ?? false,
+      dangerRear:  ctx?.dangerRear  ?? false,
+    };
+  }
+
+  // ─────────────────────────── steering helper ─────────────────────────────
 
   /**
    * Rotate this._vel toward targetDir by at most maxRad radians (this frame),

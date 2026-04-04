@@ -1532,6 +1532,12 @@ const SectorView = (() => {
   function _updateZylons(dt) {
     if (!_zylons.length) return;
     const playerPos = _camera.position.clone();
+    const playerFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
+
+    // Danger cone constants (computed once — used per Zylon below)
+    const _evadeCos   = Math.cos((GameConfig.zylon.dogfightEvadeConeAngleDeg ?? 30) * Math.PI / 180);
+    const _frontFireR = GameConfig.zylon.dogfightFrontFireR ?? 500;
+    const _rearFireR  = GameConfig.zylon.dogfightRearFireR  ?? 400;
 
     // Base context (warrior orbit AI; seeker TIE/Bird get per-ship beaconPos below)
     const baseContext = {
@@ -1554,8 +1560,16 @@ const SectorView = (() => {
         const ownBeacon = _zylons.find(b =>
           !b.dead && b.type === 'seeker_beacon' && b._galaxyRef === z._galaxyRef
         );
-        const playerFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
-        ctx = { ...baseContext, beaconPos: ownBeacon ? ownBeacon.position.clone() : null, playerFwd };
+        // Danger flags: is this Zylon inside the player's firing cone + range?
+        // Computed from the player's frame — independent of the Zylon's own sensors.
+        const toZ      = z.position.clone().sub(playerPos);
+        const zDist    = toZ.length();
+        const toZN     = zDist > 0.01 ? toZ.clone().normalize() : new THREE.Vector3();
+        const pDot     = playerFwd.dot(toZN); // +1 = Zylon dead ahead of player
+        const dangerFront = pDot >=  _evadeCos && zDist < _frontFireR;
+        const dangerRear  = pDot <= -_evadeCos && zDist < _rearFireR;
+        ctx = { ...baseContext, beaconPos: ownBeacon ? ownBeacon.position.clone() : null,
+                playerFwd, dangerFront, dangerRear };
       } else {
         ctx = { ...baseContext, beaconPos: null };
       }
