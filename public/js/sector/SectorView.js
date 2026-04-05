@@ -1365,12 +1365,22 @@ const SectorView = (() => {
     }
     if (groups.size > 0) {
       seekerLines.push(`SEEKERS: ${groups.size} GROUP${groups.size > 1 ? 'S' : ''}`);
-      for (const [, g] of groups) {
+      for (const [ref, g] of groups) {
         const ships  = [g.hasTIE ? 'TIE' : null, g.hasBird ? 'BRD' : null, g.hasBeacon ? 'BCN' : null]
                        .filter(Boolean).join('+') || '(none)';
         const status = g.beaconActive ? '*ACTIVE*' : g.tracking ? 'TRACKING' : 'SEARCHING';
         const pad    = String(g.clanId).padStart(2, '0');
         seekerLines.push(`CL${pad}: ${ships.padEnd(11)} ${status}`);
+        // Per-ship real-time mode lines
+        for (const z of _zylons) {
+          if (z.dead || z._galaxyRef !== ref) continue;
+          if (z.type === 'seeker_tie' || z.type === 'seeker_bird') {
+            const label   = z.type === 'seeker_tie' ? '  TIE' : ' BIRD';
+            const sphase  = (z._sphase ?? '?').toUpperCase();
+            const rule    = z._dbgRule ? ` [${z._dbgRule}]` : '';
+            seekerLines.push(`${label}: ${sphase}${rule}`);
+          }
+        }
       }
     }
 
@@ -1401,10 +1411,16 @@ const SectorView = (() => {
       const isActive   = line.includes('*ACTIVE*');
       const isTracking = line.includes('TRACKING');
       const isSep      = line.startsWith('─');
+      const isAttack   = line.startsWith('  TIE') || line.startsWith(' BIRD');
+      const phaseMatch = isAttack ? line.match(/: (\w+)/) : null;
+      const phase      = phaseMatch ? phaseMatch[1] : '';
       oc.fillStyle =
         isSep      ? 'rgba(180,180,180,0.25)' :
         isActive   ? '#ffff55' :
         isTracking ? '#44aaff' :
+        isAttack   ? (phase === 'ATTACK'  ? '#ff8800' :
+                      phase === 'RETURN'  ? '#00ccff' :
+                      phase === 'PATROL'  ? '#aa88ff' : '#00ff88') :
         isOff || isDormant ? '#ff4444' : '#00ff88';
       oc.fillText(line, x + padPx, y + padPx + i * lh);
     });
@@ -1722,6 +1738,16 @@ const SectorView = (() => {
     if (fired) {
       _fireFlash = 0.18;
       _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+      _notifyZylonsOfShot(true);
+    }
+  }
+
+  // Notify all attacking Zylons that the player fired
+  function _notifyZylonsOfShot(isFront) {
+    for (const z of _zylons) {
+      if (!z.dead && typeof z.notifyPlayerShot === 'function') {
+        z.notifyPlayerShot(isFront);
+      }
     }
   }
 
@@ -1734,6 +1760,7 @@ const SectorView = (() => {
     _torpedoCount--;
     _doFire(c, 0, true);
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+    _notifyZylonsOfShot(false);
   }
 
   // Left front cannon only (left mouse button)
@@ -1745,6 +1772,7 @@ const SectorView = (() => {
     _doFire(_cannon.fL, -TORPEDO_OFFSET, false);
     _fireFlash = 0.18;
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+    _notifyZylonsOfShot(true);
   }
 
   // Right front cannon only (right mouse button)
@@ -1756,6 +1784,7 @@ const SectorView = (() => {
     _doFire(_cannon.fR, +TORPEDO_OFFSET, false);
     _fireFlash = 0.18;
     _energy = Math.max(0, _energy - TORPEDO_ENERGY);
+    _notifyZylonsOfShot(true);
   }
 
   // ---- Player hit handler ----

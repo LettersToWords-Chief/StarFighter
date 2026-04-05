@@ -682,7 +682,7 @@ class ZylonShip {
     const _playerToBcn   = beaconPos ? playerPos.distanceTo(beaconPos) : Infinity;
     const _playerInZone  = beaconPos ? _playerToBcn < ENG_R_BEACON : dist < ENG_R;
     const _playerOutZone = beaconPos ? _playerToBcn > BRK_R_BEACON : false; // beacon dead = never disengage
-    if ((this._sphase === 'guard' || this._sphase === 'patrol') && _playerInZone) {
+    if ((this._sphase === 'guard' || this._sphase === 'patrol' || this._sphase === 'return') && _playerInZone) {
       this._sphase = 'attack';
       this._phase  = 'pursue';
       this._circleTimer = 0;
@@ -750,6 +750,9 @@ class ZylonShip {
 
     // ── ATTACK: sensor-driven 4-rule priority dogfight ────────────────────────
     const s         = this._sense(playerPos, context);
+    // Store last danger state so notifyPlayerShot() can check it
+    this._lastDangerFront = s.dangerFront;
+    this._lastDangerRear  = s.dangerRear;
     const turnRad   = (cfg.dogfightTurnRate ?? 120) * Math.PI / 180 * dt;
     const shipRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.mesh.quaternion);
     const shipUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(this.mesh.quaternion);
@@ -768,6 +771,20 @@ class ZylonShip {
       if (yr) this._vel.applyAxisAngle(shipUp,    -yr * turnRad);
       if (pr) this._vel.applyAxisAngle(shipRight,   pr * turnRad);
     };
+
+    // ── JINK — shot evasion (reaction delay + cooldown) ──────────────────────
+    if (this._jinkCooldown  > 0) this._jinkCooldown  -= dt;
+    if (this._jinkReactionTimer > 0) {
+      this._jinkReactionTimer -= dt;
+      if (this._jinkReactionTimer <= 0) {
+        // Apply 90° rotation around the player-Zylon axis (sidestep incoming shot)
+        const jinkSign = Math.random() < 0.5 ? 1 : -1;
+        this._vel.applyAxisAngle(s.dir, jinkSign * Math.PI / 2)
+                  .normalize().multiplyScalar(ATTACK_SPEED);
+        // Reset evasion axis so R3 commits to the new heading
+        this._evadeAxis = null;
+      }
+    }
 
     // ── RULE 1 — Collision avoidance ──────────────────────────────────────────
     const ramDist = cfg.dogfightRamAvoidDist ?? 20;
@@ -805,8 +822,28 @@ class ZylonShip {
     // ── RULE 3 — Danger zone evasion ──────────────────────────────────────────
     if (s.dangerFront || s.dangerRear) {
       this._dbgRule = `R3-EVADE(F=${s.dangerFront},R=${s.dangerRear})`;
-      _applySteer(-1);
+      // Pick and lock the rotation axis on first entry
+      if (!this._evadeAxis) {
+        const fleeDir = s.dir.clone().negate();
+        const curN    = this._vel.clone().normalize();
+        this._evadeAxis  = new THREE.Vector3().crossVectors(curN, fleeDir).normalize();
+        this._evadeTimer = 0;
+      }
+      // Track total time trapped in cone
+      this._evadeTimer += dt;
+      if (this._evadeTimer >= 3.0) {
+        // Still in cone after 3s — full reverse: charge the player
+        this._reversing  = true;
+        this._evadeAxis  = null;
+        this._evadeTimer = 0;
+      } else {
+        // Keep committing to the turn until cone is cleared
+        this._vel.applyAxisAngle(this._evadeAxis, turnRad).normalize().multiplyScalar(ATTACK_SPEED);
+      }
     } else {
+      // Cone cleared — reset evasion state
+      this._evadeAxis  = null;
+      this._evadeTimer = 0;
       // ── RULE 4 — Always approach player ─────────────────────────────────────
       this._dbgRule = `R4-AIM(fwd=${s.fwd.toFixed(2)},d=${Math.round(s.dist)})`;
       this._steer(s.dir, ATTACK_SPEED, turnRad);
@@ -911,6 +948,21 @@ class ZylonShip {
     }
     axis.normalize();
     this._vel.copy(cur).applyAxisAngle(axis, maxRad).multiplyScalar(speed);
+  }
+
+  /**
+   * Called by SectorView when the player fires a cannon.
+   * isFront=true → front cannon; isFront=false → aft cannon.
+   * If this Zylon is in the matching danger zone, in attack mode, and the
+   * jink cooldown has expired, arm the reaction timer (0.1s delay).
+   */
+  notifyPlayerShot(isFront) {
+    if (this._sphase !== 'attack') return;
+    const inDanger = isFront ? this._lastDangerFront : this._lastDangerRear;
+    if (!inDanger) return;
+    if ((this._jinkCooldown ?? 0) > 0) return;
+    this._jinkReactionTimer = GameConfig.zylon.dogfightJinkReactionSec ?? 0.1;
+    this._jinkCooldown      = GameConfig.zylon.dogfightJinkCooldownSec ?? 3.0;
   }
 
   // ─────────────────────────────────── warrior orbit AI ────────────────────
