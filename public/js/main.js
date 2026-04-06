@@ -16,6 +16,9 @@
   let _mapOpen    = false;  // map overlay hidden at startup
   let _sectorLive = false;
   let _warping    = false;  // true during warp transition — suppresses onExit map open
+  let _warpReady      = false;   // true while warp mode is armed (pre-engagement alignment)
+  let _warpReadyTarget = null;   // target {q, r} locked in warp mode
+  let _warpReadyInterval = null; // setInterval handle for 30s countdown
   const currentDifficulty = 'cadet';
 
   // ---- Subspace message log ----
@@ -62,6 +65,7 @@
 
   // ---- Map overlay ----
   function openMap() {
+    _cancelWarpReadyMode();  // opening the map cancels armed warp
     _mapOpen = true;
     $galaxy().classList.add('map-open');
     SubspaceComm._renderLog();
@@ -72,6 +76,38 @@
     _mapOpen = false;
     $galaxy().classList.remove('map-open');
     if (_sectorLive) SectorView.showView(mode); // rebind controls, set view direction
+  }
+
+  // ---- Warp Ready Mode ----
+  // Arms the warp drive: shows the destination diamond in the cockpit and starts the 30s
+  // countdown. Player must align their ship to the diamond and press E to engage.
+  function _beginWarpReadyMode(t) {
+    _cancelWarpReadyMode();
+    const from = galaxyMap.playerPos;
+    const fc   = HexMath.fuelCost(from, t);
+    if (playerFuel < fc) { showAlert('INSUFFICIENT FUEL'); return; }
+    _warpReady       = true;
+    _warpReadyTarget = t;
+    // Compute 3D direction from player hex to destination hex (XZ plane)
+    const fromPx = HexMath.axialToPixel(from.q, from.r, 1);
+    const toPx   = HexMath.axialToPixel(t.q, t.r, 1);
+    const dx = toPx.x - fromPx.x, dy = toPx.y - fromPx.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const dir3D = new THREE.Vector3(dx / len, 0, dy / len);
+    let countdown = GameConfig.player.warpArmTimeout ?? 30;
+    if (_sectorLive) SectorView.enterWarpMode(dir3D, countdown);
+    _warpReadyInterval = setInterval(() => {
+      countdown--;
+      if (_sectorLive) SectorView.updateWarpModeTimer(countdown);
+      if (countdown <= 0) _cancelWarpReadyMode();
+    }, 1000);
+  }
+
+  function _cancelWarpReadyMode() {
+    _warpReady       = false;
+    _warpReadyTarget = null;
+    if (_warpReadyInterval) { clearInterval(_warpReadyInterval); _warpReadyInterval = null; }
+    if (_sectorLive) SectorView.cancelWarpMode();
   }
 
   // ---- Init ----
@@ -121,20 +157,30 @@
         if (e.code === 'KeyF')      { closeMap('front'); return; }
         if (e.code === 'KeyA')      { closeMap('aft');   return; }
         if (e.code === 'KeyG' || e.code === 'Escape') { closeMap(); return; }
-        // H from map = warp
+        // H from map = arm warp mode, return to cockpit
         if (e.code === 'KeyH') {
           const t = galaxyMap.getTarget();
           if (!t) { showAlert('SELECT A WARP TARGET FIRST'); return; }
-          galaxyMap._warpTo(t);
+          _beginWarpReadyMode(t);
+          closeMap('front');
           return;
         }
       } else {
         // Cockpit is visible
         if (e.code === 'KeyG') { openMap(); return; }
         if (e.code === 'KeyH') {
+          if (_warpReady) { showAlert('WARP ALREADY ARMED — PRESS E TO ENGAGE'); return; }
           const t = galaxyMap.getTarget();
           if (!t) { showAlert('NO WARP TARGET — PRESS G TO SET ONE'); return; }
-          galaxyMap._warpTo(t);
+          _beginWarpReadyMode(t);
+          return;
+        }
+        if (e.code === 'KeyE') {
+          if (_warpReady && _warpReadyTarget) {
+            const t = _warpReadyTarget;
+            _cancelWarpReadyMode();
+            galaxyMap._warpTo(t);
+          }
           return;
         }
       }

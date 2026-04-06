@@ -25,8 +25,8 @@ Stack: Node.js + Express server (`server.js`), vanilla JS front-end in `public/j
 - Dogfight AI: committed-arc maneuver system with zone classification and weight-table learning (see Section B below)
 - Zylon evasion: seekers execute a committed 1-second evasion turn when inside player's firing cone, using a fixed rotation axis to prevent jitter
 
-### 🔄 In Progress / Most Recent Work
-- **Evasion tuning** (last session, conv `bf66964b`): the evasion maneuver was simplified — instead of the full 9-maneuver weight-table system for evasion, seekers now do a single committed 1-second turn away from the player's firing cone. The rotation axis is fixed at maneuver start to prevent jitter. Still needs real-world testing for edge cases.
+### 🔄 Most Recent Work
+- **Warp Drive Redesign (Item 9)** — Two-step align + engage flow. H arms warp mode (destination diamond + 30s countdown). E engages. G or map open cancels. All 9 items on the Zylon Redesign Roadmap are now complete.
 
 ### 📋 Planned But Not Yet Built (in priority order)
 See Section C below.
@@ -115,7 +115,7 @@ These are built sequentially. Each item must be approved before implementation b
 | 6 | Beacon hit evasion (new orbital plane, speed to 100u/s for 10s) | ✅ Done |
 | 7 | TIE/Bird defender role split + dynamic flight | ✅ Done |
 | 8 | Warrior clan-based resupply logic | ✅ Done |
-| **9** | **Warp drive UX redesign** | 📋 Next |
+| **9** | **Warp drive UX redesign** | ✅ Done |
 
 ### Item 7 Detail: TIE/Bird Defender Roles + Dynamic Flight
 - **TIE Fighter** = close defender, stays near Beacon

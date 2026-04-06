@@ -65,6 +65,9 @@ const SectorView = (() => {
   let _warpTargetDir = new THREE.Vector3(0, 0, -1);
   let _warpDrift = 0;
   let _warpMult = 1.0;
+  let _warpMode      = false;                          // true during pre-warp alignment
+  let _warpModeDir   = new THREE.Vector3(0, 0, -1);   // destination heading (world space)
+  let _warpModeTimer = 0;                              // countdown seconds remaining
   let _lockState = 0;          // 0=none 1=partial-top 2=partial-bottom 3=full
   let _starbaseLocked = false;  // true when SB dot is inside inner scope box
   let _targetLocked   = false;  // true when any combat contact is fully locked
@@ -2670,6 +2673,71 @@ const SectorView = (() => {
         oc.font = '7px Share Tech Mono, monospace'; oc.fillStyle = warpCol; oc.textAlign = 'center';
         oc.fillText('WARP LOCK', cx, cy + cr * 2.6);
       }
+
+      // ---- Warp Mode Overlay (pre-engagement alignment) ----
+      // Shown while warp is armed but before the charge fires.
+      if (_warpMode && !_warpCharging) {
+        const hRight = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
+        const hUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(_cameraQuat);
+        const rx = _warpModeDir.dot(hRight);
+        const uy = _warpModeDir.dot(hUp);
+        const WSCALE = Math.min(W, DY) * 0.55;
+        const tx = cx + rx * WSCALE;
+        const ty = cy - uy * WSCALE;
+        const err = Math.sqrt(rx * rx + uy * uy);
+        const alignThresh = Math.sin((GameConfig.player.warpAlignAngle ?? 15) * Math.PI / 180);
+        const warpCol = err < alignThresh ? '#00ff88' : '#ff3300';
+        const tR = 14;
+        const edgeM = 36;
+        const onScreen = tx >= edgeM && tx <= W - edgeM && ty >= edgeM && ty <= DY - edgeM;
+
+        if (onScreen) {
+          // Diamond
+          oc.strokeStyle = warpCol; oc.lineWidth = 1.8;
+          oc.beginPath();
+          oc.moveTo(tx, ty - tR); oc.lineTo(tx + tR, ty);
+          oc.lineTo(tx, ty + tR); oc.lineTo(tx - tR, ty);
+          oc.closePath(); oc.stroke();
+          const wp = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+          oc.fillStyle = warpCol; oc.globalAlpha = 0.4 + 0.6 * wp;
+          oc.beginPath(); oc.arc(tx, ty, 3, 0, Math.PI * 2); oc.fill();
+          oc.globalAlpha = 1;
+        } else {
+          // Edge arrow — points toward off-screen diamond
+          const dx = tx - cx, dy = ty - cy;
+          const angle = Math.atan2(dy, dx);
+          const tVals = [];
+          if (dx > 0) tVals.push((W - edgeM - cx) / dx);
+          else if (dx < 0) tVals.push((edgeM - cx) / dx);
+          if (dy > 0) tVals.push((DY - edgeM - cy) / dy);
+          else if (dy < 0) tVals.push((edgeM - cy) / dy);
+          const te = Math.min(...tVals.filter(v => v > 0));
+          const ex = cx + dx * te, ey = cy + dy * te;
+          const arrowSize = 16;
+          oc.save();
+          oc.translate(ex, ey);
+          oc.rotate(angle);
+          oc.strokeStyle = '#ff3300'; oc.lineWidth = 2;
+          oc.fillStyle = 'rgba(255,50,0,0.25)';
+          oc.beginPath();
+          oc.moveTo(arrowSize, 0);
+          oc.lineTo(-arrowSize * 0.6, -arrowSize * 0.5);
+          oc.lineTo(-arrowSize * 0.6,  arrowSize * 0.5);
+          oc.closePath();
+          oc.fill(); oc.stroke();
+          oc.restore();
+        }
+
+        // "PRESS E TO ENGAGE WARP DRIVE" / countdown
+        oc.textAlign = 'center';
+        oc.font = 'bold 11px Orbitron, sans-serif';
+        oc.fillStyle = '#00e5ff';
+        oc.fillText('PRESS E TO ENGAGE WARP DRIVE', cx, cy + cr * 2.8);
+        const timerCol = _warpModeTimer > 10 ? 'rgba(0,229,255,0.75)' : '#ff8800';
+        oc.font = '9px Share Tech Mono, monospace';
+        oc.fillStyle = timerCol;
+        oc.fillText(`WARP ARMED  ${_warpModeTimer}s`, cx, cy + cr * 2.8 + 16);
+      }
     } else {
       oc.strokeStyle = 'rgba(0,255,200,0.20)'; oc.lineWidth = 1;
       oc.beginPath(); oc.arc(cx, cy, 3, 0, Math.PI*2); oc.stroke();
@@ -3770,6 +3838,20 @@ const SectorView = (() => {
     _warpChargeCallback = onComplete;
   }
 
+  function enterWarpMode(worldDir, timer) {
+    _warpModeDir.copy(worldDir);
+    _warpModeTimer = timer;
+    _warpMode = true;
+  }
+
+  function cancelWarpMode() {
+    _warpMode = false;
+  }
+
+  function updateWarpModeTimer(t) {
+    _warpModeTimer = t;
+  }
+
   function drainEnergy(amount) {
     _energy = Math.max(0, _energy - amount);
   }
@@ -3785,6 +3867,7 @@ const SectorView = (() => {
   function getSectorPos()  { return { q: _sectorQ, r: _sectorR }; }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer,
            get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },

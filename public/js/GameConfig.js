@@ -263,6 +263,12 @@ const GameConfig = Object.freeze({
 
     /** HP threshold — skip replacement if HP ≥ this. */
     skipAt: 0.90,
+
+    /** Degrees off-heading inside which the warp diamond turns green. */
+    warpAlignAngle: 15,
+
+    /** Seconds before armed warp mode auto-cancels if E is not pressed. */
+    warpArmTimeout: 30,
   },
 
   // =========================================================
