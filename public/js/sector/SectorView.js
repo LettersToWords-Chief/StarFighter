@@ -56,6 +56,7 @@ const SectorView = (() => {
   let _currentVelocity = 0;  // actual live velocity (u/s), ramps toward target
   let _cameraQuat = new THREE.Quaternion();
   let _mnx = 0, _mny = 0;
+  let _mouseScale = 540;   // canvas px per normalized unit — updated each mouse move
   let _warpCharging = false;
   let _warpChargeTimer = 0;          // counts up during charge phase (fires at WARP_CHARGE_TIME)
   let _warpChargeCallback = null;
@@ -247,8 +248,9 @@ const SectorView = (() => {
     if (_repairPanelOpen) return;           // damage report open — freeze steering
     const r     = _canvas.getBoundingClientRect();
     const DH    = 130; // dashboard height — must match _drawHUD
-    const scale = r.width * 0.45;
-    const viewCy = r.top + r.height / 2; // true canvas center = camera aim point
+    const scale  = r.width * 0.45;
+    _mouseScale   = scale;   // keep in sync for dead-zone pixel conversion
+    const viewCy  = r.top + r.height / 2;
     _mnx = Math.max(-1, Math.min(1, (e.clientX - r.left - r.width / 2) / scale));
     _mny = Math.max(-1, Math.min(1, (e.clientY - viewCy)               / scale));
   }
@@ -1495,7 +1497,7 @@ const SectorView = (() => {
 
     // Per-engine speed: don't clamp _speed — each engine contributes individually
 
-    const dz = 0.05;
+    const dz = 8 / _mouseScale;          // 8-pixel dead zone, screen-size-independent
     const nx = Math.abs(_mnx) > dz ? _mnx : 0;
     const ny = Math.abs(_mny) > dz ? _mny : 0;
     let kx = 0, ky = 0;
