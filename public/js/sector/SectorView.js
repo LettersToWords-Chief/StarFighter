@@ -244,6 +244,7 @@ const SectorView = (() => {
   // ---- Input ----
   function _onMM(e) {
     if (!_canvas || !_mouseInView) return;  // ignore mouse movement outside the game
+    if (_repairPanelOpen) return;           // damage report open — freeze steering
     const r     = _canvas.getBoundingClientRect();
     const DH    = 130; // dashboard height — must match _drawHUD
     const scale = r.width * 0.45;
@@ -254,6 +255,7 @@ const SectorView = (() => {
   function _onMD(e) {
     // Absorb the first click after the browser tab regains focus
     if (_skipNextMousedown) { _skipNextMousedown = false; return; }
+    if (e.button === 1) { e.preventDefault(); _aftPipOn = !_aftPipOn; return; } // middle-click = toggle aft PiP
     if (_repairPanelOpen) return;  // damage report open — don't fire
     if (e.button === 0) { _fireLeft();  } // left  click = left  front cannon
     if (e.button === 2) { _fireRight(); } // right click = right front cannon
@@ -304,7 +306,8 @@ const SectorView = (() => {
   function _onKU(e) { _keys.delete(e.code); }
   function _onW(e) {
     e.preventDefault();
-    // Scroll no longer switches views — A key toggles the aft PiP window
+    if (e.deltaY < 0) _speed = Math.min(9, _speed + 1); // scroll forward  = faster
+    else              _speed = Math.max(0, _speed - 1); // scroll backward = slower
   }
   let _combatViewEl = null; // cached #combat-view element for enter/leave listeners
   function _onMouseEnter() {
@@ -1149,6 +1152,27 @@ const SectorView = (() => {
     _shieldImpacts.push({ ring, light, age: 0, maxAge: 0.5 });
   }
 
+  // Beacon shield impact — red/orange ring, intensity scales with shield damage fraction
+  function _spawnBeaconShieldImpact(hitPos, center, intensity) {
+    if (!_scene) return;
+    const clamped = Math.max(0.15, Math.min(1, intensity));
+    const normal  = hitPos.clone().sub(center).normalize();
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(2, 5, 36),
+      new THREE.MeshBasicMaterial({
+        color: 0xff4400, transparent: true, opacity: 0.9 * clamped,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      })
+    );
+    ring.position.copy(hitPos);
+    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    _scene.add(ring);
+    const light = new THREE.PointLight(0xff4400, 14 * clamped, 80);
+    light.position.copy(hitPos);
+    _scene.add(light);
+    _shieldImpacts.push({ ring, light, age: 0, maxAge: 0.5 });
+  }
+
   function _updateShieldImpacts(dt) {
     for (let i = _shieldImpacts.length - 1; i >= 0; i--) {
       const imp = _shieldImpacts[i];
@@ -1703,10 +1727,9 @@ const SectorView = (() => {
   // Update cannon thermals each tick
   function _updateCannons(dt) {
     const CC = GameConfig.cannons;
-    // Cooling = baseline + each engine's contribution (engine health × speed)
-    const engCooling = _engines
-      ? _engines.reduce((s, e) => s + CC.coolingPerEnginePerSpeed * _speed * (e.hp / 100), 0)
-      : 0;
+    // Cooling = baseline + sqrt(speed × liveEngines) — losing an engine degrades cooling
+    const liveEngines = _engines ? _engines.filter(e => e.hp > 0).length : 0;
+    const engCooling  = (CC.coolingPerEnginePerSpeed * 4) * Math.sqrt(_speed * liveEngines);
     _cannonCoolingRate = Math.min(100, CC.coolingBaseline + engCooling);
     const tempDrop = (_cannonCoolingRate / 100) * CC.maxCoolingTempDrop; // °/sec
     const optRate  = 100 / CC.optimalChargeTime; // 500 units/sec at optimal
@@ -2139,13 +2162,32 @@ const SectorView = (() => {
               const isBeaconShip = z.type === 'seeker_beacon';
               const destroyed = z.takeDamage(GameConfig.zylon.torpedoDamage);
               if (isBeaconShip) {
-                // Beacon: green explosion (same as original)
-                _spawnExplosion(t.pos.clone(), {
-                  scale: destroyed ? 2.5 : 0.8, debris: destroyed ? 10 : 3,
-                  fireColor: 0x00ff44, debrisColor: 0x004422,
-                });
-                if (destroyed && typeof showMessage === 'function') {
-                  // showMessage('BEACON DESTROYED', '', 'ZYLON REINFORCEMENTS RECALLED');
+                const shieldHit = z._lastShieldHit ?? 0;
+                const hullHit   = z._lastHullHit   ?? 0;
+                const hullMax   = GameConfig.zylon.beaconHullHP ?? 300;
+                const bcnCenter = z.mesh.position.clone();
+
+                // Shield impact: red ring, intensity = fraction of damage that hit shield
+                if (shieldHit > 0) {
+                  const totalDmg = shieldHit + hullHit;
+                  _spawnBeaconShieldImpact(t.pos.clone(), bcnCenter, shieldHit / totalDmg);
+                }
+                // Hull hit (not dead): green explosion scaled to hull damage fraction
+                if (hullHit > 0 && !destroyed) {
+                  _spawnExplosion(t.pos.clone(), {
+                    scale:  Math.max(0.3, 1.5 * (hullHit / hullMax)),
+                    debris: Math.max(1, Math.round(hullHit / hullMax * 5)),
+                    fireColor: 0x00ff44, debrisColor: 0x004422,
+                  });
+                }
+                // Destroyed: double green explosion
+                if (destroyed) {
+                  _spawnExplosion(bcnCenter, {
+                    scale: 2.5, debris: 10, fireColor: 0x00ff44, debrisColor: 0x004422,
+                  });
+                  _spawnExplosion(bcnCenter, {
+                    scale: 1.8, debris:  6, fireColor: 0x44ff88, debrisColor: 0x006633,
+                  });
                 }
               } else {
                 _spawnExplosion(t.pos.clone(),
@@ -3308,13 +3350,13 @@ const SectorView = (() => {
     oc.fillStyle = _torpedoCount > 10 ? valC : _torpedoCount > 0 ? '#ffaa00' : '#ff3300';
     oc.fillText(ammoStr, Z2X + 4 + ammoLblW, DY + 22);
     const coolV   = _cannonCoolingRate;
-    const coolCol = coolV > 60 ? '#00ccff' : coolV > 30 ? '#ffaa00' : '#ff4400';
+    const coolCol = coolV > 42 ? '#00ccff' : coolV > 21 ? '#ffaa00' : '#ff4400'; // thresholds scaled to new max of 70
     oc.font = '16px Share Tech Mono, monospace'; oc.fillStyle = lbC; oc.textAlign = 'left';
     oc.fillText('COOLING:', Z2X + 160, DY + 22);
     const chdrBarX = Z2X + 232, chdrBarW = Math.max(0, Z2X + Z2W - chdrBarX - 4);
     const chdrBarY = DY + 10, chdrBarH = 10;
     oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(chdrBarX, chdrBarY, chdrBarW, chdrBarH);
-    oc.fillStyle = coolCol; oc.fillRect(chdrBarX, chdrBarY, chdrBarW * (coolV/100), chdrBarH);
+    oc.fillStyle = coolCol; oc.fillRect(chdrBarX, chdrBarY, chdrBarW * Math.min(1, coolV / 70), chdrBarH);
 
     // Three cannon sub-boxes
     const cBoxGap    = 3, cBoxMargin = 3;

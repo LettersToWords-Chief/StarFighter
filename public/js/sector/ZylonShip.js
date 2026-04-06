@@ -42,9 +42,13 @@ class ZylonShip {
       this._wphase      = 'approach'; // 'approach' | 'orbit'
       this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
     } else if (this._type === 'seeker_beacon') {
-      // Beacon uses the beacon shield pool
-      this._hp           = cfg.beaconShieldMax ?? 400;
-      this._isBeacon     = true;
+      // Beacon: regenerating shield pool + separate hull HP
+      this._shieldCharge  = cfg.beaconShieldMax  ?? 300;  // shield (regenerates)
+      this._shieldMax     = cfg.beaconShieldMax  ?? 300;
+      this._hp            = cfg.beaconHullHP     ?? 300;  // hull HP
+      this._isBeacon      = true;
+      this._lastShieldHit = 0;  // damage breakdown — read by SectorView after each hit
+      this._lastHullHit   = 0;
       // Orbit state — initialise from start position angle
       this._bOrbitAngle  = Math.atan2(startPos.z, startPos.x);
       this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
@@ -286,6 +290,20 @@ class ZylonShip {
     this._light = new THREE.PointLight(0xff3300, 3.0, 80);
     g.add(this._light);
     g.add(new THREE.PointLight(0xff1100, 1.2, 50));
+    // ── Shield bubble ─────────────────────────────────────────────────────────────────────────
+    // Deep-red additive sphere — opacity tracks shield charge each frame in _updateBeaconShip
+    const _sbMat = new THREE.MeshBasicMaterial({
+      color: 0xff2200, transparent: true, opacity: 0.07,
+      side: THREE.FrontSide, blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const _sbOMat = new THREE.MeshBasicMaterial({
+      color: 0x881100, transparent: true, opacity: 0.03,
+      side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(22, 24, 18), _sbMat));
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(22.7, 24, 18), _sbOMat));
+    this._shieldBubbleMat      = _sbMat;
+    this._shieldBubbleOuterMat = _sbOMat;
     this._addClanMarkings(g);
     // Note: beacon is NOT scaled — it lives at full size
     return g;
@@ -450,6 +468,13 @@ class ZylonShip {
         this._shieldLight.intensity = 0.5 + 1.5 * (this._shieldCharge / this._shieldMax);
       }
     }
+    // ── Beacon shield regen ──
+    if (this._type === 'seeker_beacon' && this._shieldMax) {
+      this._shieldCharge = Math.min(
+        this._shieldMax,
+        this._shieldCharge + (cfg.beaconShieldRegenPerSec ?? 10) * dt
+      );
+    }
 
     // Dispatcher
     if (this._type === 'warrior')       return this._updateWarrior(dt, playerPos, context);
@@ -502,6 +527,11 @@ class ZylonShip {
     this.mesh.rotation.y += 0.5 * dt;
     this.mesh.rotation.x += 0.3 * dt;
 
+    // Update shield bubble opacity to track current charge
+    const _sbFrac = this._shieldMax ? Math.max(0, this._shieldCharge / this._shieldMax) : 0;
+    if (this._shieldBubbleMat)      this._shieldBubbleMat.opacity      = _sbFrac * 0.07;
+    if (this._shieldBubbleOuterMat) this._shieldBubbleOuterMat.opacity = _sbFrac * 0.03;
+
     return null; // beacon does not fire
   }
 
@@ -520,21 +550,35 @@ class ZylonShip {
     if (this._type === 'warrior') {
       return this._takeDamageWarrior(amount);
     } else if (this._type === 'seeker_beacon') {
-      // Beacon uses an HP pool; hit triggers evasion
-      this._hp = Math.max(0, this._hp - amount);
-      // Trigger: 0.2s pause, then orbit at full evasion speed for 10s;
-      // pick a brand-new random 3D orbital plane on each hit
+      // ── Three-zone beacon shield model ──────────────────────────────────────────
+      // Zone 1 (shield > 50% of max): full absorption — hull untouched
+      // Zone 2 (shield 1–50%): 50% to shield, 50% bleeds to hull
+      // Zone 3 (shield = 0): 100% to hull
+      const zone1   = this._shieldMax * 0.5;
+      let   shieldDmg = 0, hullDmg = 0;
+      if (this._shieldCharge > zone1) {
+        shieldDmg          = amount;
+        this._shieldCharge = Math.max(0, this._shieldCharge - amount);
+      } else if (this._shieldCharge > 0) {
+        shieldDmg          = amount * 0.5;
+        hullDmg            = amount * 0.5;
+        this._shieldCharge = Math.max(0, this._shieldCharge - shieldDmg);
+        this._hp           = Math.max(0, this._hp           - hullDmg);
+      } else {
+        hullDmg   = amount;
+        this._hp  = Math.max(0, this._hp - amount);
+      }
+      this._lastShieldHit = shieldDmg;
+      this._lastHullHit   = hullDmg;
+
+      // Hit triggers evasion + brand-new random 3D orbital plane
       this._bHitDelay = 0;
       this._bEvasion  = 10;
       this._bOrbitDir = Math.random() < 0.5 ? 1 : -1;
-      // Regenerate orbital plane anchored to current position — no teleport.
-      // U = radial direction to beacon right now; V = random perpendicular.
-      // Resetting angle to 0 means the update reconstruct exactly this position.
       const _hU = this.mesh.position.clone().normalize();
       let _hRand = new THREE.Vector3(
         Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
       ).normalize();
-      // Ensure _hRand isn't nearly parallel to _hU (cross product would degenerate)
       if (Math.abs(_hU.dot(_hRand)) > 0.95) {
         _hRand = Math.abs(_hU.y) < 0.9
           ? new THREE.Vector3(0, 1, 0)
@@ -542,7 +586,7 @@ class ZylonShip {
       }
       this._orbitU      = _hU;
       this._orbitV      = new THREE.Vector3().crossVectors(_hU, _hRand).normalize();
-      this._bOrbitAngle = 0; // beacon is at the U endpoint — position preserved exactly
+      this._bOrbitAngle = 0;
       if (this._light) {
         this._light.intensity = 5.0;
         setTimeout(() => { if (this._light) this._light.intensity = 3.0; }, 120);

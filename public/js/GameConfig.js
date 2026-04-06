@@ -382,7 +382,9 @@ const GameConfig = Object.freeze({
 
 
     // Beacon
-    beaconShieldMax:            400,   // shield HP (separate from warrior shield)
+    beaconShieldMax:            300,   // shield HP (regenerating shield layer)
+    beaconHullHP:               300,   // hull HP — depleted by bleed / shield-down hits
+    beaconShieldRegenPerSec:     10,   // regen rate — full recharge from zero in 30 s
     beaconNormalSpeed:           25,   // u/s — base orbit
     beaconSpeedTier1:            35,   // u/s — player within 200u
     beaconSpeedTier2:            45,   // u/s — player within 150u
