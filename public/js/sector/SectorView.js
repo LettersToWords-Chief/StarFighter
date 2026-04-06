@@ -44,7 +44,7 @@ const SectorView = (() => {
   const BEACON_HIT_DELAY   = 0.2;  // delay before flight starts (seconds)
 
   // ---- State ----
-  let _renderer = null, _scene = null, _camera = null;
+  let _renderer = null, _scene = null, _camera = null, _aftCamera = null;
   let _running  = false, _paused = false, _rafId = null;
   let _canvas = null, _glCanvas = null;
   let _onExit = null, _onMapToggle = null;
@@ -191,6 +191,7 @@ const SectorView = (() => {
   let _shieldsOn    = true;
   let _computerOn   = true;
   let _rearView     = false;
+  let _aftPipOn     = false;  // true while the aft PiP window is open
   let _lrsOn        = false;
   let _inputBound   = false;
   let _redAlert     = false;
@@ -263,8 +264,8 @@ const SectorView = (() => {
     if (e.code.startsWith('Digit')) { const d = +e.key; if (!isNaN(d)) _speed = d; }
     if (e.code === 'BracketRight' || e.code === 'PageUp')   _speed = Math.min(9, _speed + 1);
     if (e.code === 'BracketLeft'  || e.code === 'PageDown') _speed = Math.max(0, _speed - 1);
-    if (e.code === 'KeyF') { _rearView = false; _computerOn = true; } // Front view
-    if (e.code === 'KeyA') { _rearView = true;  _computerOn = true; } // Aft view
+    if (e.code === 'KeyF') { _aftPipOn = false; }                    // Close aft PiP
+    if (e.code === 'KeyA') { _aftPipOn = !_aftPipOn; }               // Toggle aft PiP
     if (e.code === 'KeyS') { _shieldsOn = !_shieldsOn;   }           // Shields
     if (e.code === 'KeyC') { _computerOn = !_computerOn; }           // Attack computer
     if (e.code === 'KeyL') { _lrsOn = !_lrsOn; }                     // Long range scan
@@ -303,10 +304,7 @@ const SectorView = (() => {
   function _onKU(e) { _keys.delete(e.code); }
   function _onW(e) {
     e.preventDefault();
-    // Scroll forward (wheel up, deltaY < 0) = front view
-    // Scroll back    (wheel down, deltaY > 0) = rear  view
-    if (e.deltaY < 0) { _rearView = false; _computerOn = true; }
-    else              { _rearView = true;  _computerOn = true; }
+    // Scroll no longer switches views — A key toggles the aft PiP window
   }
   let _combatViewEl = null; // cached #combat-view element for enter/leave listeners
   function _onMouseEnter() {
@@ -428,6 +426,7 @@ const SectorView = (() => {
     _renderer.setClearColor(0x000005, 1);
     _camera = new THREE.PerspectiveCamera(60, W / H, 0.5, 40000);
     _camera.rotation.order = 'YXZ';
+    _aftCamera = new THREE.PerspectiveCamera(60, W / H, 0.5, 40000);
   }
 
   function _buildScene() {
@@ -1323,7 +1322,41 @@ const SectorView = (() => {
       _energySampleTimer -= 1.0;
     }
 
-    if (_renderer && _scene) _renderer.render(_scene, _camera);
+    // ---- Two-pass rendering: front view (full canvas) + optional aft PiP ----
+    if (_renderer && _scene) {
+      const { W: rW, H: rH } = _canvasSize();
+      const DH_3D = 130;  // dashboard pixel height matches _drawHUD DH
+
+      // Pass 1: full-screen front view
+      _renderer.setScissorTest(false);
+      _renderer.setViewport(0, 0, rW, rH);
+      _renderer.render(_scene, _camera);
+
+      // Pass 2: aft PiP in bottom-left corner above dashboard
+      if (_aftPipOn && _aftCamera) {
+        const pipW = Math.floor(rW / 4);
+        const pipH = Math.floor((rH - DH_3D) / 4);
+        const pipX = 8;
+        const pipY = DH_3D;  // WebGL Y from bottom = sits just above dashboard
+
+        _aftCamera.fov    = _camera.fov;
+        _aftCamera.aspect = pipW / pipH;
+        _aftCamera.near   = _camera.near;
+        _aftCamera.far    = _camera.far;
+        _aftCamera.updateProjectionMatrix();
+        _aftCamera.position.copy(_camera.position);
+        _aftCamera.quaternion.copy(_cameraQuat).multiply(
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)
+        );
+
+        _renderer.setScissorTest(true);
+        _renderer.setScissor(pipX, pipY, pipW, pipH);
+        _renderer.setViewport(pipX, pipY, pipW, pipH);
+        _renderer.render(_scene, _aftCamera);
+        _renderer.setScissorTest(false);
+        _renderer.setViewport(0, 0, rW, rH); // restore for LRS / debug draws
+      }
+    }
     _drawHUD();
     if (_lrsOn) _drawLRS();
     if (GameConfig.testMode) _drawStarbaseDebug();
@@ -1509,14 +1542,8 @@ const SectorView = (() => {
     }
     const vel = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat).multiplyScalar(_currentVelocity * dt);
     _camera.position.add(vel);  // no boundary — infinite free flight
-    // Aft view: flip 180° in local Y (look straight backward) without touching ship orientation
-    if (_rearView) {
-      _camera.quaternion.copy(_cameraQuat).multiply(
-        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)
-      );
-    } else {
-      _camera.quaternion.copy(_cameraQuat);
-    }
+    // Camera always looks forward; aft view rendered separately as a PiP
+    _camera.quaternion.copy(_cameraQuat);
     // Energy drain: accel → use current velocity²; decel → use power setting²
     // Full throttle (64) = 1 E/s; capped at 64 during warp phases.
     {
@@ -2614,6 +2641,33 @@ const SectorView = (() => {
     [[bo,bo,1,1],[W-bo,bo,-1,1]].forEach(([x,y,sx,sy]) => {
       oc.beginPath(); oc.moveTo(x, y+sy*bs); oc.lineTo(x,y); oc.lineTo(x+sx*bs,y); oc.stroke();
     });
+
+    // ---- Aft PiP border (drawn on overlay so it appears above the 3D render) ----
+    if (_aftPipOn) {
+      const pipW = Math.floor(W / 4);
+      const pipH = Math.floor(DY / 4);
+      const pipX = 8;
+      const pipY = DY - pipH;   // 2D: just above dashboard
+      oc.save();
+      // Border
+      oc.strokeStyle = 'rgba(0,200,255,0.65)';
+      oc.lineWidth   = 1.5;
+      oc.strokeRect(pipX, pipY, pipW, pipH);
+      // Corner notches
+      const ns = 8;
+      oc.strokeStyle = 'rgba(0,220,255,0.9)';
+      oc.lineWidth   = 1.5;
+      [[pipX, pipY, 1,1],[pipX+pipW, pipY, -1,1],[pipX, pipY+pipH, 1,-1],[pipX+pipW, pipY+pipH, -1,-1]].forEach(([cx2,cy2,sx2,sy2]) => {
+        oc.beginPath(); oc.moveTo(cx2+sx2*ns, cy2); oc.lineTo(cx2, cy2); oc.lineTo(cx2, cy2+sy2*ns); oc.stroke();
+      });
+      // Label — centered above the window
+      oc.font        = '8px Share Tech Mono, monospace';
+      oc.fillStyle   = 'rgba(0,210,255,0.75)';
+      oc.textAlign   = 'center';
+      oc.textBaseline = 'bottom';
+      oc.fillText('AFT VIEW', pipX + pipW / 2, pipY - 3);
+      oc.restore();
+    }
 
     // ---- Crosshair / Targeting Computer ----
     const cr = 15;
