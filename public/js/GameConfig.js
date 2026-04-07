@@ -269,6 +269,13 @@ const GameConfig = Object.freeze({
 
     /** Seconds before armed warp mode auto-cancels if E is not pressed. */
     warpArmTimeout: 30,
+
+    /** Max range (units) at which the player's cannons can score a hit. */
+    frontFireRangeU: 500,
+
+    /** Half-angle of the firing-solution cone (deg). Lead intercept must land inside
+     *  this cone from the ship's forward axis for the lock indicator to go green. */
+    firingSolutionConeHalfDeg: 30,
   },
 
   // =========================================================
@@ -369,7 +376,7 @@ const GameConfig = Object.freeze({
     dogfightAttackSpeedTIE:      50,   // u/s — TIE attack speed
     dogfightAttackSpeedBird:     65,   // u/s — Bird attack speed (slightly faster)
     dogfightTurnRate:            60,   // deg/s — max heading change per second
-    dogfightRamAvoidDist:        20,   // u     — Rule 1 collision avoidance threshold
+    dogfightRamAvoidDist:        40,   // u     — Rule 1 trigger distance (1.5s committed turn at 60°/s = 90°)
     dogfightReversalDist:       200,   // u     — Rule 2 reversal engagement distance
     dogfightEvadeConeAngleDeg:   30,   // deg   — Rule 3 player fire-cone half-angle
     dogfightFrontFireR:         500,   // u     — front cannon max fire range

@@ -192,7 +192,9 @@ const SectorView = (() => {
   let _shieldsOn    = true;
   let _computerOn   = true;
   let _rearView     = false;
-  let _aftPipOn     = false;  // true while the aft PiP window is open
+  let _aftPipOn      = false;  // true while the aft PiP window is open
+  let _lockRingFront  = null;   // green corner-bracket billboard — front target lock
+  let _lockRingAft    = null;   // amber corner-bracket billboard — aft target lock
   let _lrsOn        = false;
   let _inputBound   = false;
   let _redAlert     = false;
@@ -444,6 +446,7 @@ const SectorView = (() => {
     if (_sectorType === 'asteroid')  _buildAsteroids();
     if (_sectorType === 'habitable') _buildPlanet();
     if (_hasStarbase) { _buildStarbase(); _buildPlug(); _buildShield(); }
+    _buildLockRings();
   }
 
   // Fixed background star field — 2000 stars at large radius, 3px each for HD visibility
@@ -971,6 +974,86 @@ const SectorView = (() => {
     _sbShieldMeshes = [inner, outer];
   }
 
+  // Lock indicator rings: 3D billboard corner-brackets that frame the locked target.
+  // depthTest:false + renderOrder:999 means they always draw on top of all geometry.
+  // Add once per scene build — they auto-appear in both main view and the aft PiP.
+  function _buildLockRings() {
+    const mkRing = (color) => {
+      const B = 18, L = 7;  // half-size and leg-length in world units
+      // LineSegments vertex pairs — 4 corner brackets = 8 segments = 16 vertices
+      const pts = [
+        -B, -B+L, 0,  -B,  -B, 0,    -B,  -B, 0,  -B+L, -B, 0,  // TL
+         B-L, -B, 0,   B,  -B, 0,     B,  -B, 0,   B, -B+L, 0,  // TR
+        -B,  B-L, 0,  -B,   B, 0,    -B,   B, 0,  -B+L,  B, 0,  // BL
+         B-L,  B, 0,   B,   B, 0,     B,   B, 0,   B,  B-L, 0,  // BR
+      ];
+      const geo  = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+      const mesh = new THREE.LineSegments(
+        geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1.0, depthTest: false }));
+      mesh.visible     = false;
+      mesh.renderOrder = 999;   // draw after all opaque geometry
+      _scene.add(mesh);
+      return mesh;
+    };
+    _lockRingFront = mkRing(0x00ff88);   // green — front computer lock
+    _lockRingAft   = mkRing(0xffaa00);   // amber — aft computer lock
+  }
+
+  // Evaluate whether the player has a valid firing solution against targetPos/Vel.
+  // Mirrors the first-order lead calculation in _spawnTorpedo exactly.
+  // Returns true when the intercept point is within range AND inside the cone.
+  function _canHit(targetPos, targetVel, isAft) {
+    const pcfg     = GameConfig.player;
+    const rangeMax = pcfg.frontFireRangeU          ?? 500;
+    const halfDeg  = pcfg.firingSolutionConeHalfDeg ?? 30;
+    const cosHalf  = Math.cos(halfDeg * Math.PI / 180);  // cos(30°) ≈ 0.866
+
+    const camPos   = _camera.position;
+    const toTarget = targetPos.clone().sub(camPos);
+    const dist     = toTarget.length();
+    if (dist > rangeMax || dist < 0.1) return false;
+
+    // First-order intercept — identical to _spawnTorpedo
+    const travelTime = dist / TORPEDO_SPEED;
+    const leadPos    = targetPos.clone().addScaledVector(targetVel, travelTime);
+    const leadDir    = leadPos.clone().sub(camPos).normalize();
+
+    // Player forward (negate for aft)
+    const camFwd  = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
+    const fireDir = isAft ? camFwd.negate() : camFwd;
+
+    return leadDir.dot(fireDir) >= cosHalf;
+  }
+
+  // Update lock ring positions + visibility each frame (before 3D render).
+  // Uses _lockedContactPos / _aftLockedContactPos from the *previous* frame —
+  // one-frame latency is imperceptible at 60 fps.
+  function _updateLockRings() {
+    if (_lockRingFront) {
+      const show = _computerOn && _targetLocked && !!_lockedContactPos;
+      _lockRingFront.visible = show;
+      if (show) {
+        _lockRingFront.position.copy(_lockedContactPos);
+        _lockRingFront.quaternion.copy(_camera.quaternion);
+        const hit = _canHit(_lockedContactPos, _lockedContactVel, false);
+        _lockRingFront.material.color.setHex(hit ? 0x00ff88 : 0xff2200);
+        _lockRingFront.material.opacity = hit ? 1.0 : 0.40;
+      }
+    }
+    if (_lockRingAft) {
+      const show = _computerOn && _aftPipOn && _aftLocked && !!_aftLockedContactPos;
+      _lockRingAft.visible = show;
+      if (show) {
+        _lockRingAft.position.copy(_aftLockedContactPos);
+        _lockRingAft.quaternion.copy(_camera.quaternion);
+        const hit = _canHit(_aftLockedContactPos, _aftLockedContactVel, true);
+        _lockRingAft.material.color.setHex(hit ? 0xffaa00 : 0x882200);
+        _lockRingAft.material.opacity = hit ? 1.0 : 0.40;
+      }
+    }
+  }
+
   function _updateShield(dt) {
     if (!_hasStarbase || _sbShieldMeshes.length === 0) return;
 
@@ -1356,6 +1439,7 @@ const SectorView = (() => {
       // Pass 1: full-screen front view
       _renderer.setScissorTest(false);
       _renderer.setViewport(0, 0, rW, rH);
+      _updateLockRings();              // position indicators before 3D scene renders
       _renderer.render(_scene, _camera);
 
       // Pass 2: aft PiP in bottom-left corner above dashboard

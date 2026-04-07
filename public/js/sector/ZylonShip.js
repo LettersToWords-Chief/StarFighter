@@ -821,21 +821,34 @@ class ZylonShip {
     if (this._jinkReactionTimer > 0) {
       this._jinkReactionTimer -= dt;
       if (this._jinkReactionTimer <= 0) {
-        // Apply 90° rotation around the player-Zylon axis (sidestep incoming shot)
+        // Redirect the committed evasion arc by 90° — do NOT snap velocity.
+        // Rotating _evadeAxis around the current heading changes the plane of the
+        // turning arc so the evasion is smooth and organic rather than a hard snap.
         const jinkSign = Math.random() < 0.5 ? 1 : -1;
-        this._vel.applyAxisAngle(s.dir, jinkSign * Math.PI / 2)
-                  .normalize().multiplyScalar(ATTACK_SPEED);
-        // Reset evasion axis so R3 commits to the new heading
-        this._evadeAxis = null;
+        const velNorm  = this._vel.clone().normalize();
+        if (this._evadeAxis && this._evadeAxis.lengthSq() > 0.01) {
+          // Existing arc active — rotate it 90° around current heading
+          this._evadeAxis.applyAxisAngle(velNorm, jinkSign * Math.PI / 2).normalize();
+        } else {
+          // No arc yet — build one perpendicular to heading + player direction
+          let ref = new THREE.Vector3().crossVectors(velNorm, s.dir);
+          if (ref.lengthSq() < 0.01) ref.crossVectors(new THREE.Vector3(0, 1, 0), velNorm);
+          this._evadeAxis  = ref.normalize().applyAxisAngle(velNorm, jinkSign * Math.PI / 2).normalize();
+          this._evadeTimer = 0;
+        }
       }
     }
 
     // ── RULE 1 — Collision avoidance ──────────────────────────────────────────
-    const ramDist = cfg.dogfightRamAvoidDist ?? 20;
-    if (s.dist < ramDist && s.fwd >= 0) {
+    // Trigger: player in front hemisphere and inside ramDist — arms a 1.5s breakoff timer.
+    // Timer drives the evasion independently; the front-hemisphere check only starts it.
+    // 1.5s at 60°/s ≈ 90° of turn — enough to clear a head-on pass.
+    const ramDist = cfg.dogfightRamAvoidDist ?? 40;
+    if (s.dist < ramDist && s.fwd >= 0 && this._avoidTimer <= 0) {
+      this._avoidTimer = 1.5;   // commit to full 90° breakoff turn
+    }
+    if (this._avoidTimer > 0) {
       this._dbgRule = 'R1-AVOID';
-      if (this._avoidTimer <= 0)
-        this._avoidTimer = (Math.PI / 2) / ((cfg.dogfightTurnRate ?? 120) * Math.PI / 180);
       this._avoidTimer -= dt;
       _applySteer(-1);
       this._vel.normalize().multiplyScalar(ATTACK_SPEED);
@@ -843,8 +856,6 @@ class ZylonShip {
       const fT1 = pos.clone().add(this._vel.clone().normalize());
       if (pos.distanceTo(fT1) > 0.01) this.mesh.lookAt(fT1);
       return null;
-    } else {
-      this._avoidTimer = 0;
     }
 
     // ── RULE 2 — Reversal ─────────────────────────────────────────────────────
