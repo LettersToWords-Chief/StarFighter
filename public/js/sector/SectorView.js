@@ -62,7 +62,10 @@ const SectorView = (() => {
   let _warpChargeCallback = null;
   let _warpBursting = false;         // true during 99→999 u/s burst (1 s, locked)
   let _warpBurstCallback = null;     // called when burst peaks at 999
-  let _warpDebursting = false;       // true during 999→99 decel in new sector (1 s, locked)
+  let _warpDebursting = false;       // true during 99→999 → V_peak decel in new sector (1 s, locked)
+  let _warpDecelerating = false;     // true during mirror 4-s decel from V_peak → V_orig
+  let _warpPreSpeed     = 0;         // velocity when warp charge began — return-to speed on arrival
+  let _warpPeakSpeed    = 0;         // velocity at end of charge phase — deburst target
   let _warpTargetDir = new THREE.Vector3(0, 0, -1);
   let _warpDrift = 0;
   let _warpMult = 1.0;
@@ -84,6 +87,8 @@ const SectorView = (() => {
   let _sbGroup = null, _starsMesh = null, _dustMesh = null;
   let _nearSB = false, _entryTimer = 3.5;
   let _voidObjects = [];   // translucent fragments in void sectors — recycled as camera moves
+  let _planetPos    = null;   // world position of the habitable-sector planet (null if none)
+  let _planetRadius = 0;      // collision radius of the planet
 
   // Dashboard stats
   let _energy       = 9999;
@@ -507,7 +512,7 @@ const SectorView = (() => {
     const PALETTE = [0x3a4f6a, 0x2e3d55, 0x4a5a6b, 0x556070, 0x354862, 0x223344];
 
     for (let i = 0; i < COUNT; i++) {
-      const r     = 200 + Math.random() * 4800;
+      const r     = 200 + Math.random() * 9800;  // doubled: was 200-5000
       const theta = Math.random() * Math.PI * 2;
       const phi   = Math.acos(2 * Math.random() - 1);
       const px = r * Math.sin(phi) * Math.cos(theta);
@@ -543,10 +548,10 @@ const SectorView = (() => {
     for (const m of _voidObjects) {
       const rel    = m.position.clone().sub(camP);
       const behind = rel.dot(fwd);
-      if (behind < -3000) {
-        // Respawn 500–2000 units ahead in a wide cone
-        const dist   = 500 + Math.random() * 1500;
-        const spread = 1500;
+      if (behind < -6000) {
+        // Respawn 500–4000 units ahead in a wide cone (doubled from original)
+        const dist   = 500 + Math.random() * 3500;
+        const spread = 3000;
         const right  = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
         const up     = new THREE.Vector3(0, 1, 0).applyQuaternion(_cameraQuat);
         m.position.copy(camP)
@@ -562,9 +567,9 @@ const SectorView = (() => {
     _scene.fog = new THREE.FogExp2(0x0a0012, 0.0004);
     const n = 600, pos = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {
-      pos[i*3]   = (Math.random() - 0.5) * 1500;
-      pos[i*3+1] = (Math.random() - 0.5) * 500;
-      pos[i*3+2] = (Math.random() - 0.5) * 1500;
+      pos[i*3]   = (Math.random() - 0.5) * 3000;  // doubled: was 1500
+      pos[i*3+1] = (Math.random() - 0.5) * 1000;  // doubled: was 500
+      pos[i*3+2] = (Math.random() - 0.5) * 3000;  // doubled: was 1500
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -589,8 +594,8 @@ const SectorView = (() => {
         pa.setXYZ(v, pa.getX(v)*(0.8+Math.random()*0.4), pa.getY(v)*(0.8+Math.random()*0.4), pa.getZ(v)*(0.8+Math.random()*0.4));
       }
       const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x665544 }));
-      const ang  = Math.random() * Math.PI * 2, dist = 200 + Math.random() * 900;
-      mesh.position.set(Math.cos(ang)*dist, (Math.random()-0.5)*300, Math.sin(ang)*dist - 150);
+      const ang  = Math.random() * Math.PI * 2, dist = 200 + Math.random() * 1800;  // doubled: was 900
+      mesh.position.set(Math.cos(ang)*dist, (Math.random()-0.5)*600, Math.sin(ang)*dist - 150);  // Y doubled: was 300
       mesh.rotation.set(Math.random()*6, Math.random()*6, Math.random()*6);
       _scene.add(mesh);
       // Store collision data including mesh reference for destruction
@@ -606,6 +611,9 @@ const SectorView = (() => {
     const planet = new THREE.Mesh(new THREE.SphereGeometry(290, 32, 32), new THREE.MeshLambertMaterial({ color: 0x225599 }));
     planet.position.set(550, -140, -1900);
     _scene.add(planet);
+    // Store collision data — used by player flight and torpedo updates
+    _planetPos    = planet.position.clone();
+    _planetRadius = 290;
     const atm = new THREE.Mesh(new THREE.SphereGeometry(310, 32, 32), new THREE.MeshBasicMaterial({ color: 0x44aaff, transparent: true, opacity: 0.08, side: THREE.BackSide }));
     atm.position.copy(planet.position);
     _scene.add(atm);
@@ -1602,7 +1610,8 @@ const SectorView = (() => {
     if (_warpCharging) {
       // Phase 1: always 4 seconds of steering, velocity ramps at ACCEL_RATE and caps at 99
       _warpChargeTimer += dt;
-      _currentVelocity += ACCEL_RATE * dt;  // ramp freely — no cap during charge
+      const warpMult = GameConfig.player.warpAccelMultiplier ?? 5;
+      _currentVelocity += warpMult * ACCEL_RATE * dt;  // 5× normal accel for dramatic ramp
       if (_warpDrift > 0) {
         const wobble = _warpDrift * 1.0 * dt;
         const wRight = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
@@ -1613,7 +1622,8 @@ const SectorView = (() => {
           .normalize();
       }
       if (_warpChargeTimer >= WARP_CHARGE_TIME) {
-        _warpCharging = false;
+        _warpPeakSpeed = _currentVelocity;  // record V_peak — deburst target on arrival
+        _warpCharging  = false;
         // Capture accuracy at exactly T=4s
         const hRight = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
         const hUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(_cameraQuat);
@@ -1633,10 +1643,20 @@ const SectorView = (() => {
         return;
       }
     } else if (_warpDebursting) {
-      // Post-arrival: decel from 99999 → WARP_VELOCITY in 1 second, locked
-      _currentVelocity = Math.max(WARP_VELOCITY, _currentVelocity - 99900 * dt);
-      if (_currentVelocity <= WARP_VELOCITY) {
-        _warpDebursting = false;
+      // Post-arrival: decel from 99999 → V_peak in 1 second (mirror of burst), then hand off
+      _currentVelocity = Math.max(_warpPeakSpeed, _currentVelocity - 99900 * dt);
+      if (_currentVelocity <= _warpPeakSpeed) {
+        _currentVelocity  = _warpPeakSpeed;  // snap exact
+        _warpDebursting   = false;
+        _warpDecelerating = true;            // begin mirror 4-s decel phase
+      }
+    } else if (_warpDecelerating) {
+      // Mirror of charge: 5× ACCEL_RATE decel for 4 s, returns to pre-warp speed
+      const warpMult = GameConfig.player.warpAccelMultiplier ?? 5;
+      _currentVelocity = Math.max(_warpPreSpeed, _currentVelocity - warpMult * ACCEL_RATE * dt);
+      if (_currentVelocity <= _warpPreSpeed) {
+        _currentVelocity  = _warpPreSpeed;
+        _warpDecelerating = false;
       }
     } else {
       // Normal throttle ramping — each engine contributes SPD_VALS[min(speed, engMaxIdx)] / 4
@@ -1652,6 +1672,16 @@ const SectorView = (() => {
     }
     const vel = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat).multiplyScalar(_currentVelocity * dt);
     _camera.position.add(vel);  // no boundary — infinite free flight
+    // Planet collision: push player back if they fly into the planet surface
+    if (_planetPos) {
+      const toPlanet = _camera.position.distanceTo(_planetPos);
+      if (toPlanet < _planetRadius + 6) {
+        // Push the player out along the planet-to-player direction
+        const pushDir = _camera.position.clone().sub(_planetPos).normalize();
+        _camera.position.copy(_planetPos).addScaledVector(pushDir, _planetRadius + 6);
+        _applyPlayerHit(100);  // collision damage (scaled 5× if in warp)
+      }
+    }
     // Camera always looks forward; aft view rendered separately as a PiP
     _camera.quaternion.copy(_cameraQuat);
     // Energy drain: accel → use current velocity²; decel → use power setting²
@@ -1928,6 +1958,17 @@ const SectorView = (() => {
 
   // ---- Player hit handler ----
   function _applyPlayerHit(dmg) {
+    // Warp hazard: 5× damage during any warp phase, and cancel the charge or burst
+    const inWarp = _warpCharging || _warpBursting || _warpDebursting || _warpDecelerating;
+    if (inWarp) {
+      dmg = dmg * 5;
+      if (_warpCharging) {  // cancel outbound charge
+        _warpCharging = false;  _warpChargeCallback = null;  _warpChargeTimer = 0;
+      }
+      if (_warpBursting) {  // abort burst — snap back to peak speed
+        _warpBursting = false;  _warpBurstCallback = null;  _currentVelocity = _warpPeakSpeed;
+      }
+    }
     _hitFlash = 0.5;
     let remaining = dmg;
     let hull      = 0;
@@ -2098,6 +2139,11 @@ const SectorView = (() => {
       t.mesh.position.copy(t.pos);
 
       let hit = false;
+
+      // Planet collision: player torpedoes are stopped by the planet surface
+      if (!t.isZylon && !t.isWarriorCannon && _planetPos) {
+        if (t.pos.distanceTo(_planetPos) < _planetRadius) { hit = true; }
+      }
 
       if (t.isZylon) {
         // Seeker torpedo → player only
@@ -3681,7 +3727,13 @@ const SectorView = (() => {
     _currentVelocity = (typeof arrivalVelocity === 'number') ? arrivalVelocity : 0;
     _warpCharging    = false; _warpChargeCallback = null;
     _warpBursting    = false; _warpBurstCallback  = null;
-    _warpDebursting  = (typeof arrivalVelocity === 'number' && arrivalVelocity >= 999);
+    const isWarpArrival  = (typeof arrivalVelocity === 'number' && arrivalVelocity >= 999);
+    _warpDebursting  = isWarpArrival;
+    _warpDecelerating = false;
+    // Preserve _warpPreSpeed and _warpPeakSpeed on warp arrival (recorded in outbound sector)
+    if (!isWarpArrival) { _warpPreSpeed = 0; _warpPeakSpeed = 0; }
+    _planetPos    = null;  // cleared here, set by _buildPlanet if sector is habitable
+    _planetRadius = 0;
     _warpMult        = 1.0;
     _cameraQuat.identity(); // reset ship orientation to forward-facing
     _mnx         = 0; _mny   = 0;
@@ -4013,7 +4065,8 @@ const SectorView = (() => {
   }
 
   function beginWarpCharge(driftFactor, onComplete) {
-    _warpDrift = typeof driftFactor === 'number' ? driftFactor : 0;
+    _warpDrift    = typeof driftFactor === 'number' ? driftFactor : 0;
+    _warpPreSpeed = _currentVelocity;   // record V_orig — target for mirror decel on arrival
     _warpTargetDir.set(0, 0, -1).applyQuaternion(_cameraQuat);
     _warpChargeTimer = 0;
     _warpCharging = true;

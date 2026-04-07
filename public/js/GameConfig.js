@@ -276,6 +276,10 @@ const GameConfig = Object.freeze({
     /** Half-angle of the firing-solution cone (deg). Lead intercept must land inside
      *  this cone from the ship's forward axis for the lock indicator to go green. */
     firingSolutionConeHalfDeg: 30,
+
+    /** Multiplier applied to ACCEL_RATE during the 4-second warp charge and mirror decel.
+     *  Higher values = more dramatic acceleration ramp into and out of hyper-burst. */
+    warpAccelMultiplier: 5,
   },
 
   // =========================================================
