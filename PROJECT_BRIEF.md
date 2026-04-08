@@ -1,6 +1,6 @@
 # Star Fighter — Project Brief
 *Living document. Update this file whenever a plan is approved or significant work is completed.*
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-07*
 
 ---
 
@@ -22,14 +22,26 @@ Stack: Node.js + Express server (`server.js`), vanilla JS front-end in `public/j
 - Beacon orbital behavior (3D planes, hit-evasion speed burst)
 - Warrior summon logic (2 pairs on beacon activation, clan-based resupply)
 - Aft targeting computer: pulsing amber diagonal lines on scope when enemy is behind player within 500u; predictive lead-aiming for aft cannon
-- Dogfight AI: committed-arc maneuver system with zone classification and weight-table learning (see Section B below)
-- Zylon evasion: seekers execute a committed 1-second evasion turn when inside player's firing cone, using a fixed rotation axis to prevent jitter
+- Dogfight AI: committed-arc maneuver system with zone classification and weight-table learning
+- Zylon evasion: smooth jink via evasion-axis rotation; committed 90° collision-avoidance breakoff
+- 3D lock bracket indicator on locked target (green = firing solution, red = tracking only)
+- Symmetric warp ramp: 5× accel outbound, 5× decel inbound; warp hazard (5× damage + cancel if hit)
+- Planet solid in habitable sectors; sector 3D object distribution doubled
 
 ### 🔄 Most Recent Work
-- **Warp Drive Redesign (Item 9)** — Two-step align + engage flow. H arms warp mode (destination diamond + 30s countdown). E engages. G or map open cancels. All 9 items on the Zylon Redesign Roadmap are now complete.
+- **Dogfight + HUD polish** — smooth jink arc, committed collision avoidance, 3D lock bracket with firing-solution indicator (green/red), sector object distribution doubled, warp hazard damage, planet solidity.
 
 ### 📋 Planned But Not Yet Built (in priority order)
-See Section C below.
+See Sections E–H below.
+
+| # | Feature | Status |
+|---|---|---|
+| E | Game Opening (backstory crawl + Red Alert trigger) | 📋 Planned |
+| F | Win / Loss Conditions | 📋 Planned |
+| G | Sound Effects | 📋 Planned (media TBD) |
+| H | Spawner 3D Presence + Boss-Fight Behavior | 📋 Planned |
+
+---
 
 ---
 
@@ -148,6 +160,116 @@ These are built sequentially. Each item must be approved before implementation b
 - One feature at a time, tested independently before moving to the next.
 - Wireframe red aesthetic, retro sci-fi HUD — do not introduce visual elements that clash.
 - Ask clarifying questions early rather than assuming and rewriting.
+
+---
+
+## Section E: Game Opening
+
+### Concept
+A Star Wars-style text crawl that delivers the backstory and ends with the moment the Zylons launch their first attack, triggering Red Alert. The crawl leads directly into the live game — no separate title screen.
+
+### Flow
+1. Player loads the game → **backstory crawl** begins (slow upward scroll, starfield behind it)
+2. Crawl ends with the call to arms and the first Zylon attack
+3. Galaxy map fades in — Red Alert is already active (Zylon beacon has deployed per normal fast-forward logic)
+4. Game is live
+
+### Open Items
+- **Backstory text:** Bill is writing this. No code until text is approved.
+- **Crawl styling:** classic Star Wars perspective-recede effect, or flat scroll? TBD.
+- **Skip option:** allow player to skip crawl on subsequent playthroughs? TBD.
+
+---
+
+## Section F: Win / Loss Conditions
+
+### Loss Conditions (any one triggers Game Over — Loss)
+
+| Trigger | Message | Notes |
+|---|---|---|
+| Player hull → 0 | SHIP DESTROYED | Standard combat death |
+| Player energy = 0 AND not actively docking | ADRIFT — SYSTEMS DARK | Energy management is critical; must initiate dock before zero |
+| Capital starbase shields fall (energy = 0) | THE CAPITAL HAS FALLEN | Capital is highest-priority starbase; its loss ends the economy |
+
+**Loss screen:** Show cause-of-death message, final statistics (sectors cleared, Spawners destroyed, time elapsed), and a restart option.
+
+### Capital Special Status
+- The Capital is the economic hub. Its loss = no economy = inevitable death.
+- Losing ANY starbase is serious; losing the Capital is immediately fatal to the game.
+- Players should be nudged to defend the Capital above all other starbases.
+- **Implementation note:** The game engine needs to know which starbase is the Capital. Flag it in the galaxy data.
+
+### Win Condition (ALL must be true simultaneously)
+1. All Zylon Spawners are destroyed
+2. All starbases are active (shields up, energy > 0)
+
+**Spawner-Zylon linkage — CONFIRMED:** Destroying a Spawner instantly kills or deactivates all Zylons of that clan. This makes Spawner-hunting the fastest path to victory — find the Spawners, kill them, and the infestation collapses.
+
+**Win screen:** Victory message, statistics, credits.
+
+---
+
+## Section G: Sound Effects
+
+### Approach
+- Mix of provided media files (Bill will supply) and procedurally generated sounds
+- Implementation session deferred until media assets are ready
+- Bill will provide a list of desired sounds and media at implementation time
+
+### Anticipated Sound Categories (preliminary)
+- Weapon fire (front cannon, aft cannon)
+- Torpedo impact / explosion
+- Warp drive charge, burst, and decel
+- HUD alerts (Red Alert, lock-on, incoming fire)
+- Starbase docking sequence
+- Game Over (loss and win)
+- Ambient sector sound (void, nebula, asteroid)
+
+---
+
+## Section H: Zylon Spawner — 3D Presence + Boss-Fight Behavior
+
+### Role in the Game
+Spawners are the strategic root of the Zylon infestation. They are the "boss fights" of the game — not because they fight, but because finding and killing them is the win condition and they are well-defended.
+
+### Galaxy-Level Behavior (existing, in ZylonSpawner.js)
+- Game begins with **one Spawner**
+- Each Spawner can produce up to **2 child Spawners**
+- A new Spawner deploys to a sector when:
+  - A Beacon finds a sector with **resources and no starbase** (expansion)
+  - A Beacon finds a sector with a **deactivated starbase** (conquest)
+- Spawners are hidden by **fog of war** — must be discovered by flying to resource sectors
+- More Spawners = faster Zylon growth = harder to win
+
+### 3D Sector Presence (to be built)
+
+**Visual model:**
+- Same size as a Beacon
+- Distinct appearance — "fancier Beacon" (design TBD at implementation time)
+- Wireframe red aesthetic, consistent with all Zylon units
+
+**Behavior:**
+- Beacon-like flee-and-evade — does not fight, only runs
+- Orbits at same radius as a Beacon (~750u), evades with speed bursts when hit
+- Can spawn replacement TIE/Bird defenders if existing defenders are killed too slowly
+
+**Defenders:**
+- TIE Fighters — same close-defense behavior as in seeker groups
+- Birds — same far-defense behavior
+- Warriors — present as guards; exact warrior behavior when guarding a Spawner is TBD
+- All defenders from the Spawner's own clan
+
+**Destruction:**
+- Torpedoes (same as Beacon and all other Zylon units)
+- Spawner itself is no harder to kill than a Beacon — difficulty comes from its defender screen
+
+### Spawner-Zylon Linkage — CONFIRMED
+Destroying a Spawner kills or deactivates all Zylons that belong to its clan. The cascade effect makes Spawner-hunting the dominant strategic priority: finding and eliminating a Spawner is more efficient than grinding down its individual units one by one.
+
+### Open Items
+- Spawner visual model (wireframe design)
+- Warrior guard behavior spec (TBD when ready to implement)
+- Spawner health / evasion tuning
 
 ---
 

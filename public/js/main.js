@@ -221,6 +221,7 @@
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const seekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r) ?? [];
     const warriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === pos.q && w.r === pos.r) ?? [];
+    const spawner  = galaxyMap.zylonSpawners?.find(sp => sp.alive && sp.q === pos.q && sp.r === pos.r) ?? null;
     SectorView.enter({
       canvas:      document.getElementById('combat-canvas'),
       sector,
@@ -229,6 +230,7 @@
       onExit:      () => { _sectorLive = false; if (!_warping) openMap(); },
       seekerGalaxyRefs:  seekers,
       warriorGalaxyRefs: warriors,
+      spawnerGalaxyRef:  spawner,
     });
   }
 
@@ -335,6 +337,7 @@
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const arrSeekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r) ?? [];
     const arrWarriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === destination.q && w.r === destination.r) ?? [];
+    const arrSpawner  = galaxyMap.zylonSpawners?.find(sp => sp.alive && sp.q === destination.q && sp.r === destination.r) ?? null;
     SectorView.enter({
       canvas:          document.getElementById('combat-canvas'),
       sector,
@@ -345,6 +348,7 @@
       onExit:          () => { _sectorLive = false; if (!_warping) openMap(); },
       seekerGalaxyRefs:  arrSeekers,
       warriorGalaxyRefs: arrWarriors,
+      spawnerGalaxyRef:  arrSpawner,
     });
     // Arrive looking forward
     closeMap('front');

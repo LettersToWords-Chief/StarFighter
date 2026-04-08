@@ -789,6 +789,13 @@ class GalaxyMap {
     return this.zylonBeacons.filter(b => b.q === q && b.r === r && b.active);
   }
 
+  /** Mark all active beacons belonging to the given clan as inactive (clan kill cascade). */
+  _markBeaconsDeadForClan(clanId) {
+    for (const b of this.zylonBeacons) {
+      if (b.clanId === clanId && b.active) b.active = false;
+    }
+  }
+
 
   _resizeCanvas() {
     const c = this.canvas;

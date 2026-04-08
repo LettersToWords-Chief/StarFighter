@@ -43,32 +43,61 @@ class ZylonShip {
       this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
     } else if (this._type === 'seeker_beacon') {
       // Beacon: regenerating shield pool + separate hull HP
-      this._shieldCharge  = cfg.beaconShieldMax  ?? 300;  // shield (regenerates)
+      this._shieldCharge  = cfg.beaconShieldMax  ?? 300;
       this._shieldMax     = cfg.beaconShieldMax  ?? 300;
-      this._hp            = cfg.beaconHullHP     ?? 300;  // hull HP
+      this._hp            = cfg.beaconHullHP     ?? 300;
       this._isBeacon      = true;
-      this._lastShieldHit = 0;  // damage breakdown — read by SectorView after each hit
+      this._lastShieldHit = 0;
       this._lastHullHit   = 0;
-      // Orbit state — initialise from start position angle
+      // Orbit state
       this._bOrbitAngle  = Math.atan2(startPos.z, startPos.x);
       this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
-      this._bEvasion     = 0;  // seconds of fast-orbit evasion remaining
-      this._bHitDelay    = 0;  // seconds of post-hit pause (beacon stops, then flees)
-
-      // Random 3D orbital plane — each beacon orbits in its own tilted plane
+      this._bEvasion     = 0;
+      this._bHitDelay    = 0;
+      // Random 3D orbital plane
       const _byaw   = Math.random() * Math.PI * 2;
-      const _bpitch = (Math.random() - 0.5) * Math.PI * 0.7;  // ±63° max tilt
+      const _bpitch = (Math.random() - 0.5) * Math.PI * 0.7;
       const _bnx = Math.cos(_bpitch) * Math.sin(_byaw);
       const _bny = Math.sin(_bpitch);
       const _bnz = Math.cos(_bpitch) * Math.cos(_byaw);
       const _bnorm = new THREE.Vector3(_bnx, _bny, _bnz).normalize();
       const _bwUp  = new THREE.Vector3(0, 1, 0);
-      // U = first orbit axis (perpendicular to normal via world-up cross)
       this._orbitU = Math.abs(_bny) < 0.99
         ? new THREE.Vector3().crossVectors(_bwUp, _bnorm).normalize()
         : new THREE.Vector3(1, 0, 0);
-      // V = normal × U (second orbit axis, completes the right-hand frame)
       this._orbitV = new THREE.Vector3().crossVectors(_bnorm, this._orbitU).normalize();
+    } else if (this._type === 'spawner') {
+      // Spawner: same shield/hull pool as beacon
+      this._shieldCharge  = cfg.beaconShieldMax  ?? 300;
+      this._shieldMax     = cfg.beaconShieldMax  ?? 300;
+      this._hp            = cfg.beaconHullHP     ?? 300;
+      this._lastShieldHit = 0;
+      this._lastHullHit   = 0;
+      // Orbit state (identical setup to beacon)
+      this._bOrbitAngle  = Math.atan2(startPos.z, startPos.x);
+      this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
+      this._bEvasion     = 0;
+      this._bHitDelay    = 0;
+      const _syaw   = Math.random() * Math.PI * 2;
+      const _spitch = (Math.random() - 0.5) * Math.PI * 0.7;
+      const _snx = Math.cos(_spitch) * Math.sin(_syaw);
+      const _sny = Math.sin(_spitch);
+      const _snz = Math.cos(_spitch) * Math.cos(_syaw);
+      const _snorm = new THREE.Vector3(_snx, _sny, _snz).normalize();
+      const _swUp  = new THREE.Vector3(0, 1, 0);
+      this._orbitU = Math.abs(_sny) < 0.99
+        ? new THREE.Vector3().crossVectors(_swUp, _snorm).normalize()
+        : new THREE.Vector3(1, 0, 0);
+      this._orbitV = new THREE.Vector3().crossVectors(_snorm, this._orbitU).normalize();
+      // Visual spin state
+      this._amberAngle   = Math.random() * Math.PI * 2;
+      this._redAngle     = Math.random() * Math.PI * 2;
+      this._merged       = false;   // true after merge with beacon
+      this._amberIco     = null;    // set in _build_spawner()
+      this._innerIco     = null;    // red icosahedron added on merge
+      this._shieldBubbleMat      = null;
+      this._shieldBubbleOuterMat = null;
+      this._onMerge      = null;    // SectorView callback fired when merge distance reached
     } else {
       // Seeker: HP pool (takes ~3 hits) + guard AI state
       this._hp        = cfg.seekerHP ?? 400;
@@ -309,6 +338,36 @@ class ZylonShip {
     return g;
   }
 
+  // ───────────────────────────────── spawner mesh builder ────────────────────
+
+  /**
+   * Transit form: single amber wireframe icosahedron — fancier Beacon.
+   * The active (merged) form gains a red inner icosahedron + shield bubble
+   * via activateMerge().
+   */
+  _build_spawner() {
+    const g = new THREE.Group();
+    // Dark amber solid core
+    g.add(new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8, 0),
+      new THREE.MeshBasicMaterial({ color: 0x332200 })));
+    // Bright amber wireframe — stored for per-frame tumble rotation
+    this._amberIco = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8.1, 0),
+      new THREE.MeshBasicMaterial({ color: 0xffaa00, wireframe: true }));
+    g.add(this._amberIco);
+    // Inner amber glow core
+    g.add(new THREE.Mesh(
+      new THREE.IcosahedronGeometry(3, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff8800 })));
+    // Lights
+    this._light = new THREE.PointLight(0xffaa00, 2.5, 80);
+    g.add(this._light);
+    g.add(new THREE.PointLight(0xff6600, 1.0, 50));
+    this._addClanMarkings(g);
+    return g;  // NOT scaled — full size like Beacon
+  }
+
   // ─────────────────────────────── clan markings ──────────────────────────
 
   /**
@@ -334,10 +393,11 @@ class ZylonShip {
     const style = this._clanId % 8;
 
     switch (this._type) {
-      case 'seeker_tie':    this._markTIE(g, style, mat);    break;
-      case 'seeker_bird':   this._markBird(g, style, mat);   break;
+      case 'seeker_tie':    this._markTIE(g, style, mat);     break;
+      case 'seeker_bird':   this._markBird(g, style, mat);    break;
       case 'warrior':       this._markWarrior(g, style, mat); break;
       case 'seeker_beacon': this._markBeacon(g, style, mat);  break;
+      case 'spawner':       this._markBeacon(g, style, mat);  break; // same scale as beacon
     }
   }
 
@@ -479,6 +539,10 @@ class ZylonShip {
     // Dispatcher
     if (this._type === 'warrior')       return this._updateWarrior(dt, playerPos, context);
     if (this._type === 'seeker_beacon') return this._updateBeaconShip(dt, playerPos);
+    if (this._type === 'spawner') {
+      this._updateSpawnerSpin(dt);
+      return this._updateSpawner(dt, playerPos, context);
+    }
     return this._updateSeeker(dt, playerPos, context);
   }
 
@@ -535,6 +599,131 @@ class ZylonShip {
     return null; // beacon does not fire
   }
 
+  // ─────────────────────────────── spawner AI ───────────────────────────────
+
+  /** Tumble the amber (and on merge, red) icosahedra independently each frame. */
+  _updateSpawnerSpin(dt) {
+    if (this._amberIco) {
+      this._amberAngle += dt * 0.42;
+      this._amberIco.rotation.set(
+        this._amberAngle * 0.71,
+        this._amberAngle,
+        Math.sin(this._amberAngle * 0.5) * 1.2
+      );
+    }
+    if (this._innerIco) {
+      this._redAngle -= dt * 0.28;
+      this._innerIco.rotation.set(
+        this._redAngle * 0.6,
+        this._redAngle,
+        Math.cos(this._redAngle * 0.4) * 1.0
+      );
+    }
+  }
+
+  /**
+   * Spawner AI:
+   *   Transit  — chase the target beacon at 50 u/s; fire onMerge when close.
+   *   Active   — identical orbit/evasion behavior to the beacon.
+   */
+  _updateSpawner(dt, playerPos, context) {
+    const cfg = GameConfig.zylon;
+    const pos = this.mesh.position;
+
+    // ── Shield regen (active form only) ──
+    if (this._merged && this._shieldMax) {
+      this._shieldCharge = Math.min(
+        this._shieldMax,
+        this._shieldCharge + (cfg.beaconShieldRegenPerSec ?? 10) * dt
+      );
+    }
+
+    if (!this._merged) {
+      // ── Transit: chase the target beacon ──
+      const chaseBeacon = context?.chaseBeacon;
+      if (chaseBeacon && !chaseBeacon.dead) {
+        const toBeacon = chaseBeacon.position.clone().sub(pos);
+        const dist = toBeacon.length();
+        if (dist < 6) {
+          // Reached — signal merge to SectorView
+          if (this._onMerge) { this._onMerge(this, chaseBeacon); this._onMerge = null; }
+        } else {
+          pos.addScaledVector(toBeacon.normalize(), 50 * dt);
+        }
+      }
+      return null;
+    }
+
+    // ── Active: orbit sector center exactly like a beacon ──
+    if (this._bHitDelay > 0) { this._bHitDelay -= dt; return null; }
+
+    const ORBIT_R   = cfg.beaconPlacementUnits ?? 750;
+    const dToPlayer = playerPos.distanceTo(pos);
+    let orbitSpeed;
+    if (this._bEvasion > 0) {
+      this._bEvasion -= dt; orbitSpeed = 100;
+    } else if (dToPlayer < 50)  { orbitSpeed = cfg.beaconSpeedTier4 ?? 65; }
+    else if   (dToPlayer < 100) { orbitSpeed = cfg.beaconSpeedTier3 ?? 55; }
+    else if   (dToPlayer < 150) { orbitSpeed = cfg.beaconSpeedTier2 ?? 45; }
+    else if   (dToPlayer < 200) { orbitSpeed = cfg.beaconSpeedTier1 ?? 35; }
+    else                        { orbitSpeed = cfg.beaconNormalSpeed ?? 25; }
+
+    const omega = orbitSpeed / Math.max(50, ORBIT_R);
+    this._bOrbitAngle += this._bOrbitDir * omega * dt;
+    const _bc = Math.cos(this._bOrbitAngle) * ORBIT_R;
+    const _bs = Math.sin(this._bOrbitAngle) * ORBIT_R;
+    pos.set(
+      this._orbitU.x * _bc + this._orbitV.x * _bs,
+      this._orbitU.y * _bc + this._orbitV.y * _bs,
+      this._orbitU.z * _bc + this._orbitV.z * _bs
+    );
+
+    // Update shield bubble opacity
+    const sbFrac = this._shieldMax ? Math.max(0, this._shieldCharge / this._shieldMax) : 0;
+    if (this._shieldBubbleMat)      this._shieldBubbleMat.opacity      = sbFrac * 0.07;
+    if (this._shieldBubbleOuterMat) this._shieldBubbleOuterMat.opacity = sbFrac * 0.03;
+
+    return null;
+  }
+
+  /**
+   * Transforms transit form into the active merged form.
+   * Adds the red inner icosahedron + shield bubble, applies new clan markings.
+   */
+  activateMerge(newClanId) {
+    this._merged  = true;
+    this._clanId  = newClanId;
+    const g = this.mesh;
+
+    // Red inner icosahedron (counter-tumbles relative to the amber outer)
+    const redCore = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8, 0),
+      new THREE.MeshBasicMaterial({ color: 0x330000 }));
+    this._innerIco = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(8.1, 0),
+      new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true }));
+    g.add(redCore);
+    g.add(this._innerIco);
+
+    // Shield bubble (same as beacon)
+    const sbMat = new THREE.MeshBasicMaterial({
+      color: 0xff2200, transparent: true, opacity: 0.07,
+      side: THREE.FrontSide, blending: THREE.AdditiveBlending, depthWrite: false });
+    const sbOMat = new THREE.MeshBasicMaterial({
+      color: 0x881100, transparent: true, opacity: 0.03,
+      side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false });
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(22, 24, 18), sbMat));
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(22.7, 24, 18), sbOMat));
+    this._shieldBubbleMat      = sbMat;
+    this._shieldBubbleOuterMat = sbOMat;
+
+    // Amber point light upgrades to include a red glow
+    g.add(new THREE.PointLight(0xff2200, 1.5, 60));
+
+    // Refresh clan markings for the new clanId
+    this._addClanMarkings(g);
+  }
+
 
 
   // ─────────────────────────────────── damage ────────────────────────────────
@@ -549,29 +738,23 @@ class ZylonShip {
 
     if (this._type === 'warrior') {
       return this._takeDamageWarrior(amount);
-    } else if (this._type === 'seeker_beacon') {
-      // ── Three-zone beacon shield model ──────────────────────────────────────────
-      // Zone 1 (shield > 50% of max): full absorption — hull untouched
-      // Zone 2 (shield 1–50%): 50% to shield, 50% bleeds to hull
-      // Zone 3 (shield = 0): 100% to hull
+    } else if (this._type === 'seeker_beacon' || this._type === 'spawner') {
+      // ── Three-zone beacon/spawner shield model ──────────────────────────────
       const zone1   = this._shieldMax * 0.5;
       let   shieldDmg = 0, hullDmg = 0;
       if (this._shieldCharge > zone1) {
-        shieldDmg          = amount;
-        this._shieldCharge = Math.max(0, this._shieldCharge - amount);
+        shieldDmg = amount; this._shieldCharge = Math.max(0, this._shieldCharge - amount);
       } else if (this._shieldCharge > 0) {
-        shieldDmg          = amount * 0.5;
-        hullDmg            = amount * 0.5;
+        shieldDmg = amount * 0.5; hullDmg = amount * 0.5;
         this._shieldCharge = Math.max(0, this._shieldCharge - shieldDmg);
         this._hp           = Math.max(0, this._hp           - hullDmg);
       } else {
-        hullDmg   = amount;
-        this._hp  = Math.max(0, this._hp - amount);
+        hullDmg = amount; this._hp = Math.max(0, this._hp - amount);
       }
       this._lastShieldHit = shieldDmg;
       this._lastHullHit   = hullDmg;
 
-      // Hit triggers evasion + brand-new random 3D orbital plane
+      // Hit triggers evasion + new random orbital plane
       this._bHitDelay = 0;
       this._bEvasion  = 10;
       this._bOrbitDir = Math.random() < 0.5 ? 1 : -1;
@@ -580,9 +763,7 @@ class ZylonShip {
         Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
       ).normalize();
       if (Math.abs(_hU.dot(_hRand)) > 0.95) {
-        _hRand = Math.abs(_hU.y) < 0.9
-          ? new THREE.Vector3(0, 1, 0)
-          : new THREE.Vector3(1, 0, 0);
+        _hRand = Math.abs(_hU.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
       }
       this._orbitU      = _hU;
       this._orbitV      = new THREE.Vector3().crossVectors(_hU, _hRand).normalize();
@@ -591,10 +772,7 @@ class ZylonShip {
         this._light.intensity = 5.0;
         setTimeout(() => { if (this._light) this._light.intensity = 3.0; }, 120);
       }
-      if (this._hp <= 0) {
-        this._dead = true;
-        return true;
-      }
+      if (this._hp <= 0) { this._dead = true; return true; }
       return false;
     } else {
       // seeker_tie / seeker_bird: HP pool — takes several hits to destroy

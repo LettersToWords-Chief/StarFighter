@@ -42,13 +42,24 @@ class ZylonSpawner {
     this._produceInterval = GameConfig.zylon.spawnerSpawnIntervalSec; // 60 s
 
     // ── Bloom state ──────────────────────────────────────
-    // Directions still needing initial seekers
-    this._bloomDirections = [0, 1, 2, 3, 4, 5]; // facing indices: 0=12 o'clock … 5=10 o'clock
-    this._bloomSent = 0; // pairs dispatched so far
+    this._bloomDirections = [0, 1, 2, 3, 4, 5];
+    this._bloomSent = 0;
+
+    // ── Lifecycle phase ───────────────────────────────────
+    this._phase        = 'active';  // 'transit' | 'active'
+    this._destBeacon   = null;      // for transit spawners: the beacon they will merge with
+    this._defenseQueued = false;    // true once defender jobs are queued after bloom
+
+    // ── SectorView callbacks (set when player is in this sector) ──
+    this._onUnitBorn      = null;   // (type, data) — visual birth flash
+    this._onDefenderBirth = null;   // (type) — spawn a sector-only defender
+    this._onSpawnerKilled = null;   // () — sector-level clan kill cascade
+    // Defenders that fired while no player was present — drained on sector entry
+    this._pendingDefenders = [];    // array of type strings: 'warrior'|'tie'|'bird'
 
     // ── Tracking ─────────────────────────────────────────
-    this._seekers  = []; // all living Seekers from this Spawner
-    this._warriors = []; // all living Warriors from this Spawner
+    this._seekers  = [];
+    this._warriors = [];
   }
 
   get key() { return `${this.q},${this.r}`; }
@@ -59,61 +70,85 @@ class ZylonSpawner {
 
   tick(dt, galaxy) {
     if (!this.alive) return;
+    if (this._phase === 'transit') return;  // transit spawners don't produce until merged
 
-    // During fast-forward, bloom seekers every FF tick (15s) so all 6 are dispatched
-    // before red alert fires. All other production keeps the normal 60s rate.
     const isFastForwardBloom = galaxy.fastForwarding && this._bloomSent < 6;
+    // Peek at next queued job's interval (replacements use 30s, normal is 60s)
+    const queueInterval = this._queue[0]?.interval;
     this._produceInterval = isFastForwardBloom
       ? GameConfig.zylon.fastForwardStepSec
-      : GameConfig.zylon.spawnerSpawnIntervalSec;
+      : (queueInterval ?? GameConfig.zylon.spawnerSpawnIntervalSec);
 
     this._produceTimer += dt;
     if (this._produceTimer < this._produceInterval) return;
-    this._produceTimer -= this._produceInterval; // carry remainder
+    this._produceTimer -= this._produceInterval;
 
     this._processProductionCycle(galaxy);
   }
 
   _processProductionCycle(galaxy) {
-    // ── Priority 1: Warrior jobs — urgent beacon defence, don't wait for bloom ──
-    const warriorJob = this._queue.find(j => j.type === 'warrior');
-    if (warriorJob) {
-      if (this._warriorPairsSpawned < this._maxWarriorPairs) {
-        this._spawnWarriorPair(warriorJob.beaconRef, galaxy);
-        warriorJob.remaining--;
-        if (warriorJob.remaining <= 0) {
-          this._queue.splice(this._queue.indexOf(warriorJob), 1);
+    // ── Priority 1: ANY beacon-signal job (warrior defence OR sub-spawner) ──
+    const signalJob = this._queue.find(j => j.type === 'warrior' || (j.type === 'spawner' && j.beaconRef));
+    if (signalJob) {
+      if (signalJob.type === 'warrior') {
+        if (this._warriorPairsSpawned < this._maxWarriorPairs) {
+          this._spawnWarriorPair(signalJob.beaconRef, galaxy);
+          signalJob.remaining--;
+          if (signalJob.remaining <= 0) this._queue.splice(this._queue.indexOf(signalJob), 1);
+        } else {
+          this._queue.splice(this._queue.indexOf(signalJob), 1);
         }
       } else {
-        this._queue.splice(this._queue.indexOf(warriorJob), 1); // cap reached
+        // sub-spawner from resource beacon signal
+        if (this._subSpawnersSpawned < this._maxSubSpawners) {
+          this._spawnSubSpawner(signalJob.beaconRef, galaxy);
+        }
+        this._queue.splice(this._queue.indexOf(signalJob), 1);
       }
       this._checkExhaustion();
       return;
     }
 
-    // ── Priority 2: initial bloom (6 pairs, one per direction) ──
+    // ── Priority 2: initial bloom (6 seeker groups, one per direction) ──
     if (this._bloomSent < 6 && this._bloomDirections.length > 0) {
       const dir = this._bloomDirections.shift();
       this._spawnSeekerPair(dir, galaxy);
       this._bloomSent++;
+      this._onUnitBorn?.('seeker_group', { clanId: this.clanId, warpAway: true });
       return;
     }
 
-    // ── Priority 3: remaining queue items (replacement seekers, sub-spawners) ──
-    if (this._queue.length === 0) return;
+    // ── Priority 2.5: queue on-site defender sequence once bloom is complete ──
+    if (!this._defenseQueued) {
+      this._defenseQueued = true;
+      this._queue.push({ type: 'defender_warrior', remaining: 2, interval: 60 });
+      this._queue.push({ type: 'defender_tie',     remaining: 1, interval: 60 });
+      this._queue.push({ type: 'defender_bird',    remaining: 1, interval: 60 });
+    }
 
+    // ── Priority 3: remaining queue items ──
+    if (this._queue.length === 0) return;
     const job = this._queue[0];
 
     if (job.type === 'seeker') {
       if (this._seekerPairsSpawned < this._maxSeekerPairs) {
         const dir = this._pickReplacementDirection(galaxy);
         this._spawnSeekerPair(dir, galaxy);
+        this._onUnitBorn?.('seeker_group', { clanId: this.clanId, warpAway: true });
       }
       this._queue.shift();
-    } else if (job.type === 'spawner') {
-      if (this._subSpawnersSpawned < this._maxSubSpawners) {
-        this._spawnSubSpawner(job.beaconRef, galaxy);
-      }
+    } else if (job.type === 'defender_warrior') {
+      if (this._onDefenderBirth) this._onDefenderBirth('warrior');
+      else this._pendingDefenders.push('warrior');
+      job.remaining--;
+      if (job.remaining <= 0) this._queue.shift();
+    } else if (job.type === 'defender_tie') {
+      if (this._onDefenderBirth) this._onDefenderBirth('tie');
+      else this._pendingDefenders.push('tie');
+      this._queue.shift();
+    } else if (job.type === 'defender_bird') {
+      if (this._onDefenderBirth) this._onDefenderBirth('bird');
+      else this._pendingDefenders.push('bird');
       this._queue.shift();
     }
 
@@ -149,6 +184,14 @@ class ZylonSpawner {
   /** Called when a Beacon guarded by our Seekers is destroyed. */
   onBeaconDestroyed(beacon, galaxy) {
     if (!this.alive) return;
+    // If a transit sub-spawner was destined for this beacon, kill it — they are linked
+    for (const sp of (galaxy?.zylonSpawners ?? [])) {
+      if (sp._destBeacon === beacon && sp._phase === 'transit' && sp.alive) {
+        sp.alive  = false;
+        sp._queue = [];
+        break;
+      }
+    }
     // Queue a replacement Seeker pair
     this._queue.push({ type: 'seeker', beaconRef: null, remaining: 1 });
   }
@@ -196,10 +239,14 @@ class ZylonSpawner {
     if (this._subSpawnersSpawned >= this._maxSubSpawners) return;
 
     const sub = new ZylonSpawner({ q: beacon.q, r: beacon.r, galaxy });
+    sub._phase      = 'transit';  // born in transit — waits for merge before producing
+    sub._destBeacon = beacon;     // the specific beacon it is destined to merge with
     galaxy.zylonSpawners.push(sub);
     this._subSpawnersSpawned++;
 
-    // Notify galaxy map so it can start ticking the new spawner
+    // Birth visual in parent's sector (if player is present)
+    this._onUnitBorn?.('sub_spawner', { clanId: this.clanId, warpAway: true });
+
     galaxy._onSubSpawnerCreated(sub);
   }
 
@@ -236,6 +283,27 @@ class ZylonSpawner {
   }
 
   // ─────────────────────────────────────────────
+  // MERGE & DEFENDER CALLBACKS
+  // ─────────────────────────────────────────────
+
+  /** Called by SectorView when the transit spawner catches and merges with its beacon in 3D. */
+  onMerged(newClanId) {
+    this._phase      = 'active';
+    this._destBeacon = null;
+    this.clanId      = newClanId;   // new clan identity — all future units use this ID
+    this._produceTimer = 0;         // start fresh production cadence
+  }
+
+  /** Called by SectorView when an on-site defender is destroyed; queues a 30s replacement. */
+  onDefenderKilled(type) {
+    if (!this.alive) return;
+    const jobType = type === 'warrior' ? 'defender_warrior'
+                  : type === 'tie'     ? 'defender_tie'
+                  :                      'defender_bird';
+    this._queue.push({ type: jobType, remaining: 1, interval: 30 });
+  }
+
+  // ─────────────────────────────────────────────
   // HELPERS
   // ─────────────────────────────────────────────
 
@@ -268,6 +336,13 @@ class ZylonSpawner {
   destroy() {
     this.alive  = false;
     this._queue = [];
+    // ── Clan kill cascade: all units hatched by this Spawner die with it ──
+    for (const s of this._seekers)  s.dead = true;
+    for (const w of this._warriors) w.dead = true;
+    // Mark all beacons of this clan dead on the galaxy map
+    this.galaxy?._markBeaconsDeadForClan?.(this.clanId);
+    // Notify SectorView (if player is present) to purge all matching 3D Zylons
+    this._onSpawnerKilled?.();
   }
 }
 
