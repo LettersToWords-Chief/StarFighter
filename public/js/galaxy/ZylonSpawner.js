@@ -48,13 +48,23 @@ class ZylonSpawner {
     // ── Lifecycle phase ───────────────────────────────────
     this._phase        = 'active';  // 'transit' | 'active'
     this._destBeacon   = null;      // for transit spawners: the beacon they will merge with
-    this._defenseQueued = false;    // true once defender jobs are queued after bloom
+    this._defenseQueued = false;    // true once the initial defender sequence is queued
+
+    // ── Defender inventory (galaxy-side, player-independent) ──────────────
+    const defCfg = GameConfig.zylon;
+    this._defenderTarget = {
+      warrior: defCfg.spawnerDefenderWarriors ?? 2,
+      tie:     defCfg.spawnerDefenderTIEs    ?? 1,
+      bird:    defCfg.spawnerDefenderBirds   ?? 1,
+    };
+    this._defenderActive = { warrior: 0, tie: 0, bird: 0 };  // live defender count
+    this._inventoryTimer = 28;  // first audit fires at ~2s after creation
 
     // ── SectorView callbacks (set when player is in this sector) ──
     this._onUnitBorn      = null;   // (type, data) — visual birth flash
     this._onDefenderBirth = null;   // (type) — spawn a sector-only defender
     this._onSpawnerKilled = null;   // () — sector-level clan kill cascade
-    // Defenders that fired while no player was present — drained on sector entry
+    // Defenders that were produced while player was away — drained on sector entry
     this._pendingDefenders = [];    // array of type strings: 'warrior'|'tie'|'bird'
 
     // ── Tracking ─────────────────────────────────────────
@@ -80,10 +90,34 @@ class ZylonSpawner {
       : (queueInterval ?? GameConfig.zylon.spawnerSpawnIntervalSec);
 
     this._produceTimer += dt;
+
+    // ── Periodic defender inventory audit (every 30s, player-independent) ──
+    this._inventoryTimer += dt;
+    if (this._inventoryTimer >= 30) {
+      this._inventoryTimer = 0;
+      this._auditDefenders();
+    }
+
     if (this._produceTimer < this._produceInterval) return;
     this._produceTimer -= this._produceInterval;
 
     this._processProductionCycle(galaxy);
+  }
+
+  /** Compare live defender counts to targets; queue any deficit. */
+  _auditDefenders() {
+    const types = ['warrior', 'tie', 'bird'];
+    for (const type of types) {
+      const deficit = (this._defenderTarget[type] ?? 0) - (this._defenderActive[type] ?? 0);
+      if (deficit <= 0) continue;
+      const jobType = `defender_${type}`;
+      const existing = this._queue.find(j => j.type === jobType);
+      if (existing) {
+        existing.remaining = Math.max(existing.remaining, deficit);
+      } else {
+        this._queue.push({ type: jobType, remaining: deficit, interval: 30 });
+      }
+    }
   }
 
   _processProductionCycle(galaxy) {
@@ -138,15 +172,18 @@ class ZylonSpawner {
       }
       this._queue.shift();
     } else if (job.type === 'defender_warrior') {
+      this._defenderActive.warrior = (this._defenderActive.warrior ?? 0) + 1;
       if (this._onDefenderBirth) this._onDefenderBirth('warrior');
       else this._pendingDefenders.push('warrior');
       job.remaining--;
       if (job.remaining <= 0) this._queue.shift();
     } else if (job.type === 'defender_tie') {
+      this._defenderActive.tie = (this._defenderActive.tie ?? 0) + 1;
       if (this._onDefenderBirth) this._onDefenderBirth('tie');
       else this._pendingDefenders.push('tie');
       this._queue.shift();
     } else if (job.type === 'defender_bird') {
+      this._defenderActive.bird = (this._defenderActive.bird ?? 0) + 1;
       if (this._onDefenderBirth) this._onDefenderBirth('bird');
       else this._pendingDefenders.push('bird');
       this._queue.shift();
@@ -294,13 +331,13 @@ class ZylonSpawner {
     this._produceTimer = 0;         // start fresh production cadence
   }
 
-  /** Called by SectorView when an on-site defender is destroyed; queues a 30s replacement. */
-  onDefenderKilled(type) {
+  /** Called by SectorView when an on-site defender is destroyed. Decrements live count;
+   *  the inventory audit (running every 30s) will queue a replacement. */
+  reportDefenderDeath(type) {
     if (!this.alive) return;
-    const jobType = type === 'warrior' ? 'defender_warrior'
-                  : type === 'tie'     ? 'defender_tie'
-                  :                      'defender_bird';
-    this._queue.push({ type: jobType, remaining: 1, interval: 30 });
+    if (this._defenderActive[type] !== undefined) {
+      this._defenderActive[type] = Math.max(0, this._defenderActive[type] - 1);
+    }
   }
 
   // ─────────────────────────────────────────────

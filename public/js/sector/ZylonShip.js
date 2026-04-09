@@ -41,6 +41,10 @@ class ZylonShip {
       this._worbitDir   = Math.random() < 0.5 ? 1 : -1;
       this._wphase      = 'approach'; // 'approach' | 'orbit'
       this._cannonCd    = cfg.warriorFireIntervalSec ?? 5;
+      this._vel         = new THREE.Vector3(); // used by spawner-guard steering
+      // Spawner-guard properties (set externally for defender warriors)
+      this._guardMode  = null;  // null | 'spawner'
+      this._guardIndex = 0;     // formation slot (0 = shield center, 1+ = rings)
     } else if (this._type === 'seeker_beacon') {
       // Beacon: regenerating shield pool + separate hull HP
       this._shieldCharge  = cfg.beaconShieldMax  ?? 300;
@@ -1212,6 +1216,11 @@ class ZylonShip {
    * Returns { pos, vel, isWarriorCannon: true } when a shot is fired, else null.
    */
   _updateWarrior(dt, playerPos, context) {
+    // Spawner defenders use the shield-guard mode instead of starbase orbit
+    if (this._guardMode === 'spawner') {
+      return this._updateWarriorSpawnerGuard(dt, playerPos, context?.spawnerPos ?? null);
+    }
+
     const cfg = GameConfig.zylon;
     const pos = this.mesh.position;
     const SPEED = cfg.warriorOrbitSpeed ?? 50;
@@ -1273,6 +1282,121 @@ class ZylonShip {
     if (this._cannonCd <= 0 && closestPos) {
       this._cannonCd = cfg.warriorFireIntervalSec ?? 5;
       const vel = closestPos.clone().sub(pos).normalize()
+                    .multiplyScalar(cfg.warriorCannonSpeed ?? 200);
+      return { pos: pos.clone(), vel, isWarriorCannon: true };
+    }
+    return null;
+  }
+
+  /**
+   * Spawner shield-guard AI (defender warriors only).
+   *
+   * Formation:
+   *   Index 0 — steers toward the shield center (150u from Spawner toward Player).
+   *   Index N — steers toward the nearest point on ring N.
+   *             Ring radius = 25 + N*50 u  (so 75, 125, 175 …).
+   *             Ring is centred on shield center, perpendicular to the Player–Spawner axis.
+   *
+   * Kinematics: constant 50 u/s, max 60°/s turn rate — identical to seekers.
+   * The warrior is almost never on its ring/point; it is always steering back toward it.
+   */
+  _updateWarriorSpawnerGuard(dt, playerPos, spawnerPos) {
+    const cfg     = GameConfig.zylon;
+    const pos     = this.mesh.position;
+    const SPEED   = 50;
+    const TURN_R  = 60 * Math.PI / 180 * dt;  // max turn per frame (radians)
+
+    if (!spawnerPos) {
+      this._guardMode = null;
+      this._wphase    = 'orbit';
+      return null;
+    }
+
+    // ── Compute shield center ──────────────────────────────────────
+    const toPlayer   = playerPos.clone().sub(spawnerPos);
+    const dpLen      = toPlayer.length();
+    const dirToPlayer = dpLen > 0.01 ? toPlayer.clone().normalize()
+                                     : new THREE.Vector3(1, 0, 0);
+    // Shield center is 150u from Spawner along the Spawner→Player direction
+    const shieldCenter = spawnerPos.clone()
+                          .addScaledVector(dirToPlayer, 150);
+
+    // ── Compute this warrior's target point ───────────────────────────
+    let target;
+    const gIdx = this._guardIndex ?? 0;
+    if (gIdx === 0) {
+      // Primary guard: the shield center itself
+      target = shieldCenter;
+    } else {
+      // Outer guards: nearest point on their ring in the perpendicular plane
+      const ringR = 25 + gIdx * 50;  // 75, 125, 175 …
+
+      // Project (pos − shieldCenter) onto the plane perpendicular to dirToPlayer
+      const rel   = pos.clone().sub(shieldCenter);
+      const along = rel.dot(dirToPlayer);
+      const inPlane = rel.clone().sub(dirToPlayer.clone().multiplyScalar(along));
+      const inPlaneDist = inPlane.length();
+
+      let ringPoint;
+      if (inPlaneDist > 0.01) {
+        // Nearest point on ring = shieldCenter + ringDir * ringR
+        ringPoint = shieldCenter.clone()
+                     .add(inPlane.clone().normalize().multiplyScalar(ringR));
+      } else {
+        // Exactly on the axis — pick an arbitrary perpendicular direction
+        const arb  = Math.abs(dirToPlayer.x) < 0.9
+                   ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+        const perp = new THREE.Vector3().crossVectors(dirToPlayer, arb).normalize();
+        ringPoint  = shieldCenter.clone().addScaledVector(perp, ringR);
+      }
+      target = ringPoint;
+    }
+
+    // ── Initialise velocity on first frame ───────────────────────────────
+    if (this._vel.lengthSq() < 0.001) {
+      const initDir = target.clone().sub(pos);
+      if (initDir.lengthSq() > 0.01)
+        this._vel.copy(initDir.normalize().multiplyScalar(SPEED));
+      else
+        this._vel.set(SPEED, 0, 0);
+    }
+
+    // ── Steer toward target at ≤60°/s ─────────────────────────────────
+    const toTarget = target.clone().sub(pos);
+    if (toTarget.lengthSq() > 0.01) {
+      const desiredDir   = toTarget.normalize();
+      const currentDir   = this._vel.clone().normalize();
+      const cross        = new THREE.Vector3().crossVectors(currentDir, desiredDir);
+      const sinTheta     = cross.length();
+      const cosTheta     = currentDir.dot(desiredDir);
+      const fullAngle    = Math.atan2(sinTheta, cosTheta);
+      if (fullAngle > 0.001) {
+        const axis      = sinTheta > 0.001 ? cross.normalize() : new THREE.Vector3(0, 1, 0);
+        const turnAngle = Math.min(fullAngle, TURN_R);
+        this._vel.applyAxisAngle(axis, turnAngle);
+      }
+    }
+
+    // ── Move at constant speed ────────────────────────────────────────
+    this._vel.normalize().multiplyScalar(SPEED);
+    pos.addScaledVector(this._vel, dt);
+
+    // Face direction of travel
+    const lookAt = pos.clone().add(this._vel.clone().normalize());
+    this.mesh.lookAt(lookAt.x, lookAt.y, lookAt.z);
+
+    // ── Shield regen ─────────────────────────────────────────────
+    if (this._generatorAlive) {
+      this._shieldCharge = Math.min(
+        this._shieldMax, this._shieldCharge + (cfg.warriorShieldRegenPerSec ?? 5) * dt);
+    }
+
+    // ── Fire at player when in range ──────────────────────────────
+    this._cannonCd -= dt;
+    const distToPlayer = pos.distanceTo(playerPos);
+    if (this._cannonCd <= 0 && distToPlayer < (cfg.warriorCannonRange ?? 400)) {
+      this._cannonCd = cfg.warriorFireIntervalSec ?? 5;
+      const vel = playerPos.clone().sub(pos).normalize()
                     .multiplyScalar(cfg.warriorCannonSpeed ?? 200);
       return { pos: pos.clone(), vel, isWarriorCannon: true };
     }

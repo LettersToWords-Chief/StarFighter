@@ -209,6 +209,8 @@ const SectorView = (() => {
   let _spawnerShip      = null;  // active spawner ZylonShip (also in _zylons)
   let _spawnerGalaxyRef = null;  // galaxy-level ZylonSpawner for this sector
   let _birthQueue       = [];    // [ { ship, warpAway, timer } ] — units previewing before activation
+  let _activeDefenders  = [];    // [ { ship, defType, galaxyRef } ] — live spawner guards, polled for death
+  let _guardReassignTimer = 0;   // fires _reassignGuardIndices every 1s when defenders are present
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -1394,6 +1396,13 @@ const SectorView = (() => {
     _updateCargoDrones(dt);
     _updateZylons(dt);
     _updateBirthQueue(dt);
+    _checkDefenderDeaths();
+    // Reassign guard formation indices when count changes (every 1s)
+    _guardReassignTimer += dt;
+    if (_guardReassignTimer >= 1.0) {
+      _guardReassignTimer = 0;
+      _reassignGuardIndices();
+    }
     // Tick the current starbase so its shield recharge drains energy in real-time
     if (_currentStarbase && !_currentStarbase.isCapital) {
       _currentStarbase.tick(dt);
@@ -1760,8 +1769,12 @@ const SectorView = (() => {
         ctx = { ...baseContext, beaconPos: ownBeacon ? ownBeacon.position.clone() : null,
                 playerFwd, dangerFront, dangerRear };
       } else if (z.type === 'spawner') {
-        // Transit spawner needs a reference to its chase target each frame
         ctx = { ...baseContext, chaseBeacon: z._chaseBeaconShip ?? null };
+      } else if (z.type === 'warrior' && z._guardMode === 'spawner') {
+        // Spawner defenders need the Spawner position to compute their guard post
+        const sPos = (_spawnerShip && !_spawnerShip.dead)
+          ? _spawnerShip.mesh.position.clone() : null;
+        ctx = { ...baseContext, spawnerPos: sPos };
       } else {
         ctx = { ...baseContext, beaconPos: null };
       }
@@ -1812,10 +1825,6 @@ const SectorView = (() => {
   function _triggerDefenderBirth(spawnerShip, type, galaxyRef) {
     if (!_scene || !spawnerShip || spawnerShip.dead) return;
     const flashPos = spawnerShip.mesh.position.clone();
-    const flash = new THREE.PointLight(0xffaa00, 8.0, 120);
-    flash.position.copy(flashPos);
-    _scene.add(flash);
-    setTimeout(() => { if (_scene) _scene.remove(flash); }, 300);
 
     const shipType = type === 'tie'  ? 'seeker_tie'
                    : type === 'bird' ? 'seeker_bird'
@@ -1824,7 +1833,17 @@ const SectorView = (() => {
     const birthPos = flashPos.clone().add(
       new THREE.Vector3(Math.cos(angle) * 25, 0, Math.sin(angle) * 25));
     const ship = new ZylonShip(_scene, birthPos, shipType, galaxyRef.clanId);
-    _birthQueue.push({ ship, warpAway: false, timer: 5.0, galaxyRef, defType: type });
+
+    // Defender warriors become Spawner shield-guards
+    // guardIndex will be set by _reassignGuardIndices on the next 1s tick
+    if (type === 'warrior') {
+      ship._guardMode  = 'spawner';
+      ship._guardIndex = 0;  // will be reassigned
+    }
+
+    // Flash is emitted on the FIRST live render tick (not during enter()) via flashPending
+    _birthQueue.push({ ship, warpAway: false, timer: 5.0, galaxyRef, defType: type,
+                       flashPending: true, flashPos: flashPos.clone() });
   }
 
   /** Immediately detach all 3D Zylons whose clanId matches the destroyed Spawner. */
@@ -1850,6 +1869,36 @@ const SectorView = (() => {
     if (!_birthQueue.length) return;
     for (let i = _birthQueue.length - 1; i >= 0; i--) {
       const b = _birthQueue[i];
+
+      // Deferred flash: overt amber burst on the very first live render frame
+      if (b.flashPending) {
+        b.flashPending = false;
+        if (_scene && b.flashPos) {
+          // Primary high-intensity burst
+          const flash = new THREE.PointLight(0xffcc44, 20.0, 400);
+          flash.position.copy(b.flashPos);
+          _scene.add(flash);
+          // Glowing sphere so the flash is visible as a 3D object, not just a glow
+          const flashGeo = new THREE.SphereGeometry(18, 10, 8);
+          const flashMat = new THREE.MeshBasicMaterial({
+            color: 0xffdd88, transparent: true, opacity: 0.9,
+            blending: THREE.AdditiveBlending, depthWrite: false });
+          const flashMesh = new THREE.Mesh(flashGeo, flashMat);
+          flashMesh.position.copy(b.flashPos);
+          _scene.add(flashMesh);
+          // Dim to half at 300ms, remove at 700ms
+          setTimeout(() => {
+            flash.intensity = 8.0;
+            flashMat.opacity = 0.4;
+          }, 300);
+          setTimeout(() => {
+            if (_scene) _scene.remove(flash);
+            if (_scene) _scene.remove(flashMesh);
+            flashGeo.dispose(); flashMat.dispose();
+          }, 700);
+        }
+      }
+
       b.timer -= dt;
       if (b.timer <= 0) {
         if (b.warpAway) {
@@ -1857,18 +1906,38 @@ const SectorView = (() => {
         } else {
           // Activate as sector defender
           _zylons.push(b.ship);
-          // Wire death → replacement callback
-          const defType = b.defType;
-          const galaxyRef = b.galaxyRef;
-          const origOnDestroy = b.ship.destroy.bind(b.ship);
-          b.ship.destroy = function() {
-            origOnDestroy();
-            galaxyRef?.onDefenderKilled?.(defType);
-          };
+          // Track for death polling — fires onDefenderKilled when dead flag is set
+          _activeDefenders.push({ ship: b.ship, defType: b.defType, galaxyRef: b.galaxyRef });
         }
         _birthQueue.splice(i, 1);
       }
     }
+  }
+
+  /**
+   * Poll active defenders each frame for death.
+   * When dead, report to the galaxy Spawner so the 30s inventory audit queues a replacement.
+   */
+  function _checkDefenderDeaths() {
+    if (!_activeDefenders.length) return;
+    _activeDefenders = _activeDefenders.filter(d => {
+      if (d.ship.dead) {
+        d.galaxyRef?.reportDefenderDeath?.(d.defType);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Assign formation slots to all live warrior guards.
+   * Called every 1s so the formation reorganises when a member is added or killed.
+   *   Index 0 — shield center (150u from Spawner toward Player)
+   *   Index N — ring of radius (25 + N*50)u around shield center
+   */
+  function _reassignGuardIndices() {
+    const liveGuards = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'warrior');
+    liveGuards.forEach((d, i) => { d.ship._guardIndex = i; });
   }
 
   function _updateDust() {
@@ -3060,10 +3129,12 @@ const SectorView = (() => {
       let zyIdx = 1;
       for (const z of _zylons) {
         if (!z.dead) {
-          // Compute contact velocity: beacon uses orbit tangent; warriors compute from orbit; seekers use _vel
+          // Compute contact velocity: beacon/spawner uses orbit tangent; guard-warriors zero; seekers use _vel
           let zVel = new THREE.Vector3();
-          if (z._bOrbitDir !== undefined && z._orbitU && z._orbitV) {
-            // Beacon ship: 3D tangential velocity using the actual orbital plane
+          if (z.type === 'warrior' && z._guardMode === 'spawner') {
+            zVel.set(0, 0, 0); // guard warriors seek a dynamic post — treat as near-stationary
+          } else if (z._bOrbitDir !== undefined && z._orbitU && z._orbitV) {
+            // Beacon or active spawner ship: 3D tangential velocity using the actual orbital plane
             const bp = z.mesh.position;
             const cfg = GameConfig.zylon;
             const dP  = _camera.position.distanceTo(bp);
@@ -3082,7 +3153,7 @@ const SectorView = (() => {
                   .multiplyScalar(bSpeed * z._bOrbitDir);
             }
           } else if (z._worbitDir !== undefined) {
-            // Warrior: tangential velocity from orbit
+            // Regular warrior: tangential velocity from starbase orbit
             const zp  = z.mesh.position;
             const zr  = new THREE.Vector3(zp.x, 0, zp.z);
             if (zr.length() > 0.1) {
@@ -3093,7 +3164,9 @@ const SectorView = (() => {
           } else if (z._vel) {
             zVel = z._vel.clone(); // seeker: use actual velocity
           }
-          rawContacts.push({ pos: z.position, vel: zVel, color: '#ff3300', size: 3, label: `ZY-${zyIdx++}` });
+          rawContacts.push({ pos: z.position, vel: zVel, color: '#ff3300', size: 3,
+                             label: `ZY-${zyIdx++}`,
+                             priority: z.type === 'spawner' ? 2 : 1 });  // spawner is last-resort
         }
       }
       if (_hasStarbase) rawContacts.push({ pos: SB_POS.clone(), vel: new THREE.Vector3(), color: '#00e5ff', size: 3.5, label: 'SB' });
@@ -3220,7 +3293,11 @@ const SectorView = (() => {
         // Find the most-centered forward enemy contact to aim at
         const best = contacts
           .filter(ct => ct.fwd > 0.1 && (ct.label.startsWith('ZY') || ct.label === 'BN') && ct.dist < 1500)
-          .sort((a, b) => (Math.abs(a.rDot) + Math.abs(a.uDot)) - (Math.abs(b.rDot) + Math.abs(b.uDot)))[0];
+          .sort((a, b) => {
+            // Priority 1 (warriors/seekers) always beats priority 2 (spawner)
+            if ((a.priority ?? 1) !== (b.priority ?? 1)) return (a.priority ?? 1) - (b.priority ?? 1);
+            return (Math.abs(a.rDot) + Math.abs(a.uDot)) - (Math.abs(b.rDot) + Math.abs(b.uDot));
+          })[0];
         _lockedContactPos = best ? best.pos.clone() : null;
         _lockedContactVel = best?.vel ? best.vel.clone() : new THREE.Vector3();
       } else {
