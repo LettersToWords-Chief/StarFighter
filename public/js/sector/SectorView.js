@@ -10,8 +10,8 @@ const SectorView = (() => {
   'use strict';
 
   // ---- Constants ----
-  const TURN_YAW    = 1.3;
-  const TURN_PITCH  = 0.9;
+  const TURN_YAW    = 1.571;  // π/2 rad/s ≈ 90°/s
+  const TURN_PITCH  = 1.571;  // π/2 rad/s ≈ 90°/s
   const ACCEL_RATE      = 25;    // u/s² — rate used for all speed changes
   const WARP_VELOCITY   = 99;    // u/s cap during warp charge
   const WARP_CHARGE_TIME = 4.0;  // seconds of steering before accuracy is captured
@@ -2215,32 +2215,10 @@ const SectorView = (() => {
     const pos = _camera.position.clone()
                   .addScaledVector(right, xOffset)
                   .addScaledVector(down, 1.5);
-    // Aim: when combat-locked, lead the target; otherwise fire in the cannon's natural direction
-    let vel;
-    if (!aft && _targetLocked && _lockedContactPos) {
-      const toTarget = _lockedContactPos.clone().sub(pos);
-      const dist     = toTarget.length();
-      if (dist > 0.1) {
-        const travelTime = dist / TORPEDO_SPEED;
-        const leadPos    = _lockedContactPos.clone().addScaledVector(_lockedContactVel, travelTime);
-        vel = leadPos.sub(pos).normalize().multiplyScalar(TORPEDO_SPEED);
-      } else {
-        vel = fireDir.multiplyScalar(TORPEDO_SPEED);
-      }
-    } else if (aft && _aftLocked && _aftLockedContactPos) {
-      // Aft lead aiming: same first-order intercept, firing backward toward the rear target
-      const toTarget = _aftLockedContactPos.clone().sub(pos);
-      const dist     = toTarget.length();
-      if (dist > 0.1) {
-        const travelTime = dist / TORPEDO_SPEED;
-        const leadPos    = _aftLockedContactPos.clone().addScaledVector(_aftLockedContactVel, travelTime);
-        vel = leadPos.sub(pos).normalize().multiplyScalar(TORPEDO_SPEED);
-      } else {
-        vel = fireDir.multiplyScalar(TORPEDO_SPEED);
-      }
-    } else {
-      vel = fireDir.multiplyScalar(TORPEDO_SPEED);
-    }
+
+    // Fire straight along the gun's natural direction.
+    // Homing guidance takes over after the arm distance (see _updateTorpedoes).
+    const vel = fireDir.multiplyScalar(TORPEDO_SPEED);
 
     const coreColor = 0xff9933;
     const glowColor = 0xff5500;
@@ -2267,7 +2245,7 @@ const SectorView = (() => {
 
     mesh.position.copy(pos);
     _scene.add(mesh);
-    _torpedoes.push({ mesh, pos: pos.clone(), vel, life: TORPEDO_LIFE });
+    _torpedoes.push({ mesh, pos: pos.clone(), vel, life: TORPEDO_LIFE, distTraveled: 0 });
   }
 
   function _updateTorpedoes(dt) {
@@ -2276,6 +2254,40 @@ const SectorView = (() => {
       t.life -= dt;
       t.pos.addScaledVector(t.vel, dt);
       t.mesh.position.copy(t.pos);
+
+      // ── Homing guidance (player torpedoes only) ────────────────────────────
+      if (!t.isZylon && !t.isWarriorCannon && _zylons.length > 0) {
+        t.distTraveled = (t.distTraveled ?? 0) + TORPEDO_SPEED * dt;
+        const PC = GameConfig.player;
+        if (t.distTraveled >= (PC.torpedoArmDist ?? 50)) {
+          const coneHalfRad = (PC.torpedoHomeConeHalfAngle ?? 15) * Math.PI / 180;
+          const turnRateRad = (PC.torpedoHomeTurnRate ?? 15) * Math.PI / 180 * dt;
+          const torpDir     = t.vel.clone().normalize();
+          let bestTarget = null, bestDist = Infinity;
+          for (const z of _zylons) {
+            if (z.dead) continue;
+            const toZ  = z.position.clone().sub(t.pos);
+            const dist = toZ.length();
+            if (dist < 0.1) continue;
+            const angle = Math.acos(Math.max(-1, Math.min(1, toZ.normalize().dot(torpDir))));
+            if (angle <= coneHalfRad && dist < bestDist) { bestDist = dist; bestTarget = z; }
+          }
+          if (bestTarget) {
+            const toTarget   = bestTarget.position.clone().sub(t.pos);
+            const desiredDir = toTarget.normalize();
+            const currentDir = t.vel.clone().normalize();
+            const cross      = new THREE.Vector3().crossVectors(currentDir, desiredDir);
+            const sinTheta   = cross.length();
+            const cosTheta   = currentDir.dot(desiredDir);
+            const fullAngle  = Math.atan2(sinTheta, cosTheta);
+            if (fullAngle > 0.001) {
+              const axis      = sinTheta > 0.001 ? cross.normalize() : new THREE.Vector3(0, 1, 0);
+              const turnAngle = Math.min(fullAngle, turnRateRad);
+              t.vel.applyAxisAngle(axis, turnAngle).normalize().multiplyScalar(TORPEDO_SPEED);
+            }
+          }
+        }
+      }
 
       let hit = false;
 

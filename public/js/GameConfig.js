@@ -277,6 +277,17 @@ const GameConfig = Object.freeze({
      *  this cone from the ship's forward axis for the lock indicator to go green. */
     firingSolutionConeHalfDeg: 30,
 
+    // ── Torpedo homing guidance ──────────────────────────────────────────────
+
+    /** Distance (u) the torpedo travels straight before homing activates. */
+    torpedoArmDist: 50,
+
+    /** Half-angle (deg) of the homing acquisition cone ahead of the torpedo. */
+    torpedoHomeConeHalfAngle: 30,
+
+    /** Maximum turn rate (deg/s) of the homing guidance. */
+    torpedoHomeTurnRate: 45,
+
     /** Multiplier applied to ACCEL_RATE during the 4-second warp charge and mirror decel.
      *  Higher values = more dramatic acceleration ramp into and out of hyper-burst. */
     warpAccelMultiplier: 5,
