@@ -143,7 +143,7 @@ const GameConfig = Object.freeze({
       cannonParts:   5,
       shieldParts:   3,
       computerParts: 8,
-      torpedoes:     260,
+      torpedoes:     300,
       spareParts:    25,
     }),
 
@@ -327,7 +327,7 @@ const GameConfig = Object.freeze({
     starbaseKickstartEnergy:   1000,
 
     /** Test-mode outer base starting energy. */
-    testMode_starbaseEnergy:   12000,
+    testMode_starbaseEnergy:   50000,
 
 
     /** Sector-view distance from starbase where Beacon is placed (units). */

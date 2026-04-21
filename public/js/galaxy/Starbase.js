@@ -57,7 +57,7 @@ class Starbase {
       cannonParts:   isCapital ? (capStart.cannonParts   ?? Math.floor(tgt.cannonParts   / 2)) : 1,
       shieldParts:   isCapital ? (capStart.shieldParts   ?? Math.floor(tgt.shieldParts   / 2)) : 1,
       computerParts: isCapital ? (capStart.computerParts ?? Math.floor(tgt.computerParts / 2)) : 2,
-      torpedoes:     isCapital ? (capStart.torpedoes     ?? Math.floor(tgt.torpedoes     / 2)) : 50,
+      torpedoes:     isCapital ? (capStart.torpedoes     ?? Math.floor(tgt.torpedoes     / 2)) : 150,
       spareParts:    isCapital ? (capStart.spareParts    ?? Math.floor(tgt.spareParts    / 2)) : 1,
     };
 
