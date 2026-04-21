@@ -211,6 +211,7 @@ const SectorView = (() => {
   let _birthQueue       = [];    // [ { ship, warpAway, timer } ] — units previewing before activation
   let _activeDefenders  = [];    // [ { ship, defType, galaxyRef } ] — live spawner guards, polled for death
   let _guardReassignTimer = 0;   // fires _reassignGuardIndices every 1s when defenders are present
+  let _shipCollisionCd    = 0;   // cooldown between ship-body collision damage events
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -1732,6 +1733,7 @@ const SectorView = (() => {
 
   function _updateZylons(dt) {
     if (!_zylons.length) return;
+    if (_shipCollisionCd > 0) _shipCollisionCd -= dt;  // tick down collision cooldown
     const playerPos = _camera.position.clone();
     const playerFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
 
@@ -1783,7 +1785,27 @@ const SectorView = (() => {
       if (result) {
         _spawnZylonTorpedo(result.pos, result.vel, result.isWarriorCannon ?? false);
       }
-    }
+
+      // ── Ship-body collision ───────────────────────────────────────────
+      // When the player and an enemy ship bodies touch, both take torpedo-equivalent
+      // damage. A 2-second cooldown prevents a single graze from being instantly fatal.
+      if (_shipCollisionCd <= 0 && z.position.distanceTo(playerPos) < 8) {
+        _shipCollisionCd = 2.0;
+        _applyPlayerHit(GameConfig.zylon.zylonTorpedoDamage);
+        const collDestroyed = z.takeDamage(GameConfig.zylon.torpedoDamage);
+        _spawnExplosion(z.position.clone(),
+          { scale: 0.8, debris: 4, fireColor: 0xff6600, debrisColor: 0xff2200 });
+        if (collDestroyed) {
+          z.destroy();
+          _kills++;
+          _targets = Math.max(0, _targets - 1);
+          if (z.type === 'spawner' && _spawnerGalaxyRef) {
+            _spawnerGalaxyRef.destroy();
+            _spawnerShip = null;
+          }
+        }
+      }
+    }  // end for loop over _zylons
     if (!anyAlive && _zylons.length === 0) {
       if (_redAlert) {
         // Transition: last Zylon just died — announce sector clear
@@ -2216,9 +2238,23 @@ const SectorView = (() => {
                   .addScaledVector(right, xOffset)
                   .addScaledVector(down, 1.5);
 
-    // Fire straight along the gun's natural direction.
-    // Homing guidance takes over after the arm distance (see _updateTorpedoes).
-    const vel = fireDir.multiplyScalar(TORPEDO_SPEED);
+    // Convergence point: 50u in the firing direction, right on the crosshair/reticle.
+    // fireDir is already flipped for aft, so this works for both front and aft cannons.
+    const armTarget  = _camera.position.clone().addScaledVector(fireDir, 50);
+    const armForward = fireDir.clone();  // exact fire direction — snapped to on arrival
+
+    // Dynamic torpedo speed: 200 u/s relative to ship (Newtonian muzzle velocity).
+    //   Front: world speed = TORPEDO_SPEED + ship speed
+    //   Aft:   world speed = TORPEDO_SPEED - ship speed
+    const torpSpeed = aft
+      ? TORPEDO_SPEED - _currentVelocity
+      : TORPEDO_SPEED + _currentVelocity;
+
+    // Launch aimed at the convergence point so the arc looks natural.
+    const toArm = armTarget.clone().sub(pos);
+    const vel   = toArm.lengthSq() > 0.01
+      ? toArm.normalize().multiplyScalar(torpSpeed)
+      : fireDir.multiplyScalar(torpSpeed);
 
     const coreColor = 0xff9933;
     const glowColor = 0xff5500;
@@ -2245,7 +2281,8 @@ const SectorView = (() => {
 
     mesh.position.copy(pos);
     _scene.add(mesh);
-    _torpedoes.push({ mesh, pos: pos.clone(), vel, life: TORPEDO_LIFE, distTraveled: 0 });
+    _torpedoes.push({ mesh, pos: pos.clone(), vel, life: TORPEDO_LIFE,
+                      armTarget, armForward, armed: false, speed: torpSpeed });
   }
 
   function _updateTorpedoes(dt) {
@@ -2255,13 +2292,40 @@ const SectorView = (() => {
       t.pos.addScaledVector(t.vel, dt);
       t.mesh.position.copy(t.pos);
 
-      // ── Homing guidance (player torpedoes only) ────────────────────────────
-      if (!t.isZylon && !t.isWarriorCannon && _zylons.length > 0) {
-        t.distTraveled = (t.distTraveled ?? 0) + TORPEDO_SPEED * dt;
+      // ── Player torpedo guidance (arc phase → homing phase) ────────────────
+      if (!t.isZylon && !t.isWarriorCannon) {
         const PC = GameConfig.player;
-        if (t.distTraveled >= (PC.torpedoArmDist ?? 50)) {
-          const coneHalfRad = (PC.torpedoHomeConeHalfAngle ?? 15) * Math.PI / 180;
-          const turnRateRad = (PC.torpedoHomeTurnRate ?? 15) * Math.PI / 180 * dt;
+
+        if (!t.armed) {
+          // ── Arc phase: steer toward convergence point at 180°/s ──────────
+          // Torpedo arcs from spawn (below/left/right of ship) to the crosshair
+          // 50u ahead, arriving facing straight forward.
+          const ARM_TURN = Math.PI * dt;   // 180°/s — crisp arc, not a lazy wander
+          const toArm    = t.armTarget.clone().sub(t.pos);
+          const distArm  = toArm.length();
+
+          if (distArm < 5) {
+            // Arrived — snap to fire direction at torpedo's world speed, begin homing
+            t.vel   = t.armForward.clone().multiplyScalar(t.speed);
+            t.armed = true;
+          } else {
+            const desiredDir = toArm.normalize();
+            const currentDir = t.vel.clone().normalize();
+            const cross      = new THREE.Vector3().crossVectors(currentDir, desiredDir);
+            const sinTheta   = cross.length();
+            const cosTheta   = currentDir.dot(desiredDir);
+            const fullAngle  = Math.atan2(sinTheta, cosTheta);
+            if (fullAngle > 0.001) {
+              const axis      = sinTheta > 0.001 ? cross.normalize() : new THREE.Vector3(0, 1, 0);
+              t.vel.applyAxisAngle(axis, Math.min(fullAngle, ARM_TURN));
+            }
+            t.vel.normalize().multiplyScalar(t.speed);
+          }
+
+        } else if (_zylons.length > 0) {
+          // ── Homing phase: acquire nearest Zylon in forward cone ───────────
+          const coneHalfRad = (PC.torpedoHomeConeHalfAngle ?? 30) * Math.PI / 180;
+          const turnRateRad = (PC.torpedoHomeTurnRate ?? 45)       * Math.PI / 180 * dt;
           const torpDir     = t.vel.clone().normalize();
           let bestTarget = null, bestDist = Infinity;
           for (const z of _zylons) {
@@ -2282,8 +2346,8 @@ const SectorView = (() => {
             const fullAngle  = Math.atan2(sinTheta, cosTheta);
             if (fullAngle > 0.001) {
               const axis      = sinTheta > 0.001 ? cross.normalize() : new THREE.Vector3(0, 1, 0);
-              const turnAngle = Math.min(fullAngle, turnRateRad);
-              t.vel.applyAxisAngle(axis, turnAngle).normalize().multiplyScalar(TORPEDO_SPEED);
+               t.vel.applyAxisAngle(axis, Math.min(fullAngle, turnRateRad))
+                    .normalize().multiplyScalar(t.speed);
             }
           }
         }

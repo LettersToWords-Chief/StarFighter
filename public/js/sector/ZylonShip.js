@@ -114,10 +114,11 @@ class ZylonShip {
         + Math.random() * ((cfg.dogfightFrontCoolMax ?? 4.0) - (cfg.dogfightFrontCoolMin ?? 2.0));
       this._rearCooldown  = (cfg.dogfightRearCoolMin  ?? 2.5)
         + Math.random() * ((cfg.dogfightRearCoolMax  ?? 5.0) - (cfg.dogfightRearCoolMin  ?? 2.5));
-      // Rule 1 — collision-avoidance turn state
-      this._avoidTimer = 0;   // seconds remaining in the evasion turn
+      // Rule 1 — collision-avoidance break state
+      this._breaking  = false;   // true while in the break-off band (< 80u)
+      this._breakDir  = null;    // committed perpendicular escape direction
       // Rule 2 — reversal flag (sustain turn until player re-enters front hemisphere)
-      this._reversing  = false;
+      this._reversing = false;
     }
 
     // ── Cannon cooldown ──
@@ -1021,19 +1022,30 @@ class ZylonShip {
       }
     }
 
-    // ── RULE 1 — Collision avoidance ──────────────────────────────────────────
-    // Trigger: player in front hemisphere and inside ramDist — arms a 1.5s breakoff timer.
-    // Timer drives the evasion independently; the front-hemisphere check only starts it.
-    // 1.5s at 60°/s ≈ 90° of turn — enough to clear a head-on pass.
-    const ramDist = cfg.dogfightRamAvoidDist ?? 40;
-    if (s.dist < ramDist && s.fwd >= 0 && this._avoidTimer <= 0) {
-      this._avoidTimer = 1.5;   // commit to full 90° breakoff turn
+    // ── RULE 1 — Collision avoidance (committed perpendicular break) ──────────
+    // On entry: lock a perpendicular escape direction (left or right of approach axis).
+    // On exit:  release when dist > resumeDist.
+    // The committed _breakDir prevents per-frame oscillation and works from any angle.
+    const ramDist    = cfg.dogfightRamAvoidDist  ?? 80;
+    const resumeDist = cfg.dogfightRamResumeDist ?? 250;
+
+    if (s.dist < ramDist && !this._breaking) {
+      // Enter break — pick a perpendicular to the seeker→player axis in the XZ plane
+      this._breaking = true;
+      const up   = new THREE.Vector3(0, 1, 0);
+      const perp = new THREE.Vector3().crossVectors(s.dir, up);
+      if (perp.lengthSq() < 0.01) perp.set(1, 0, 0);  // fallback if dir is nearly vertical
+      perp.normalize();
+      if (Math.random() < 0.5) perp.negate();           // randomly left or right
+      this._breakDir = perp;
     }
-    if (this._avoidTimer > 0) {
+    if (s.dist > resumeDist) {
+      this._breaking = false;
+      this._breakDir = null;
+    }
+    if (this._breaking && this._breakDir) {
       this._dbgRule = 'R1-AVOID';
-      this._avoidTimer -= dt;
-      _applySteer(-1);
-      this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+      this._steer(this._breakDir, ATTACK_SPEED, turnRad);  // committed, rate-limited
       pos.addScaledVector(this._vel, dt);
       const fT1 = pos.clone().add(this._vel.clone().normalize());
       if (pos.distanceTo(fT1) > 0.01) this.mesh.lookAt(fT1);

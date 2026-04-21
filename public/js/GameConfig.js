@@ -13,7 +13,7 @@
 const GameConfig = Object.freeze({
 
   // Set true to observe Zylon AI in real-time (no fast-forward, units visible on map)
-  testMode: true,
+  testMode: false,
 
   // =========================================================
   // DEBUG FLAGS — toggle without touching feature code
@@ -391,7 +391,8 @@ const GameConfig = Object.freeze({
     dogfightAttackSpeedTIE:      50,   // u/s — TIE attack speed
     dogfightAttackSpeedBird:     65,   // u/s — Bird attack speed (slightly faster)
     dogfightTurnRate:            60,   // deg/s — max heading change per second
-    dogfightRamAvoidDist:        40,   // u     — Rule 1 trigger distance (1.5s committed turn at 60°/s = 90°)
+    dogfightRamAvoidDist:        80,   // u     — Rule 1 enter-break distance (turn away below this)
+    dogfightRamResumeDist:       250,   // u     — Rule 1 exit-break distance (re-engage above this)
     dogfightReversalDist:       200,   // u     — Rule 2 reversal engagement distance
     dogfightEvadeConeAngleDeg:   30,   // deg   — Rule 3 player fire-cone half-angle
     dogfightFrontFireR:         500,   // u     — front cannon max fire range

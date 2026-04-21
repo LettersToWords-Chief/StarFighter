@@ -849,24 +849,23 @@ class GalaxyMap {
       this._drawTarget(ctx);
     }
 
-    // Zylon units (always drawn in test mode, regardless of fog)
-    if (GameConfig.testMode) {
-      this._drawZylons(ctx);
-      // Frozen banner
-      if (this._testFrozen) {
-        const { width, height } = this.canvas;
-        ctx.save();
-        ctx.fillStyle = 'rgba(255, 40, 40, 0.18)';
-        ctx.fillRect(0, 0, width, height);
-        ctx.font        = 'bold 22px Orbitron, sans-serif';
-        ctx.fillStyle   = '#ff4444';
-        ctx.textAlign   = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.shadowColor = '#ff0000';
-        ctx.shadowBlur  = 18;
-        ctx.fillText('⚠ GAME START STATE — AI FROZEN', width / 2, 38);
-        ctx.restore();
-      }
+    // Zylon units — visible in any monitored sector; fogBypass shows ALL in testMode
+    this._drawZylons(ctx, GameConfig.testMode);
+
+    // Frozen banner — test mode only
+    if (GameConfig.testMode && this._testFrozen) {
+      const { width, height } = this.canvas;
+      ctx.save();
+      ctx.fillStyle = 'rgba(255, 40, 40, 0.18)';
+      ctx.fillRect(0, 0, width, height);
+      ctx.font        = 'bold 22px Orbitron, sans-serif';
+      ctx.fillStyle   = '#ff4444';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#ff0000';
+      ctx.shadowBlur  = 18;
+      ctx.fillText('⚠ GAME START STATE — AI FROZEN', width / 2, 38);
+      ctx.restore();
     }
   }
 
@@ -1242,8 +1241,11 @@ class GalaxyMap {
     ctx.stroke();
   }
 
-  /** TEST MODE — draw all Zylon units on the map regardless of fog of war. */
-  _drawZylons(ctx) {
+  /** Draw Zylon units.
+   *  fogBypass=true  → draw ALL units everywhere (test/debug mode).
+   *  fogBypass=false → only draw units whose hex is currently visible.
+   */
+  _drawZylons(ctx, fogBypass = false) {
     const t = Date.now() * 0.003;
 
     // Clock-angle for each facing index (0=12, 1=2, 2=4, 3=6, 4=8, 5=10 o'clock)
@@ -1271,6 +1273,7 @@ class GalaxyMap {
     // ── Spawners ──────────────────────────────────────────
     for (const sp of this.zylonSpawners) {
       if (!sp.alive) continue;
+      if (!fogBypass && !this.visible.has(HexMath.key(sp.q, sp.r))) continue;
       const sc = this._hexToScreen(sp.q, sp.r);
       const pulse = 0.6 + 0.4 * Math.sin(t * 1.5 + sp.q);
       ctx.save();
@@ -1287,6 +1290,7 @@ class GalaxyMap {
     // ── Seekers ───────────────────────────────────────────
     for (const sk of this.zylonSeekers) {
       if (!sk.alive) continue;
+      if (!fogBypass && !this.visible.has(HexMath.key(sk.q, sk.r))) continue;
       const sc    = this._hexToScreen(sk.q, sk.r);
       const angle = FACING_ANGLE[sk.facing] ?? 0;
       const sz    = Math.max(6, 7 * this.zoom);
@@ -1318,6 +1322,7 @@ class GalaxyMap {
     // ── Beacons ───────────────────────────────────────────
     for (const bc of this.zylonBeacons) {
       if (!bc.active) continue;
+      if (!fogBypass && !this.visible.has(HexMath.key(bc.q, bc.r))) continue;
       const sc    = this._hexToScreen(bc.q, bc.r);
       const pulse = 0.5 + 0.5 * Math.sin(t * 3 + bc.q);
       const color = bc.type === 'starbase' ? '#ff3a3a' : '#ff9900';
@@ -1336,6 +1341,7 @@ class GalaxyMap {
     // ── Warriors ──────────────────────────────────────────
     for (const wr of this.zylonWarriors) {
       if (!wr.alive || wr.state === 'WARPING') continue;
+      if (!fogBypass && !this.visible.has(HexMath.key(wr.q, wr.r))) continue;
       const sc    = this._hexToScreen(wr.q, wr.r);
       const pulse = 0.6 + 0.4 * Math.sin(t * 2.5 + wr.q);
 
