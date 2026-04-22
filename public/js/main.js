@@ -114,6 +114,7 @@
   function init() {
     const canvas = document.getElementById('galaxy-canvas');
     galaxyMap = new GalaxyMap(canvas, { difficulty: currentDifficulty });
+    window.GalaxyRef = galaxyMap;   // exposes live Zylon count to SectorView fog-intelligence
     galaxyMap.getStardate = () => _stardate;
 
     // When a Warrior finishes warping and enters a sector, spawn its 3D ship

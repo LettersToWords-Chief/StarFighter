@@ -146,8 +146,13 @@ const SectorView = (() => {
   const _computerKeys = ['warpAutopilot','targeting','radio','scanner','dashboard'];
   function _damageComputer(dmg) {
     if (!_computer || dmg <= 0) return;
-    const key = _computerKeys[Math.floor(Math.random() * _computerKeys.length)];
+    const key   = _computerKeys[Math.floor(Math.random() * _computerKeys.length)];
     _computer[key] = Math.max(0, _computer[key] - dmg);
+    // Announce malfunction at <=50 HP, destruction at 0
+    const labels = { warpAutopilot:'WARP AUTOPILOT', targeting:'TARGETING COMPUTER',
+                     radio:'COMM RADIO', scanner:'SCANNER', dashboard:'DASHBOARD' };
+    _announceDamage(`cpu_${key}`, labels[key] || key.toUpperCase(),
+                    _computer[key], 100, true);
   }
 
   // ---- Engines (4 independent) ----
@@ -179,6 +184,16 @@ const SectorView = (() => {
   let _torpedoes    = [];
   let _fireFlash    = 0;
   let _hitFlash     = 0;
+  // ---- Alert ticker ----
+  let _tickerQueue  = [];    // pending message strings
+  let _tickerActive = null;  // message currently scrolling
+  let _tickerX      = 0;     // x position of leading edge of scrolling text
+  let _alertCd      = {};    // { category: expiryTimeSec } — per-category spam cooldown
+  let _dmgAnnounced = {};    // { key: { first, heavy, destroyed } } — component threshold tracking
+  // ---- Red Alert timer ----
+  let _redAlertTimer = 0;    // seconds since Red Alert triggered (full-screen for first 5s)
+  // ---- Central command ----
+  let _needHuntMsg   = false;  // set on sector clear — triggers hunt-spawners ticker message
 
   function _resetCannons() {
     _cannon = {
@@ -1439,6 +1454,14 @@ const SectorView = (() => {
     _checkCargoCollisions();
     if (_hitFlash  > 0) _hitFlash  -= dt;
     if (_fireFlash > 0) _fireFlash -= dt;
+    // Alert systems
+    if (_redAlert) _redAlertTimer += dt;
+    _updateTicker(dt);
+    _checkAlerts();
+    // Targeting computer malfunction: randomly drop lock when at or below 50 HP
+    if (_targetLocked && _computer && _computer.targeting <= 50 && Math.random() < 0.002) {
+      _targetLocked = false;
+    }
 
     // ── Energy telemetry clock + ring buffer ──
     _galacticClock     += dt;
@@ -1809,11 +1832,28 @@ const SectorView = (() => {
     if (!anyAlive && _zylons.length === 0) {
       if (_redAlert) {
         // Transition: last Zylon just died — announce sector clear
-        _redAlert = false;
+        _redAlert      = false;
+        _redAlertTimer = 0;
+        _needHuntMsg   = true;  // queue hunt-spawners ticker message via _checkAlerts()
         if (window.SubspaceComm) {
-          const tc = Math.floor(_galacticClock || 0);
+          const tc  = Math.floor(_galacticClock || 0);
           const clk = `${String(Math.floor(tc/3600)).padStart(2,'0')}:${String(Math.floor((tc%3600)/60)).padStart(2,'0')}:${String(tc%60).padStart(2,'0')}`;
           window.SubspaceComm.send('SECTOR CLEAR', clk, 'ALL ZYLON FORCES ELIMINATED');
+        }
+        // Fog-of-war intelligence: total remaining Zylon units across the galaxy
+        if (window.GalaxyRef) {
+          const gm = window.GalaxyRef;
+          const remaining =
+            (gm.zylonSeekers?.filter(s => s.alive).length  ?? 0) * 2 +
+            (gm.zylonWarriors?.filter(w => w.alive).length ?? 0) +
+            (gm.zylonSpawners?.filter(s => s.alive).length ?? 0);
+          if (remaining > 0) {
+            _queueTicker(
+              `INTELLIGENCE: ESTIMATED ${remaining} ZYLON UNIT${remaining > 1 ? 'S' : ''} STILL ACTIVE IN GALAXY \u2014 KEEP SEARCHING`,
+              'fog_intel', 0);
+          } else {
+            _queueTicker('INTELLIGENCE: NO FURTHER ZYLON ACTIVITY DETECTED \u2014 ALL FORCES ELIMINATED', 'fog_intel', 0);
+          }
         }
         // Reset detection flag on starbase so next Zylon arrival triggers a fresh message
         if (_currentStarbase?.onSectorCleared) _currentStarbase.onSectorCleared();
@@ -2223,7 +2263,161 @@ const SectorView = (() => {
     if (isAlreadyDead || justDestroyed) {
       _damageComputer(Math.round(hull * 0.5));
     }
+
+    // ── Damage announcements ──────────────────────────────────────────────────
+    // Fired AFTER all HP changes so thresholds see the new values.
+    if (comp === 'shield') {
+      _announceDamage('shield', 'SHIELD GENERATOR', _shieldCapacity, 400);
+    } else if (comp === 'E1') {
+      _announceDamage('E1', 'ENGINE 1', _engines[0].hp, 100);
+    } else if (comp === 'E2') {
+      _announceDamage('E2', 'ENGINE 2', _engines[1].hp, 100);
+    } else if (comp === 'E3') {
+      _announceDamage('E3', 'ENGINE 3', _engines[2].hp, 100);
+    } else if (comp === 'E4') {
+      _announceDamage('E4', 'ENGINE 4', _engines[3].hp, 100);
+    } else if (comp === 'fL') {
+      _announceDamage('fL', 'PORT CANNON', _cannon.fL.hp, 100);
+    } else if (comp === 'fR') {
+      _announceDamage('fR', 'STARBOARD CANNON', _cannon.fR.hp, 100);
+    } else if (comp === 'aft') {
+      _announceDamage('aft', 'AFT CANNON', _cannon.aft.hp, 100);
+    } else if (comp === 'warp') {
+      _announceDamage('warp', 'WARP DRIVE', _warpDriveHP, 100);
+    }
+  }  // end _applyPlayerHit
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ALERT TICKER — right-to-left scrolling message system (top 1/3 of screen)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const TICKER_SPEED = 220; // pixels per second
+
+  /** Push a message to the ticker queue.
+   *  category (string): repeated calls with same category are suppressed until cooldown expires.
+   *  cooldown (s): 0 = always show, >0 = ignore duplicates until this many seconds pass.      */
+  function _queueTicker(msg, category = null, cooldown = 45) {
+    if (category) {
+      const now = performance.now() / 1000;
+      if (_alertCd[category] && now < _alertCd[category]) return;
+      _alertCd[category] = now + cooldown;
+    }
+    _tickerQueue.push(msg);
   }
+
+  /** Advance the current ticker message. Called every frame. */
+  function _updateTicker(dt) {
+    if (!_tickerActive) {
+      if (_tickerQueue.length > 0) {
+        _tickerActive = _tickerQueue.shift();
+        _tickerX = (_overlayCanvas?.width ?? 900) + 40;
+      }
+      return;
+    }
+    _tickerX -= TICKER_SPEED * dt;
+    // Estimate width (Orbitron is slightly wide — 0.65 × fontSize per char)
+    const fontSize = Math.max(16, Math.floor((_overlayCanvas?.width ?? 900) / 38));
+    const estW = _tickerActive.length * fontSize * 0.65;
+    if (_tickerX + estW < 0) _tickerActive = null;
+  }
+
+  /** Draw the active ticker message onto the HUD overlay canvas. */
+  function _drawTicker(ctx) {
+    if (!_tickerActive) return;
+    const W  = _overlayCanvas.width;
+    const DH = 130;
+    const DY = _overlayCanvas.height - DH;
+    const fontSize = Math.max(16, Math.floor(W / 38));
+    const stripY   = Math.round(DY * 0.30);   // 30% from top of cockpit viewport
+
+    ctx.save();
+    // Dark strip background
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(0, stripY - fontSize - 8, W, fontSize + 18);
+    // Amber accent lines
+    ctx.fillStyle = 'rgba(255,160,0,0.55)';
+    ctx.fillRect(0, stripY - fontSize - 8, W, 1);
+    ctx.fillRect(0, stripY + 10,           W, 1);
+    // Text
+    ctx.font         = `bold ${fontSize}px Orbitron, monospace`;
+    ctx.fillStyle    = '#ffc040';
+    ctx.textBaseline = 'bottom';
+    ctx.shadowColor  = '#ff8800';
+    ctx.shadowBlur   = 10;
+    ctx.fillText(_tickerActive, Math.round(_tickerX), stripY + 8);
+    ctx.restore();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // COMPONENT DAMAGE ANNOUNCEMENTS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Check whether the given component has crossed a damage threshold and, if so,
+   * queue an appropriate ticker message (each threshold fires at most once).
+   *   key       — unique string key for this component (used to track state)
+   *   label     — human-readable name: "ENGINE 1", "FRONT CANNON", etc.
+   *   hp        — current HP
+   *   maxHP     — maximum HP (100 for most systems)
+   *   isComputer— true: only fire at ≤50 ("MALFUNCTIONING"); false: fire at first damage + 50%
+   */
+  function _announceDamage(key, label, hp, maxHP, isComputer = false) {
+    if (!_dmgAnnounced[key]) _dmgAnnounced[key] = {};
+    const d   = _dmgAnnounced[key];
+    const pct = maxHP > 0 ? hp / maxHP : 0;
+
+    if (hp <= 0 && !d.destroyed) {
+      d.destroyed = d.heavy = d.first = true;
+      _queueTicker(`\u26a0 ${label} DESTROYED`, null, 0);
+    } else if (pct <= 0.50 && !d.heavy && !d.destroyed) {
+      d.heavy = d.first = true;
+      _queueTicker(isComputer
+        ? `\u26a0 ${label} DAMAGED \u2014 MALFUNCTIONING`
+        : `\u26a0 ${label} HEAVILY DAMAGED`, null, 0);
+    } else if (!isComputer && pct < 1.0 && pct > 0.50 && !d.first) {
+      d.first = true;
+      _queueTicker(`${label} DAMAGED`, null, 0);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CENTRAL COMMAND ALERTS — checked every frame, rate-limited by category
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  function _checkAlerts() {
+    // Hunt-spawners message: fires once immediately after each sector clear
+    if (_needHuntMsg) {
+      _needHuntMsg = false;
+      _queueTicker(
+        'CENTRAL COMMAND: SECTOR CLEAR \u2014 CONTINUE HUNT FOR ZYLON SPAWNERS IN RESOURCE SECTORS',
+        'hunt_spawners', 0);
+    }
+
+    // Starbase status alerts (current sector only)
+    if (!_hasStarbase || !_currentStarbase) return;
+    const sb     = _currentStarbase;
+    const sbName = (sb.name || 'STARBASE').toUpperCase();
+
+    // Under attack: shield took a hit recently (_sbShieldFlash is 1.0 on hit, fades over ~1s)
+    if (_sbShieldFlash > 0.5) {
+      _queueTicker(`CENTRAL COMMAND: ${sbName} IS UNDER ATTACK`, 'sb_attack', 60);
+    }
+
+    // Shields offline
+    if ((sb.state === 'dormant' || (sb.shieldCharge ?? 1) <= 0) && sb.state !== 'capital') {
+      _queueTicker(`CENTRAL COMMAND: ${sbName} SHIELDS OFFLINE \u2014 STARBASE VULNERABLE`,
+        'sb_shields', 90);
+    }
+
+    // Energy critical (< 15% of max)
+    const maxE = sb.maxEnergy ?? sb.energyCapacity ?? 10000;
+    if ((sb.energy ?? maxE) < maxE * 0.15) {
+      _queueTicker(`CENTRAL COMMAND: ${sbName} ENERGY CRITICAL \u2014 RESUPPLY REQUIRED`,
+        'sb_energy', 120);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
 
   function _spawnTorpedo(xOffset, aft) {
     if (!_scene) return;
@@ -2990,8 +3184,12 @@ const SectorView = (() => {
 
     // Dashboard HP available for future degraded-display effects (no per-frame flicker)
     const dashHP = _computer ? _computer.dashboard : 100;
-    // _glitch() stub: always false — flicker permanently disabled
-    function _glitch() { return false; }
+    // _glitch(): returns true occasionally when dashboard is malfunctioning (HP <= 50)
+    function _glitch() {
+      if (dashHP > 50) return false;
+      // Probability scales 0→0% at HP=50, up to ~8% per frame at HP=0
+      return Math.random() < (1 - dashHP / 50) * 0.08;
+    }
 
     // Shield tint (from capacitor charge)
     if (_shieldsOn && _shieldCharge > 0) {
@@ -3014,16 +3212,30 @@ const SectorView = (() => {
 
     // RED ALERT overlay
     if (_redAlert) {
-      const t = Date.now() * 0.004;
+      const t  = Date.now() * 0.004;
       const ra = 0.4 + 0.35 * Math.sin(t);
+      if (_redAlertTimer < 5.0) {
+        // Full-screen strobe for first 5 seconds
+        const pulse = 0.12 + 0.20 * Math.abs(Math.sin(t * 2.8));
+        oc.fillStyle = `rgba(255,0,0,${pulse})`;
+        oc.fillRect(0, 0, W, DY);
+      }
+      // Edge flash (always while Red Alert is active)
+      oc.save();
       oc.strokeStyle = `rgba(255,0,0,${ra})`;
-      oc.lineWidth = 4;
-      oc.strokeRect(4, 4, W-8, DY-8);
-      oc.font = 'bold 16px Orbitron, sans-serif';
-      oc.fillStyle = `rgba(255,60,60,${ra + 0.2})`;
-      oc.textAlign = 'center';
-      oc.fillText('RED ALERT', cx, 30);
+      oc.lineWidth   = 6;
+      oc.strokeRect(4, 4, W - 8, DY - 8);
+      oc.font        = 'bold 20px Orbitron, sans-serif';
+      oc.fillStyle   = `rgba(255,60,60,${Math.min(1, ra + 0.2)})`;
+      oc.textAlign   = 'center';
+      oc.shadowColor = '#ff0000';
+      oc.shadowBlur  = 16;
+      oc.fillText('RED ALERT', cx, 32);
+      oc.restore();
     }
+
+    // Ticker scroll (drawn above Red Alert so it's always readable)
+    _drawTicker(oc);
 
 
     // Corner brackets
@@ -3971,6 +4183,13 @@ const SectorView = (() => {
     if (_plugMesh) _plugMesh.visible = false;
     _hitFlash    = 0;
     _asteroids   = [];
+    // Alert ticker — clear on sector entry (damage announced fresh each sector)
+    _tickerQueue  = [];
+    _tickerActive = null;
+    _alertCd      = {};
+    _dmgAnnounced = {};
+    _redAlertTimer = 0;
+    _needHuntMsg   = false;
     // NOTE: _energy persists across warps — only refilled on dock
     // NOTE: _kills suspended until Zylons are added
     _targets     = 0;
@@ -4017,7 +4236,13 @@ const SectorView = (() => {
     const warriorCount = sector?.warriorCount ?? 0;
     const totalZylons  = seekerCount * 2 + warriorCount;
     _targets = totalZylons;
-    if (totalZylons > 0 && (!_computer || _computer.scanner > 0)) _redAlert = true;
+    if (totalZylons > 0 && (!_computer || _computer.scanner > 0)) {
+      _redAlert      = true;
+      _redAlertTimer = 0;
+      _queueTicker(
+        `RED ALERT — ${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED IN SECTOR`,
+        'red_alert_entry', 0);
+    }
 
     _initThree();
     _buildScene();
@@ -4340,6 +4565,10 @@ const SectorView = (() => {
     }
     _targets  += count;
     _redAlert  = true;
+    _redAlertTimer = 0;
+    _queueTicker(
+      `RED ALERT — ZYLON REINFORCEMENTS ARRIVED — ${count} ADDITIONAL SHIP${count > 1 ? 'S' : ''}`,
+      'red_alert_reinforce', 0);
   }
 
   function beginWarpBurst(onComplete) {
