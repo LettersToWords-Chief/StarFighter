@@ -639,6 +639,15 @@ class GalaxyMap {
         this._updateSupplyShips(dt);
         this._updateZylons(dt);
 
+        // Capital loss detection — fires once when capital goes dormant
+        if (!this._capitalLostFired) {
+          const capital = this.starbases.find(s => s.isCapital);
+          if (capital?.state === 'dormant') {
+            this._capitalLostFired = true;
+            this.onCapitalLost?.();
+          }
+        }
+
         // Refresh the selected-sector resources panel every 2 seconds
         if (this._selectedHex) {
           this._lastPanelRefresh = (this._lastPanelRefresh ?? 0) + dt;

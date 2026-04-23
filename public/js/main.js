@@ -20,6 +20,9 @@
   let _warpReadyTarget = null;   // target {q, r} locked in warp mode
   let _warpReadyInterval = null; // setInterval handle for 30s countdown
   const currentDifficulty = 'cadet';
+  // ---- Game-over state ----
+  let _gameLost      = false;
+  let _sectorsVisited = 0;
 
   // ---- Subspace message log ----
   const SubspaceComm = window.SubspaceComm = (() => {
@@ -138,6 +141,9 @@
       }
     };
 
+    // Loss condition callbacks
+    SectorView.onLoss       = (reason) => _triggerLoss(reason);
+    galaxyMap.onCapitalLost = ()       => _triggerLoss('CAPITAL_LOST');
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
       if (playerFuel < fuelCost) { showAlert('INSUFFICIENT FUEL'); return; }
@@ -219,6 +225,8 @@
     };
 
     _sectorLive = true;
+    _sectorsVisited++;
+    SectorView.setFuel(playerFuel);
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const seekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r) ?? [];
     const warriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === pos.q && w.r === pos.r) ?? [];
@@ -289,6 +297,7 @@
           const deductShare = () => {
             playerFuel = Math.max(0, playerFuel - share);
             SectorView.drainEnergy(share); // _energy persists across exit/enter
+            SectorView.setFuel(playerFuel);
             updateHUD();
           };
           _beep(1200); deductShare();
@@ -335,6 +344,8 @@
     };
 
     _sectorLive = true;
+    _sectorsVisited++;
+    SectorView.setFuel(playerFuel);
     // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const arrSeekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r) ?? [];
     const arrWarriors = galaxyMap.zylonWarriors?.filter(w => w.alive && (w.state === 'ASSAULTING' || w.state === 'COMBAT') && w.q === destination.q && w.r === destination.r) ?? [];
@@ -367,6 +378,48 @@
       if (galaxyMap.hexes.has(key) && !(pos.q === target.q && pos.r === target.r)) return pos;
     }
     return target;
+  }
+
+  // ---- Loss conditions ----
+  function _triggerLoss(reason) {
+    if (_gameLost) return;
+    _gameLost = true;
+    if (_sectorLive) SectorView.pause();
+    const tc = Math.floor(SectorView.galacticClock || 0);
+    const hh = String(Math.floor(tc / 3600)).padStart(2,'0');
+    const mm = String(Math.floor((tc % 3600) / 60)).padStart(2,'0');
+    const ss = String(tc % 60).padStart(2,'0');
+    _showPostmortem(reason, {
+      kills:   SectorView.kills   || 0,
+      sectors: _sectorsVisited,
+      time:    `${hh}:${mm}:${ss}`,
+    });
+  }
+
+  function _showPostmortem(reason, stats) {
+    const MESSAGES = {
+      SHIP_DESTROYED:  {
+        header: 'SHIP DESTROYED',
+        flavor: 'Your vessel was torn apart by Zylon fire. The galaxy grows darker.',
+      },
+      ENERGY_STRANDED: {
+        header: 'ADRIFT IN DEEP SPACE',
+        flavor: 'With no power and no way home, your ship drifts silently into the void.',
+      },
+      CAPITAL_LOST: {
+        header: 'THE CAPITAL HAS FALLEN',
+        flavor: 'Without the Capital, all resistance collapses. The Zylons claim another corner of the galaxy.',
+      },
+    };
+    const msg = MESSAGES[reason] || MESSAGES.SHIP_DESTROYED;
+    document.getElementById('pm-header').textContent  = msg.header;
+    document.getElementById('pm-flavor').textContent  = msg.flavor;
+    document.getElementById('pm-kills').textContent   = stats.kills;
+    document.getElementById('pm-sectors').textContent = stats.sectors;
+    document.getElementById('pm-time').textContent    = stats.time;
+    const overlay = document.getElementById('postmortem');
+    overlay.style.display = 'flex';
+    document.getElementById('pm-retry').addEventListener('click', () => location.reload());
   }
 
   // ---- HUD ----

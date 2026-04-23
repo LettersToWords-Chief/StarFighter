@@ -95,6 +95,31 @@
 
   </div><!-- /#game-wrapper -->
 
+  <!-- Postmortem screen — shown on any loss condition -->
+  <div id="postmortem">
+    <div id="pm-vignette"></div>
+    <div id="pm-content">
+      <div id="pm-prefix">MISSION TERMINATED</div>
+      <h1 id="pm-header">SHIP DESTROYED</h1>
+      <p id="pm-flavor"></p>
+      <div id="pm-stats">
+        <div class="pm-stat">
+          <div class="pm-stat-val" id="pm-kills">0</div>
+          <div class="pm-stat-label">ZYLONS DESTROYED</div>
+        </div>
+        <div class="pm-stat">
+          <div class="pm-stat-val" id="pm-sectors">0</div>
+          <div class="pm-stat-label">SECTORS VISITED</div>
+        </div>
+        <div class="pm-stat">
+          <div class="pm-stat-val" id="pm-time">00:00:00</div>
+          <div class="pm-stat-label">TIME SURVIVED</div>
+        </div>
+      </div>
+      <button id="pm-retry">[ TRY AGAIN ]</button>
+    </div>
+  </div>
+
   <!-- Scripts -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>

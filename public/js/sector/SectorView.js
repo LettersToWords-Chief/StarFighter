@@ -194,6 +194,11 @@ const SectorView = (() => {
   let _redAlertTimer = 0;    // seconds since Red Alert triggered (full-screen for first 5s)
   // ---- Central command ----
   let _needHuntMsg   = false;  // set on sector clear — triggers hunt-spawners ticker message
+  // ---- Loss conditions ----
+  let _onLoss        = null;   // callback(reason) set by main.js
+  let _lossTriggered = false;  // guards against double-fire
+  let _playerFuel    = 0;      // mirror of main.js playerFuel — used for stranded check
+  let _strandedTimer = 0;      // seconds at zero energy with no dock + no fuel
 
   function _resetCannons() {
     _cannon = {
@@ -1462,6 +1467,22 @@ const SectorView = (() => {
     if (_targetLocked && _computer && _computer.targeting <= 50 && Math.random() < 0.002) {
       _targetLocked = false;
     }
+    // Energy stranded: zero energy + no fuel + no dockable starbase = adrift
+    if (!_lossTriggered && _energy <= 0 && _playerFuel <= 0
+        && (!_hasStarbase || _currentStarbase?.state !== 'active')) {
+      _strandedTimer += dt;
+      if (_strandedTimer >= 1.0) {
+        _queueTicker(
+          '\u26a0 ZERO ENERGY \u2014 ALL POWER LOST \u2014 SHIP ADRIFT \u2014 NO WAY HOME',
+          'stranded_warn', 0);
+      }
+      if (_strandedTimer >= 5.0) {
+        _lossTriggered = true;
+        _onLoss?.('ENERGY_STRANDED');
+      }
+    } else {
+      _strandedTimer = 0;
+    }
 
     // ── Energy telemetry clock + ring buffer ──
     _galacticClock     += dt;
@@ -2247,21 +2268,16 @@ const SectorView = (() => {
       _warpDriveHP = Math.max(0, _warpDriveHP - hull); comp = 'warp';
     }
 
-    // ── Cascade rule: overflow to computer ────────────────────────────────────
-    // If component was already dead, or just got destroyed, 50% of damage hits computer
-    const justDestroyed = !isAlreadyDead && (
-      (comp === 'shield' && _shieldCapacity <= 0) ||
-      (comp === 'E1' && _engines[0].hp <= 0) ||
-      (comp === 'E2' && _engines[1].hp <= 0) ||
-      (comp === 'E3' && _engines[2].hp <= 0) ||
-      (comp === 'E4' && _engines[3].hp <= 0) ||
-      (comp === 'fL' && _cannon.fL.hp <= 0) ||
-      (comp === 'fR' && _cannon.fR.hp <= 0) ||
-      (comp === 'aft' && _cannon.aft.hp <= 0) ||
-      (comp === 'warp' && _warpDriveHP <= 0)
-    );
-    if (isAlreadyDead || justDestroyed) {
-      _damageComputer(Math.round(hull * 0.5));
+    // ── Overflow rule — hits on dead systems spread evenly to all alive ones ──
+    if (isAlreadyDead) {
+      _distributeOverflow(hull);
+    }
+
+    // ── Ship destruction check — fires once when total HP hits 0 ─────────────
+    if (_totalHP() <= 0 && !_lossTriggered) {
+      _lossTriggered = true;
+      _onLoss?.('SHIP_DESTROYED');
+      return;   // skip further announce (nothing left to announce)
     }
 
     // ── Damage announcements ──────────────────────────────────────────────────
@@ -2416,6 +2432,62 @@ const SectorView = (() => {
         'sb_energy', 120);
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SHIP SYSTEMS — overflow damage distribution + ship destruction detection
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Spread `dmg` evenly across every still-alive ship system (HP > 0).
+   * Calls _announceDamage for each system that receives damage so threshold
+   * messages ("HEAVILY DAMAGED", "DESTROYED") still fire on overflow kills.
+   */
+  function _distributeOverflow(dmg) {
+    if (dmg <= 0 || !_engines || !_cannon || !_computer) return;
+    const cpuLabels = {
+      warpAutopilot: 'WARP AUTOPILOT', targeting: 'TARGETING COMPUTER',
+      radio: 'COMM RADIO', scanner: 'SCANNER', dashboard: 'DASHBOARD',
+    };
+    const alive = [];
+    if (_shieldCapacity > 0) alive.push({
+      key:'shield', label:'SHIELD GENERATOR', max:400, isComp:false,
+      get:() => _shieldCapacity, set:v => { _shieldCapacity = v; } });
+    for (let i = 0; i < 4; i++) {
+      if (_engines[i].hp > 0) alive.push({
+        key:`E${i+1}`, label:`ENGINE ${i+1}`, max:100, isComp:false,
+        get:() => _engines[i].hp, set:v => { _engines[i].hp = v; } });
+    }
+    if (_cannon.fL.hp  > 0) alive.push({ key:'fL',   label:'PORT CANNON',      max:100, isComp:false, get:()=>_cannon.fL.hp,  set:v=>{_cannon.fL.hp =v;} });
+    if (_cannon.fR.hp  > 0) alive.push({ key:'fR',   label:'STARBOARD CANNON', max:100, isComp:false, get:()=>_cannon.fR.hp,  set:v=>{_cannon.fR.hp =v;} });
+    if (_cannon.aft.hp > 0) alive.push({ key:'aft',  label:'AFT CANNON',       max:100, isComp:false, get:()=>_cannon.aft.hp, set:v=>{_cannon.aft.hp=v;} });
+    if (_warpDriveHP   > 0) alive.push({ key:'warp', label:'WARP DRIVE',       max:100, isComp:false, get:()=>_warpDriveHP,   set:v=>{_warpDriveHP  =v;} });
+    for (const key of _computerKeys) {
+      if (_computer[key] > 0) alive.push({
+        key:`cpu_${key}`, label:cpuLabels[key]||key, max:100, isComp:true,
+        get:()=>_computer[key], set:v=>{_computer[key]=v;} });
+    }
+    if (alive.length === 0) return;
+    const share = dmg / alive.length;
+    for (const s of alive) {
+      s.set(Math.max(0, s.get() - share));
+      _announceDamage(s.key, s.label, s.get(), s.max, s.isComp);
+    }
+  }
+
+  /** Sum of HP across all ship systems. <= 0 means ship is destroyed. */
+  function _totalHP() {
+    if (!_engines || !_cannon || !_computer) return Infinity;
+    return _shieldCapacity
+        + _engines.reduce((a, e) => a + e.hp, 0)
+        + (_cannon.fL.hp + _cannon.fR.hp + _cannon.aft.hp)
+        + _warpDriveHP
+        + _computerKeys.reduce((a, k) => a + _computer[k], 0);
+  }
+
+  /** Called by main.js to keep the stranded-energy check aware of warp fuel. */
+  function setFuel(n) { _playerFuel = n; }
 
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -4190,6 +4262,8 @@ const SectorView = (() => {
     _dmgAnnounced = {};
     _redAlertTimer = 0;
     _needHuntMsg   = false;
+    _lossTriggered = false;
+    _strandedTimer = 0;
     // NOTE: _energy persists across warps — only refilled on dock
     // NOTE: _kills suspended until Zylons are added
     _targets     = 0;
@@ -4614,12 +4688,15 @@ const SectorView = (() => {
   function getSectorPos()  { return { q: _sectorQ, r: _sectorR }; }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
-           enterWarpMode, cancelWarpMode, updateWarpModeTimer,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel,
            get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
            get speed()         { return _speed;         },
            get lockState()     { return _lockState;     },
            get shieldCharge()  { return _shieldCharge;  },
-           get shieldCapacity(){ return _shieldCapacity;} };
+           get shieldCapacity(){ return _shieldCapacity;},
+           get kills()         { return _kills;         },
+           get onLoss()        { return _onLoss;        },
+           set onLoss(fn)      { _onLoss = fn;          } };
 })();
