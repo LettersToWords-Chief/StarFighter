@@ -1484,6 +1484,12 @@ const SectorView = (() => {
       _strandedTimer = 0;
     }
 
+    // ── Engine sound — update every frame ────────────────────────────────
+    if (typeof SoundManager !== 'undefined') {
+      // _speed is throttle notch 0..9; pass as normalised 0..1
+      SoundManager.setEngineSpeed(_speed / 9);
+    }
+
     // ── Energy telemetry clock + ring buffer ──
     _galacticClock     += dt;
     _energySampleTimer += dt;
@@ -1843,6 +1849,7 @@ const SectorView = (() => {
           z.destroy();
           _kills++;
           _targets = Math.max(0, _targets - 1);
+          if (typeof SoundManager !== 'undefined') SoundManager.zylonExplosion();
           if (z.type === 'spawner' && _spawnerGalaxyRef) {
             _spawnerGalaxyRef.destroy();
             _spawnerShip = null;
@@ -1855,6 +1862,7 @@ const SectorView = (() => {
         // Transition: last Zylon just died — announce sector clear
         _redAlert      = false;
         _redAlertTimer = 0;
+        if (typeof SoundManager !== 'undefined') SoundManager.stopRedAlert();
         _needHuntMsg   = true;  // queue hunt-spawners ticker message via _checkAlerts()
         if (window.SubspaceComm) {
           const tc  = Math.floor(_galacticClock || 0);
@@ -2180,6 +2188,8 @@ const SectorView = (() => {
 
   // ---- Player hit handler ----
   function _applyPlayerHit(dmg) {
+    // Sound: shield hit
+    if (typeof SoundManager !== 'undefined') SoundManager.shieldHit();
     // Warp hazard: 5× damage during any warp phase, and cancel the charge or burst
     const inWarp = _warpCharging || _warpBursting || _warpDebursting || _warpDecelerating;
     if (inWarp) {
@@ -2385,11 +2395,13 @@ const SectorView = (() => {
     if (hp <= 0 && !d.destroyed) {
       d.destroyed = d.heavy = d.first = true;
       _queueTicker(`\u26a0 ${label} DESTROYED`, null, 0);
+      if (typeof SoundManager !== 'undefined') SoundManager.damageReport();
     } else if (pct <= 0.50 && !d.heavy && !d.destroyed) {
       d.heavy = d.first = true;
       _queueTicker(isComputer
         ? `\u26a0 ${label} DAMAGED \u2014 MALFUNCTIONING`
         : `\u26a0 ${label} HEAVILY DAMAGED`, null, 0);
+      if (typeof SoundManager !== 'undefined') SoundManager.damageReport();
     } else if (!isComputer && pct < 1.0 && pct > 0.50 && !d.first) {
       d.first = true;
       _queueTicker(`${label} DAMAGED`, null, 0);
@@ -2493,6 +2505,7 @@ const SectorView = (() => {
 
   function _spawnTorpedo(xOffset, aft) {
     if (!_scene) return;
+    if (typeof SoundManager !== 'undefined') SoundManager.torpedoFire();
     // Always use ship quaternion for fire direction (not view direction)
     const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
@@ -4313,6 +4326,7 @@ const SectorView = (() => {
     if (totalZylons > 0 && (!_computer || _computer.scanner > 0)) {
       _redAlert      = true;
       _redAlertTimer = 0;
+      if (typeof SoundManager !== 'undefined') SoundManager.redAlert();
       _queueTicker(
         `RED ALERT — ${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED IN SECTOR`,
         'red_alert_entry', 0);
@@ -4640,6 +4654,7 @@ const SectorView = (() => {
     _targets  += count;
     _redAlert  = true;
     _redAlertTimer = 0;
+    if (typeof SoundManager !== 'undefined') SoundManager.redAlert();
     _queueTicker(
       `RED ALERT — ZYLON REINFORCEMENTS ARRIVED — ${count} ADDITIONAL SHIP${count > 1 ? 'S' : ''}`,
       'red_alert_reinforce', 0);

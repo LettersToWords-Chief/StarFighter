@@ -127,6 +127,7 @@
       const pos = galaxyMap.playerPos;
       if (warrior.q === pos.q && warrior.r === pos.r) {
         SectorView.spawnZylons(1, 'warrior', warrior);
+        if (typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
       }
     };
 
@@ -300,6 +301,7 @@
             SectorView.setFuel(playerFuel);
             updateHUD();
           };
+          if (typeof SoundManager !== 'undefined') SoundManager.warpTransit();
           _beep(1200); deductShare();
           setTimeout(() => { _beep(1200); deductShare(); }, 120);
           setTimeout(() => {
