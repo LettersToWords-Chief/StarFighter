@@ -158,6 +158,13 @@
       openMap();   // show map; combat-view stays display:block but sector stopped
     });
 
+    // ---- Audio — init AudioContext on first user gesture ----
+    // Browsers require audio to be started from a direct user gesture.
+    // Attaching once to keydown ensures the engine and all sounds work.
+    window.addEventListener('keydown', () => {
+      if (typeof SoundManager !== 'undefined') SoundManager.init();
+    }, { once: true });
+
     // ---- Key handler ----
     window.addEventListener('keydown', (e) => {
       if (_mapOpen) {

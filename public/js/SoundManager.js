@@ -22,15 +22,13 @@ const SoundManager = (() => {
 
   // Engine persistent nodes
   let _engRunning     = false;
-  let _engNoiseSrc    = null;   // white noise source
-  let _engWallFilter  = null;   // aggressive lowpass — the "soundproof wall"
-  let _engResFilter   = null;   // second stage: resonant peak for pressure feel
-  let _engNoiseGain   = null;   // noise master gain
-  let _engSubOsc      = null;   // sub-bass sine (hull vibration, ~25-45 Hz)
+  let _engNoiseSrc    = null;
+  let _engWallFilter  = null;
+  let _engResFilter   = null;   // alias to _engWallFilter
+  let _engNoiseGain   = null;
+  let _engSubOsc      = null;   // sub-bass sine (hull vibration, 40–80 Hz)
   let _engSubGain     = null;
-  let _engLfo         = null;   // combustion-pulse LFO (4.5 Hz)
-  let _engLfoAmt      = null;   // LFO amplitude control
-  let _engNorm        = 0;      // JS-smoothed current throttle (avoids automation pile-up)
+  let _engNorm        = 0;      // RC-filtered velocity 0–64 (avoids automation pile-up)
 
   // Red-alert looping state
   let _alertActive = false;
@@ -277,108 +275,98 @@ const SoundManager = (() => {
     }, 100);
   }
 
-  // ── Engine drone — rocket heard through a soundproof wall ────────────────
+  // ── Engine + warp sound ─────────────────────────────────────────────────────
   //
-  // The illusion: you are inside the ship. The engine is on the other side of
-  // thick hull plating. Sound that survives is:
-  //   • Structural sub-bass (25-45 Hz sine) — felt as hull vibration
-  //   • Deeply muffled noise (lowpass ≤120 Hz) — the combustion "whoosh"
-  //   • A 4.5 Hz combustion-cycle LFO that ripples both layers
-  //   • High-Q resonant bump at filter cutoff — gives "pressure" character
+  // Unified engine/warp sound driven by raw velocity (0–64 u/s).
+  // Frequency scale matches SPD_VALS exactly:
+  //   v = 2  → 40 Hz (throttle 1, barely moving)
+  //   v = 64 → 80 Hz (throttle 9 / warp peak)
+  // Values above 64 are capped — so the burst phase (99999 u/s) sounds at 80 Hz.
+  // The RC filter (alpha=0.04, TC~400 ms) makes all ramps feel physical.
   //
-  // Zero mid or high frequencies — the wall cuts everything above ~120 Hz.
+  // WARP SEQUENCE (no separate crescendo nodes needed):
+  //   Charge  4 s: _currentVelocity ramps 5× normal → freq climbs 40→80 Hz
+  //   Burst   1 s: velocity = 99999, capped at 64 → freq holds at 80 Hz
+  //   Deburst 1 s: same cap → freq holds
+  //   Decel   4 s: mirror ramp down → freq falls back to pre-warp value
   function _startEngine() {
     const ctx = _getCtx();
 
-    // ── Sub-bass: hull vibration felt through the frame ─────────────────────
-    _engSubOsc = ctx.createOscillator();
+    // Sub-bass: hull vibration (40–80 Hz — matches the velocity scale)
+    _engSubOsc  = ctx.createOscillator();
     _engSubOsc.type = 'sine';
-    _engSubOsc.frequency.value = 28;
+    _engSubOsc.frequency.value = 40;
     _engSubGain = ctx.createGain();
     _engSubGain.gain.value = 0;
     _engSubOsc.connect(_engSubGain);
     _engSubGain.connect(_master);
     _engSubOsc.start();
 
-    // ── Combustion LFO: 4.5 Hz — the engine fire-cycle throb ────────────────
-    _engLfo = ctx.createOscillator();
-    _engLfo.type = 'sine';
-    _engLfo.frequency.value = 4.5;
-    _engLfoAmt = ctx.createGain();
-    _engLfoAmt.gain.value = 0;   // amplitude driven by setEngineSpeed
-    _engLfo.connect(_engLfoAmt);
-    _engLfo.start();
-    // LFO modulates sub-bass gain (ripple ±lfoAmt)
-    _engLfoAmt.connect(_engSubGain.gain);
-
-    // ── Muffled noise: the rocket whoosh through the wall ───────────────────
+    // Muffled noise: single lowpass, cutoff 200–450 Hz (muffled but audible)
     _engNoiseSrc = ctx.createBufferSource();
     _engNoiseSrc.buffer = _noiseBuf;
     _engNoiseSrc.loop   = true;
 
-    // Stage 1 lowpass — brutal cutoff, simulates mass of hull plating
     _engWallFilter = ctx.createBiquadFilter();
     _engWallFilter.type = 'lowpass';
-    _engWallFilter.frequency.value = 45;
-    _engWallFilter.Q.value = 0.5;
-
-    // Stage 2 lowpass with resonant peak — gives the "pressure" bloom at cutoff
-    _engResFilter = ctx.createBiquadFilter();
-    _engResFilter.type = 'lowpass';
-    _engResFilter.frequency.value = 60;
-    _engResFilter.Q.value = 3.5;  // resonant bump = that low booming pressure feel
+    _engWallFilter.frequency.value = 200;
+    _engWallFilter.Q.value = 1.5;
+    _engResFilter = _engWallFilter;   // alias
 
     _engNoiseGain = ctx.createGain();
     _engNoiseGain.gain.value = 0;
 
     _engNoiseSrc.connect(_engWallFilter);
-    _engWallFilter.connect(_engResFilter);
-    _engResFilter.connect(_engNoiseGain);
+    _engWallFilter.connect(_engNoiseGain);
     _engNoiseGain.connect(_master);
     _engNoiseSrc.start();
-
-    // LFO also ripples noise gain (same combustion rhythm)
-    _engLfoAmt.connect(_engNoiseGain.gain);
 
     _engRunning = true;
   }
 
-  // norm: normalised throttle 0..1 (from _speed/9)
-  // Uses JS-side exponential smoothing (~400 ms TC) so that setValueAtTime is
-  // called with a single stable value each frame — this avoids the automation-
-  // event pile-up that silences audio when setTargetAtTime is called 60×/sec.
-  function _setEngineSpeed(norm) {
+  // vel: raw velocity in u/s — full range, no cap.
+  // Linear extrapolation of the user-defined scale:
+  //   v=2  → 40 Hz,  v=64 → 80 Hz,  slope = 40/62 Hz per u/s
+  //   v=513 → ~370 Hz (end of 4-s warp charge)
+  //   v=99999 → ~64 kHz (ultrasonic shriek at burst peak — by design)
+  function _setEngineVelocity(vel) {
     const ctx = _getCtx();
     if (!_engRunning) _startEngine();
 
-    // Smooth toward target in JS (alpha~0.04 → TC ~400 ms at 60 fps)
-    _engNorm += (Math.max(0, Math.min(1, norm)) - _engNorm) * 0.04;
-    const n   = _engNorm;
+    // Asymmetric RC filter:
+    //   Rising  (accel): alpha=0.04  → TC ~400 ms — weighty, inertial feel
+    //   Falling (decel): alpha=0.25  → TC ~67 ms  — tracks deceleration immediately
+    const target = Math.max(0, vel);
+    const alpha  = target > _engNorm ? 0.04 : 0.25;
+    _engNorm    += (target - _engNorm) * alpha;
+    const v   = _engNorm;
     const now = ctx.currentTime;
 
-    // Sub-bass: barely moves in pitch, just grows in volume
-    _engSubOsc.frequency.setValueAtTime(25 + n * 20, now);
-    _engSubGain.gain.setValueAtTime(n * 0.35, now);
+    // Linear scale: 40 Hz at v=2, 80 Hz at v=64
+    const slope  = 40 / 62;
+    const subHz  = Math.max(20, 40 + (v - 2) * slope);
 
-    // LFO amplitude rises with throttle
-    _engLfoAmt.gain.setValueAtTime(n * 0.12, now);
+    // Gain: full at throttle 9 and above
+    const norm   = Math.max(0, Math.min(1, (v - 2) / 62));
+    const lfo    = Math.sin(now * Math.PI * 2 * 4.5) * norm * 0.15;
 
-    // Wall filter cutoff rises — still deeply muffled
-    _engWallFilter.frequency.setValueAtTime(45 + n * 70, now);
-    _engResFilter.frequency.setValueAtTime(55 + n * 65, now);
+    _engSubOsc.frequency.setValueAtTime(subHz, now);
+    _engSubGain.gain.setValueAtTime(Math.max(0, norm * 0.55 + lfo), now);
 
-    // Noise is the dominant sound
-    _engNoiseGain.gain.setValueAtTime(n * 0.70, now);
+    // Noise cutoff scales proportionally (200-450 Hz over normal range, beyond that stays open)
+    const cutHz = Math.max(200, 200 + (v - 2) * (250 / 62));
+    _engWallFilter.frequency.setValueAtTime(cutHz, now);
+    _engNoiseGain.gain.setValueAtTime(Math.max(0, norm * 0.60 + lfo * 0.4), now);
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
   return {
-    // Initialise (call on first user gesture if needed)
+    // Initialise AudioContext from a user-gesture handler (MUST be called early)
     init() { _getCtx(); },
 
     // BEEPER PATTERNS (CH4) — exact POKEY data
     // (1) HYPERWARP TRANSIT: $18 → 1278 Hz, 4-tick tone, 3-tick pause, 13×
-    warpTransit()    { _beeper([0x18], 0x03, 0x02, 12, 8); },
+    warpTransit()    { _beeper([0x18], 0x03, 0.02, 12, 8); },
 
     // (2) RED ALERT: looping 491 Hz ↔ 330 Hz, 17-tick each, no pause
     redAlert()       { _startRedAlert(); },
@@ -391,8 +379,7 @@ const SoundManager = (() => {
     //     Plays once, then silences itself until the full sequence finishes.
     damageReport() {
       const now = Date.now();
-      if (now < _dmgReportSilentUntil) return;  // still playing — skip
-      // Duration: 3 repeats × 2 tones × (32+1) ticks × (1/60 s) ≈ 3.3 s → add 200 ms buffer
+      if (now < _dmgReportSilentUntil) return;
       _dmgReportSilentUntil = now + 3500;
       _beeper([0x40, 0x20], 0x20, 0xFF, 2, 10);
     },
@@ -405,13 +392,18 @@ const SoundManager = (() => {
     zylonExplosion() { _zylonExplosion(); },
     shieldHit()      { _shieldHit(); },
 
-    // ENGINE (call every frame with current speed 0..255)
-    setEngineSpeed(v) { _setEngineSpeed(v); },
+    // ENGINE — call every frame with raw velocity in u/s.
+    // Drives both normal flight and the warp sequence automatically.
+    setEngineVelocity(v) { _setEngineVelocity(v); },
+
+    // Bypass RC filter — snap to velocity immediately (no lag).
+    // Call this at warp arrival to avoid the 99999-unit lag on decel start.
+    snapEngineVelocity(v) { _engNorm = Math.max(0, v); },
 
     // MASTER VOLUME
     setVolume(v) {
       const ctx = _getCtx();
-      _master.gain.setTargetAtTime(Math.max(0, Math.min(1, v)), ctx.currentTime, 0.05);
+      _master.gain.setValueAtTime(Math.max(0, Math.min(1, v)), ctx.currentTime);
     },
   };
 })();

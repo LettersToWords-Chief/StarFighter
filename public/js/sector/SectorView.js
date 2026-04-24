@@ -1486,8 +1486,9 @@ const SectorView = (() => {
 
     // ── Engine sound — update every frame ────────────────────────────────
     if (typeof SoundManager !== 'undefined') {
-      // _speed is throttle notch 0..9; pass as normalised 0..1
-      SoundManager.setEngineSpeed(_speed / 9);
+      // Pass full _currentVelocity — SoundManager's log scale handles the
+      // warp burst crescendo (99999 u/s → ~350 Hz) without capping.
+      SoundManager.setEngineVelocity(_currentVelocity);
     }
 
     // ── Energy telemetry clock + ring buffer ──
@@ -1713,6 +1714,9 @@ const SectorView = (() => {
         _currentVelocity  = _warpPeakSpeed;  // snap exact
         _warpDebursting   = false;
         _warpDecelerating = true;            // begin mirror 4-s decel phase
+        // Snap engine sound to peak velocity so the RC filter tracks the
+        // actual decel ramp rather than lagging behind a 99999→513 drop.
+        if (typeof SoundManager !== 'undefined') SoundManager.snapEngineVelocity(_warpPeakSpeed);
       }
     } else if (_warpDecelerating) {
       // Mirror of charge: 5× ACCEL_RATE decel for 4 s, returns to pre-warp speed
@@ -4667,11 +4671,12 @@ const SectorView = (() => {
 
   function beginWarpCharge(driftFactor, onComplete) {
     _warpDrift    = typeof driftFactor === 'number' ? driftFactor : 0;
-    _warpPreSpeed = _currentVelocity;   // record V_orig — target for mirror decel on arrival
+    _warpPreSpeed = _currentVelocity;
     _warpTargetDir.set(0, 0, -1).applyQuaternion(_cameraQuat);
     _warpChargeTimer = 0;
     _warpCharging = true;
     _warpChargeCallback = onComplete;
+    // No separate warp sound — _currentVelocity drives engine sound automatically
   }
 
   function enterWarpMode(worldDir, timer) {
