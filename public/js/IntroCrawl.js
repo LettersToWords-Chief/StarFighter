@@ -74,6 +74,7 @@ const IntroCrawl = (() => {
 
   function start(container, alertText) {
     _alertText = alertText || '';
+    IntroCrawlMusic.start();
     const w = container.clientWidth  || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
 
@@ -116,6 +117,7 @@ const IntroCrawl = (() => {
     if (_animId) { cancelAnimationFrame(_animId); _animId = null; }
     if (_renderer) { _renderer.dispose(); _renderer = null; }
     _scene = null; _camera = null; _plane = null;
+    IntroCrawlMusic.stop();
   }
 
   return { start, stop };
