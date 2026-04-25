@@ -20,9 +20,11 @@
   let _warpReadyTarget = null;   // target {q, r} locked in warp mode
   let _warpReadyInterval = null; // setInterval handle for 30s countdown
   const currentDifficulty = 'cadet';
-  // ---- Game-over state ----
-  let _gameLost      = false;
+  let _gameLost       = false;
   let _sectorsVisited = 0;
+  // Set by init() when fast-forward has placed Zylons at a starbase before gameplay starts.
+  // Consumed on the first keypress so the 3-tone subspace alert plays once audio is live.
+  let _pendingStartupAlert = null;
 
   // ---- Subspace message log ----
   const SubspaceComm = window.SubspaceComm = (() => {
@@ -58,9 +60,9 @@
     return { send, getLog, _renderLog, clockStr: _clockStr };
   })();
 
-  // Stardate
+  // Stardate — started by _beginGame when the player clicks BEGIN MISSION
   let _stardate = 0;
-  setInterval(() => { _stardate++; }, 1000);
+  let _stardateInterval = null;
 
   // ---- DOM refs ----
   const $galaxy  = () => document.getElementById('galaxy-view');
@@ -120,6 +122,36 @@
     window.GalaxyRef = galaxyMap;   // exposes live Zylon count to SectorView fog-intelligence
     galaxyMap.getStardate = () => _stardate;
 
+    // ---- Freeze simulation during intro screen ----
+    // Fast-forward already ran in the constructor. Hold everything else
+    // until the player clicks BEGIN MISSION.
+    galaxyMap.frozen = true;
+
+    // ---- Deferred startup alert — fast-forward fires before audio/callbacks are ready ----
+    // The GalaxyMap constructor runs _fastForwardZylons() synchronously, which may place a
+    // Zylon beacon at a starbase and set galaxy.redAlert=true BEFORE onRedAlert is wired.
+    // Capture that event here; _beginGame will display it with audio once the screen opens.
+    let _startupAlertText = '';
+    if (galaxyMap.redAlert) {
+      const beacon = galaxyMap.zylonBeacons.find(b => b.active && b.type === 'starbase');
+      if (beacon) {
+        const sb   = galaxyMap.starbases.find(s => s.q === beacon.q && s.r === beacon.r);
+        const name = (sb?.name ?? `SECTOR ${beacon.q},${beacon.r}`).toUpperCase();
+        _pendingStartupAlert = { q: beacon.q, r: beacon.r, name };
+        SubspaceComm.send(
+          'CENTRAL COMMAND',
+          SubspaceComm.clockStr(),
+          `ZYLON INCURSION DETECTED — ${name} UNDER ATTACK`);
+        _startupAlertText = `⚠ ZYLON INCURSION DETECTED — ${name} UNDER ATTACK`;
+      }
+    }
+
+    // Start Three.js glass-sheet crawl (defer so flexbox layout has real dimensions)
+    const crawlWrap = document.getElementById('intro-crawl-wrap');
+    if (crawlWrap && typeof IntroCrawl !== 'undefined') {
+      setTimeout(() => IntroCrawl.start(crawlWrap, _startupAlertText), 100);
+    }
+
     // When a Warrior finishes warping and enters a sector, spawn its 3D ship
     // if the player is currently in that same sector.
     galaxyMap.onWarriorArrived = (warrior) => {
@@ -157,13 +189,6 @@
       if (_sectorLive) { _sectorLive = false; SectorView.exit(); }
       openMap();   // show map; combat-view stays display:block but sector stopped
     });
-
-    // ---- Audio — init AudioContext on first user gesture ----
-    // Browsers require audio to be started from a direct user gesture.
-    // Attaching once to keydown ensures the engine and all sounds work.
-    window.addEventListener('keydown', () => {
-      if (typeof SoundManager !== 'undefined') SoundManager.init();
-    }, { once: true });
 
     // ---- Key handler ----
     window.addEventListener('keydown', (e) => {
@@ -203,9 +228,30 @@
 
     updateHUD();
 
-    // Show combat canvas from the start so 3D view is always underneath
+    // Show combat canvas (always underneath) but DON'T enter the sector yet.
+    // _beginGame() does that once the player clicks BEGIN MISSION.
     $combat().style.display = 'block';
-    // Start in cockpit at capital sector
+
+    // Wire the BEGIN MISSION button — this click is the user gesture for AudioContext
+    document.getElementById('intro-begin').addEventListener('click', _beginGame, { once: true });
+  }
+
+  // ---- Begin the game (called by the intro BEGIN MISSION button click) ----
+  function _beginGame() {
+    if (typeof IntroCrawl !== 'undefined') IntroCrawl.stop();
+    const intro = document.getElementById('intro-overlay');
+    if (intro) intro.style.display = 'none';
+
+    // Unfreeze simulation
+    galaxyMap.frozen = false;
+
+    // Start the stardate clock now that time is actually running
+    _stardateInterval = setInterval(() => { _stardate++; }, 1000);
+
+    // Initialize audio — the click is the required user gesture
+    if (typeof SoundManager !== 'undefined') SoundManager.init();
+
+    // Enter the cockpit
     _enterSector({ q: 0, r: 0 });
   }
 
@@ -249,6 +295,16 @@
       warriorGalaxyRefs: warriors,
       spawnerGalaxyRef:  spawner,
     });
+    // If fast-forward placed Zylons at a starbase before gameplay started,
+    // show the alert in the cockpit HUD and play the 3-tone subspace alert.
+    // Runs at sector entry — no keypress needed.
+    if (_pendingStartupAlert) {
+      SectorView.showMessage(
+        'CENTRAL COMMAND',
+        SubspaceComm.clockStr(),
+        `ZYLON INCURSION — ${_pendingStartupAlert.name} UNDER ATTACK`);
+      if (typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
+    }
   }
 
   // ---- Hyperspace beep (electronic tonal blip) ----

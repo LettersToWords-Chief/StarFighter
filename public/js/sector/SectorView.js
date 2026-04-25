@@ -199,6 +199,8 @@ const SectorView = (() => {
   let _lossTriggered = false;  // guards against double-fire
   let _playerFuel    = 0;      // mirror of main.js playerFuel — used for stranded check
   let _strandedTimer = 0;      // seconds at zero energy with no dock + no fuel
+  let _hullHP        = GameConfig.player.hullHP ?? 600;  // structural integrity; 0 = destroyed
+  let _hullRepair    = null;   // { partsNeeded, partsAllocated } computed in _buildRepairPlan
 
   function _resetCannons() {
     _cannon = {
@@ -765,6 +767,21 @@ const SectorView = (() => {
       }
     }
 
+    // ── Hull (spare parts pool) ───────────────────────────────────────────────
+    const maxHullHP    = GameConfig.player.hullHP ?? 600;
+    const hullDamage   = Math.max(0, maxHullHP - _hullHP);
+    const hullParts    = Math.ceil(hullDamage / 100);   // 1 spare part per 100 HP damage
+    let   hullAlloc    = 0;
+    if (hullDamage > 0 && dockMode && _currentStarbase) {
+      const hullAvail  = Math.floor(_currentStarbase.inventory.spareParts ?? 0);
+      hullAlloc        = Math.min(hullParts, hullAvail);
+      if (hullAlloc > 0) {
+        _currentStarbase.inventory.spareParts -= hullAlloc;
+        _repairReserved['spareParts'] = hullAlloc;
+      }
+    }
+    _hullRepair = hullDamage > 0 ? { partsNeeded: hullParts, partsAllocated: hullAlloc } : null;
+
     _repairPlan = allSystems;
   }
 
@@ -832,13 +849,44 @@ const SectorView = (() => {
       budgetEl.innerHTML = budgetHtml || '<span style="color:rgba(0,180,255,0.4)">NO DAMAGE DETECTED</span>';
     }
 
-    // System rows grouped
-    const groups = ['PROPULSION', 'COMPUTERS', 'WEAPONS', 'SHIELDS'];
+    // System rows grouped — STRUCTURE first, then the standard groups
+    const groups = ['STRUCTURE', 'PROPULSION', 'COMPUTERS', 'WEAPONS', 'SHIELDS'];
     let html = '';
     for (const g of groups) {
       const items = _repairPlan.filter(s => s.group === g);
       if (!items.length) continue;
       html += `<div class="dr-group-header">${g}</div>`;
+
+      // ── STRUCTURE is a special read-only hull section ──────────────────────
+      if (g === 'STRUCTURE') {
+        const maxHullHP = GameConfig.player.hullHP ?? 600;
+        const pct       = Math.round((_hullHP / maxHullHP) * 100);
+        const barClass  = pct >= 75 ? 'ok' : pct >= 40 ? 'warn' : pct > 0 ? 'danger' : 'dead';
+        const dmgCls    = _hullHP < maxHullHP ? ' dr-damaged' : '';
+        let   partsInfo = '';
+        if (_hullRepair) {
+          const { partsNeeded, partsAllocated } = _hullRepair;
+          if (_repairDockMode) {
+            partsInfo = partsAllocated > 0
+              ? `${partsAllocated}/${partsNeeded} spare parts → restores ${partsAllocated * 100} HP`
+              : `${partsNeeded} spare parts needed — none available`;
+          } else {
+            const sbAvail = _currentStarbase ? Math.floor(_currentStarbase.inventory.spareParts ?? 0) : 0;
+            partsInfo = `${partsNeeded} spare part${partsNeeded !== 1 ? 's' : ''} to repair (${sbAvail} available at dock)`;
+          }
+        }
+        html += `<div class="dr-row${dmgCls}">
+          <div class="dr-row-name">HULL INTEGRITY</div>
+          <div>
+            <div class="dr-bar-wrap"><div class="dr-bar ${barClass}" style="width:${pct}%"></div></div>
+            <div class="dr-row-hp">${_hullHP}/${maxHullHP}</div>
+          </div>
+          <div></div>
+          <div style="font-size:9px;color:rgba(160,204,238,0.55);text-align:center;grid-column:span 1">${partsInfo}</div>
+        </div>`;
+        continue;
+      }
+
       for (const item of items) {
         const pct  = Math.round((item.hp / item.maxHP) * 100);
         const barClass = pct >= 75 ? 'ok' : pct >= 40 ? 'warn' : pct > 0 ? 'danger' : 'dead';
@@ -890,8 +938,9 @@ const SectorView = (() => {
         _currentStarbase.inventory[key] = (_currentStarbase.inventory[key] ?? 0) + count;
       }
     }
-    _repairPlan = [];
+    _repairPlan     = [];
     _repairReserved = {};
+    _hullRepair     = null;
     _closeDamageReport();
   }
 
@@ -901,9 +950,18 @@ const SectorView = (() => {
     for (const item of _repairPlan) {
       if (item.checked && item.damaged) item.apply();
     }
-    // Return unused reserved parts
+    // Apply hull repair from reserved spare parts
+    const hullPartsUsed = _repairReserved['spareParts'] ?? 0;
+    if (hullPartsUsed > 0) {
+      const maxHullHP = GameConfig.player.hullHP ?? 600;
+      _hullHP = Math.min(maxHullHP, _hullHP + hullPartsUsed * 100);
+      // Reset hull damage thresholds so re-damage fires fresh warnings
+      if (_dmgAnnounced['hull']) delete _dmgAnnounced['hull'];
+    }
+    // Return unused reserved parts (non-spare keys only — hull used its full alloc)
     if (_currentStarbase) {
       for (const [key, reserved] of Object.entries(_repairReserved)) {
+        if (key === 'spareParts') continue;  // hull handles its own accounting
         const used = _repairPlan.filter(s => s.partKey === key && s.checked).length;
         const back = reserved - used;
         if (back > 0) {
@@ -911,8 +969,9 @@ const SectorView = (() => {
         }
       }
     }
-    _repairPlan = [];
+    _repairPlan   = [];
     _repairReserved = {};
+    _hullRepair   = null;
     _closeDamageReport();
   }
 
@@ -2282,16 +2341,17 @@ const SectorView = (() => {
       _warpDriveHP = Math.max(0, _warpDriveHP - hull); comp = 'warp';
     }
 
-    // ── Overflow rule — hits on dead systems spread evenly to all alive ones ──
+    // ── Overflow rule: hits on a dead system bleed through to hull ────────────
     if (isAlreadyDead) {
-      _distributeOverflow(hull);
+      _hullHP = Math.max(0, _hullHP - hull);
+      _announceDamage('hull', 'HULL INTEGRITY', _hullHP, GameConfig.player.hullHP ?? 600);
     }
 
-    // ── Ship destruction check — fires once when total HP hits 0 ─────────────
-    if (_totalHP() <= 0 && !_lossTriggered) {
+    // ── Ship destruction check — hull at 0 means the fighter is gone ─────────
+    if (_hullHP <= 0 && !_lossTriggered) {
       _lossTriggered = true;
       _onLoss?.('SHIP_DESTROYED');
-      return;   // skip further announce (nothing left to announce)
+      return;   // skip further announce
     }
 
     // ── Damage announcements ──────────────────────────────────────────────────
@@ -4281,6 +4341,8 @@ const SectorView = (() => {
     _needHuntMsg   = false;
     _lossTriggered = false;
     _strandedTimer = 0;
+    _hullRepair    = null;   // hull persists across sectors — only clearing the dock plan
+    // NOTE: _hullHP intentionally NOT reset — hull damage persists until repaired at dock
     // NOTE: _energy persists across warps — only refilled on dock
     // NOTE: _kills suspended until Zylons are added
     _targets     = 0;
@@ -4709,7 +4771,7 @@ const SectorView = (() => {
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
            enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel,
-           get galacticClock() { return _galacticClock;  },
+            get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
            get speed()         { return _speed;         },
@@ -4717,6 +4779,8 @@ const SectorView = (() => {
            get shieldCharge()  { return _shieldCharge;  },
            get shieldCapacity(){ return _shieldCapacity;},
            get kills()         { return _kills;         },
+           get hullHP()        { return _hullHP;         },
+           set hullHP(v)       { _hullHP = Math.max(0, Math.min(GameConfig.player.hullHP ?? 600, v)); },
            get onLoss()        { return _onLoss;        },
            set onLoss(fn)      { _onLoss = fn;          } };
 })();

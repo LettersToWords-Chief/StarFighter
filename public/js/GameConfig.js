@@ -291,6 +291,11 @@ const GameConfig = Object.freeze({
     /** Multiplier applied to ACCEL_RATE during the 4-second warp charge and mirror decel.
      *  Higher values = more dramatic acceleration ramp into and out of hyper-burst. */
     warpAccelMultiplier: 5,
+
+    /** Fighter hull structural integrity.  When a hit lands on an already-destroyed
+     *  system the damage bleeds through here.  0 = ship destroyed.
+     *  Repairs cost 1 spare part per 100 HP restored. */
+    hullHP: 600,
   },
 
   // =========================================================

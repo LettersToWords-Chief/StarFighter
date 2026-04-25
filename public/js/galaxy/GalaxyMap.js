@@ -64,6 +64,7 @@ class GalaxyMap {
 
     this._initGrid();
     this._initInput();
+    this.frozen = false;   // set true by main.js intro screen; skips simulation updates
     this._loop();
   }
 
@@ -635,9 +636,11 @@ class GalaxyMap {
       try {
         const dt = Math.min((now - lastTime) / 1000, 0.1);
         lastTime = now;
-        // Always update ships regardless of map visibility
-        this._updateSupplyShips(dt);
-        this._updateZylons(dt);
+        // Freeze simulation during intro screen; keep rendering so map is visible
+        if (!this.frozen) {
+          this._updateSupplyShips(dt);
+          this._updateZylons(dt);
+        }
 
         // Capital loss detection — fires once when capital goes dormant
         if (!this._capitalLostFired) {
@@ -770,6 +773,11 @@ class GalaxyMap {
     console.log(`[GalaxyMap] Starbase ${sb.name} has gone DORMANT.`);
     const k = HexMath.key(sb.q, sb.r);
     this.revealed.add(k);
+    // Capital-lost condition: fires once when the capital itself goes dormant
+    if (sb.isCapital && !this._capitalLostFired) {
+      this._capitalLostFired = true;
+      this.onCapitalLost?.();
+    }
   }
 
   /** Called when a dormant starbase auto-reactivates from supply ship fuel. */

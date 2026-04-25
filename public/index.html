@@ -95,6 +95,19 @@
 
   </div><!-- /#game-wrapper -->
 
+  <!-- Intro / mission briefing — shown on page load, freezes simulation until BEGIN -->
+  <div id="intro-overlay">
+    <div id="intro-vignette"></div>
+    <div id="intro-content">
+      <div id="intro-subtitle">FEDERATION STARFIGHTER COMMAND</div>
+      <h1 id="intro-title">STAR FIGHTER</h1>
+      <div id="intro-crawl-wrap">
+        <canvas id="intro-crawl-canvas"></canvas>
+      </div>
+      <button id="intro-begin">[ BEGIN MISSION ]</button>
+    </div>
+  </div>
+
   <!-- Postmortem screen — shown on any loss condition -->
   <div id="postmortem">
     <div id="pm-vignette"></div>
@@ -137,6 +150,7 @@
   <script src="js/warp/WarpTunnel.js"></script>
   <script src="js/sector/ZylonShip.js"></script>
   <script src="js/sector/SectorView.js"></script>
+  <script src="js/IntroCrawl.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>
