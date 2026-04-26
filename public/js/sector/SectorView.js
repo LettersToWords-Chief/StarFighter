@@ -1930,7 +1930,17 @@ const SectorView = (() => {
         if (window.SubspaceComm) {
           const tc  = Math.floor(_galacticClock || 0);
           const clk = `${String(Math.floor(tc/3600)).padStart(2,'0')}:${String(Math.floor((tc%3600)/60)).padStart(2,'0')}:${String(tc%60).padStart(2,'0')}`;
-          window.SubspaceComm.send('SECTOR CLEAR', clk, `${_sectorName} — ALL ZYLON FORCES ELIMINATED`);
+          // Sender logic:
+          //   Starbase alive (energy > 0) → the base reports the all-clear; sector is implied.
+          //   No starbase, or base energy = 0 → player reports in; must name the sector.
+          const sbAlive = _currentStarbase && (_currentStarbase.inventory?.energy ?? 0) > 0;
+          const clearFrom = sbAlive
+            ? _currentStarbase.name.toUpperCase()
+            : (GameConfig.player.callsign ?? 'STAR FIGHTER');
+          const clearMsg = sbAlive
+            ? 'ALL ZYLON FORCES ELIMINATED'
+            : `${_sectorName} — ALL ZYLON FORCES ELIMINATED`;
+          window.SubspaceComm.send(clearFrom, clk, clearMsg);
         }
         // Fog-of-war intelligence: total remaining Zylon units across the galaxy
         if (window.GalaxyRef) {

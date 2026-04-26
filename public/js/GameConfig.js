@@ -296,6 +296,9 @@ const GameConfig = Object.freeze({
      *  system the damage bleeds through here.  0 = ship destroyed.
      *  Repairs cost 1 spare part per 100 HP restored. */
     hullHP: 600,
+
+    /** Player's subspace radio callsign — used as the sender on comms from the cockpit. */
+    callsign: 'STAR FIGHTER',
   },
 
   // =========================================================
