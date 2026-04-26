@@ -1930,7 +1930,7 @@ const SectorView = (() => {
         if (window.SubspaceComm) {
           const tc  = Math.floor(_galacticClock || 0);
           const clk = `${String(Math.floor(tc/3600)).padStart(2,'0')}:${String(Math.floor((tc%3600)/60)).padStart(2,'0')}:${String(tc%60).padStart(2,'0')}`;
-          window.SubspaceComm.send('SECTOR CLEAR', clk, 'ALL ZYLON FORCES ELIMINATED');
+          window.SubspaceComm.send('SECTOR CLEAR', clk, `${_sectorName} — ALL ZYLON FORCES ELIMINATED`);
         }
         // Fog-of-war intelligence: total remaining Zylon units across the galaxy
         if (window.GalaxyRef) {
@@ -3485,20 +3485,30 @@ const SectorView = (() => {
       if (_warpMode && !_warpCharging) {
         const hRight = new THREE.Vector3(1, 0, 0).applyQuaternion(_cameraQuat);
         const hUp    = new THREE.Vector3(0, 1, 0).applyQuaternion(_cameraQuat);
-        const rx = _warpModeDir.dot(hRight);
-        const uy = _warpModeDir.dot(hUp);
-        const WSCALE = Math.min(W, DY) * 0.55;
+        const camFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(_cameraQuat);
+        const rx  = _warpModeDir.dot(hRight);  // +right in camera space
+        const uy  = _warpModeDir.dot(hUp);     // +up in camera space
+        const fwd = _warpModeDir.dot(camFwd);  // +1 = target ahead, -1 = target behind
+
+        const WSCALE  = Math.min(W, DY) * 0.55;
         const tx = cx + rx * WSCALE;
         const ty = cy - uy * WSCALE;
         const err = Math.sqrt(rx * rx + uy * uy);
         const alignThresh = Math.sin((GameConfig.player.warpAlignAngle ?? 15) * Math.PI / 180);
-        const warpCol = err < alignThresh ? '#00ff88' : '#ff3300';
+
+        // Diamond is green only when target is in FRONT and within the alignment cone
+        const isAligned = fwd > 0 && err < alignThresh;
+        const warpCol = isAligned ? '#00ff88' : '#ff3300';
         const tR = 14;
-        const edgeM = 36;
-        const onScreen = tx >= edgeM && tx <= W - edgeM && ty >= edgeM && ty <= DY - edgeM;
+
+        // Arrow lives on a ring of this radius; diamond shows when target is inside the ring.
+        // Using cr * 0.8 keeps it proportional to the scope and guarantees a smooth transition.
+        const circleR = cr * 0.8;
+        const distFromCenter = fwd > 0 ? Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2) : Infinity;
+        const onScreen = distFromCenter <= circleR;
 
         if (onScreen) {
-          // Diamond
+          // Diamond target indicator — appears inside the ring
           oc.strokeStyle = warpCol; oc.lineWidth = 1.8;
           oc.beginPath();
           oc.moveTo(tx, ty - tR); oc.lineTo(tx + tR, ty);
@@ -3509,17 +3519,28 @@ const SectorView = (() => {
           oc.beginPath(); oc.arc(tx, ty, 3, 0, Math.PI * 2); oc.fill();
           oc.globalAlpha = 1;
         } else {
-          // Edge arrow — points toward off-screen diamond
-          const dx = tx - cx, dy = ty - cy;
-          const angle = Math.atan2(dy, dx);
-          const tVals = [];
-          if (dx > 0) tVals.push((W - edgeM - cx) / dx);
-          else if (dx < 0) tVals.push((edgeM - cx) / dx);
-          if (dy > 0) tVals.push((DY - edgeM - cy) / dy);
-          else if (dy < 0) tVals.push((edgeM - cy) / dy);
-          const te = Math.min(...tVals.filter(v => v > 0));
-          const ex = cx + dx * te, ey = cy + dy * te;
-          const arrowSize = 16;
+          // Arrow lives on the ring — directs player toward the warp target.
+          // When the target is behind, use lateral (rx, uy) to suggest a turn direction.
+          // If directly behind (both near zero), suggest pitching up.
+          let adx, ady;
+          if (fwd <= 0) {
+            const lateralMag = Math.sqrt(rx * rx + uy * uy);
+            if (lateralMag < 0.05) {
+              adx = 0; ady = -1;   // directly behind — suggest pitch up
+            } else {
+              adx = rx;            // camera-right maps to screen-right
+              ady = -uy;           // camera-up maps to screen-up (Y is flipped)
+            }
+          } else {
+            adx = tx - cx;
+            ady = ty - cy;
+          }
+          const angle  = Math.atan2(ady, adx);
+          const dirLen = Math.sqrt(adx * adx + ady * ady) || 1;
+          // Place arrow exactly on the ring
+          const ex = cx + (adx / dirLen) * circleR;
+          const ey = cy + (ady / dirLen) * circleR;
+          const arrowSize = 14;
           oc.save();
           oc.translate(ex, ey);
           oc.rotate(angle);

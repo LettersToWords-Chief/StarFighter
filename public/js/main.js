@@ -43,6 +43,8 @@
       _log.unshift(entry);
       _renderLog();
       if (_sectorLive && SectorView.showMessage) SectorView.showMessage(from, stardate, text);
+      // Play the 3-tone subspace chime for every incoming message — including remote sectors.
+      if (typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
     }
     function getLog() { return [..._log]; }
     function _renderLog() {
