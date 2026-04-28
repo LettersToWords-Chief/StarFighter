@@ -29,17 +29,27 @@ Stack: Node.js + Express server (`server.js`), vanilla JS front-end in `public/j
 - Planet solid in habitable sectors; sector 3D object distribution doubled
 
 ### 🔄 Most Recent Work
-- **Dogfight + HUD polish** — smooth jink arc, committed collision avoidance, 3D lock bracket with firing-solution indicator (green/red), sector object distribution doubled, warp hazard damage, planet solidity.
+- **Subspace messaging overhaul** — 3-tone chime now fires for all remote sector alerts; sector clear message identifies the sector; sender is the starbase (if alive) or `STAR FIGHTER` (player callsign).
+- **Warp indicator fix** — arrow lives on a ring around the crosshairs; forward-component check prevents false alignment when facing backward.
+- **Player callsign** — `STAR FIGHTER` added to `GameConfig.player.callsign`.
+
+### 🐛 Open Bugs
+| # | Bug | Notes |
+|---|---|---|
+| 1 | **Unexplained game-over** | Triggered twice during testing; cause unknown — needs investigation |
+| 2 | **Spawner warrior placement** | Warriors protecting a Spawner are incorrectly positioned on sector entry |
 
 ### 📋 Planned But Not Yet Built (in priority order)
-See Sections E–H below.
+See Sections 10–15 below.
 
 | # | Feature | Status |
 |---|---|---|
-| E | Game Opening (backstory crawl + Red Alert trigger) | 📋 Planned |
-| F | Win / Loss Conditions | 📋 Planned |
-| G | Sound Effects | 📋 Planned (media TBD) |
-| H | Spawner 3D Presence + Boss-Fight Behavior | 📋 Planned |
+| 10 | Game Opening (backstory crawl + Red Alert trigger) | 🔄 Built; music TBD; fine-tuning |
+| 11 | Win / Loss Conditions | 🔄 Partially built; unexplained-ending bug open |
+| 12 | Sound Effects | 🔄 Mostly done; fine-tuning |
+| 13 | Spawner 3D Presence + Boss-Fight Behavior | 📋 Planned; warrior placement bug open |
+| 14 | Galactic Power Scan | 📋 Planned |
+| 15 | Tutorial Mode | 📋 Planned |
 
 ---
 
@@ -163,7 +173,7 @@ These are built sequentially. Each item must be approved before implementation b
 
 ---
 
-## Section E: Game Opening
+## Section 10: Game Opening
 
 ### Concept
 A Star Wars-style text crawl that delivers the backstory and ends with the moment the Zylons launch their first attack, triggering Red Alert. The crawl leads directly into the live game — no separate title screen.
@@ -181,7 +191,7 @@ A Star Wars-style text crawl that delivers the backstory and ends with the momen
 
 ---
 
-## Section F: Win / Loss Conditions
+## Section 11: Win / Loss Conditions
 
 ### Loss Conditions (any one triggers Game Over — Loss)
 
@@ -209,7 +219,7 @@ A Star Wars-style text crawl that delivers the backstory and ends with the momen
 
 ---
 
-## Section G: Sound Effects
+## Section 12: Sound Effects
 
 ### Approach
 - Mix of provided media files (Bill will supply) and procedurally generated sounds
@@ -227,7 +237,7 @@ A Star Wars-style text crawl that delivers the backstory and ends with the momen
 
 ---
 
-## Section H: Zylon Spawner — 3D Presence + Boss-Fight Behavior
+## Section 13: Zylon Spawner — 3D Presence + Boss-Fight Behavior
 
 ### Role in the Game
 Spawners are the strategic root of the Zylon infestation. They are the "boss fights" of the game — not because they fight, but because finding and killing them is the win condition and they are well-defended.
@@ -270,6 +280,54 @@ Destroying a Spawner kills or deactivates all Zylons that belong to its clan. Th
 - Spawner visual model (wireframe design)
 - Warrior guard behavior spec (TBD when ready to implement)
 - Spawner health / evasion tuning
+
+---
+
+## Section 14: Galactic Power Scan
+
+### Concept
+When the strategic situation favors it, the player can order all starbases to simultaneously emit a deep-range sensor pulse that sweeps across the galaxy, revealing all Zylon positions. This is the end-game intelligence tool — the player won't need it early, but when Spawners are hiding in the fog of war, the scan breaks the stalemate.
+
+### Preconditions (ALL must be true to authorize)
+- All starbases are in `active` state (no dormant bases)
+- No starbase is currently `underAttack`
+- No scan is already in progress
+
+### Mechanics
+1. **Player requests the scan** via a communication to Central Command (UI TBD — a key, a map button, or a dialogue)
+2. **Central Command authorizes** and broadcasts the order to all starbases
+3. **Each starbase begins emitting a scan pulse** that radiates outward at a configurable rate (sectors/second)
+4. **The scan is NOT instantaneous** — it propagates hex-by-hex from each base; outer sectors are revealed later than inner ones
+5. **Energy cost** — each starbase drains a fixed energy amount per sector-ring revealed; the deeper the scan goes, the more it costs
+6. **Fog of war is lifted** for each hex as the pulse reaches it — Zylon units in that hex become visible on the galaxy map
+7. **Side effect — Zylon alert**: all wandering Seekers that are detected become alerted and route directly toward the nearest starbase (they now "know" they've been found); this accelerates Zylon aggression for the rest of the game
+
+### Strategic Trade-off
+- **Upside**: you know exactly where every Spawner, Beacon, and Seeker is
+- **Downside**: Seekers stop wandering randomly and converge on starbases — the player must act on the intelligence quickly
+
+### Open Items
+- UI mechanism for requesting the scan (key? map button? dialogue with Central Command?)
+- Visual representation of the scan wave on the galaxy map (expanding ring? hex-by-hex highlight?)
+- Exact energy cost per starbase per sector-ring revealed (TBD at implementation time)
+- Scan propagation speed (TBD — fast enough to feel exciting, slow enough to feel like a real wave)
+- Whether the fog re-descends after the scan completes, or remains lifted permanently
+
+---
+
+## Section 15: Tutorial Mode
+
+### Concept
+A guided first-play experience that teaches the player the core systems without overwhelming them. The tutorial runs as a separate mode before the main game — or optionally as an overlay on the first real game.
+
+### Open Items (design not yet started)
+- **Scope**: what systems does the tutorial cover? (flight, combat, warp, docking, galaxy map, subspace comms)
+- **Format**: scripted sequence with a narrator/guide, or organic hints triggered by player actions?
+- **Skippable**: yes — experienced players should be able to skip immediately
+- **Integration**: separate scenario, or overlaid on a normal cadet-difficulty game?
+- **Central Command voice**: could tie into the same communication mechanism built for Section I
+
+*Design to be defined before implementation begins.*
 
 ---
 

@@ -71,6 +71,10 @@ class ZylonSeeker {
     this.hp        = 1;        // one hit and they die
     this.sectorPos = null;     // { x, y } — set by SectorView on entry
     this.inCombat  = false;
+
+    // Power Scan homing — set by GalaxyMap._revealScanRing when scan wave hits this seeker
+    this._homingTarget = null;  // { q, r } of broadcasting starbase
+    this._homingTimer  = 0;
   }
 
   get key() { return `${this.q},${this.r}`; }
@@ -84,7 +88,20 @@ class ZylonSeeker {
     if (this.state === 'GUARDING') return;
     if (this.inCombat) return;
 
+    // ── Power Scan Homing ──────────────────────────────────────────────────────
+    // Activated by a Power Scan reveal. Overrides normal pachinko movement.
+    // Persists after the scan ends. Clears automatically when seeker settles (GUARDING).
+    if (this._homingTarget && this.state === 'SEARCHING') {
+      this._homingTimer += dt;
+      if (this._homingTimer >= GameConfig.powerScan.homingMoveIntervalSec) {
+        this._homingTimer = 0;
+        this._homingStep(galaxy);
+      }
+      return; // skip all other movement logic while homing
+    }
+
     // ── Tracking Mode (Section 5B) ─────────────────────────────────────────
+
     // Entered a starbase with ≥2 active beacons: wait 30s, then instantly
     // warp after the next cargo ship that leaves the sector.
     if (this._isTracking && !galaxy.fastForwarding) {
@@ -385,6 +402,32 @@ class ZylonSeeker {
     this._trackTimer      = 0;
     this._followableShips = [];
     this._followDest      = null;
+  }
+
+  /**
+   * Move one hex toward the homing target (greedy — pick neighbour with minimum
+   * distance to target). Called every homingMoveIntervalSec while homing.
+   */
+  _homingStep(galaxy) {
+    const target = this._homingTarget;
+    // Already at the target sector — let normal evaluation handle it
+    if (this.q === target.q && this.r === target.r) {
+      this._homingTarget = null;
+      this._evaluateSector(galaxy);
+      return;
+    }
+    // Greedy: pick the adjacent hex that minimises distance to target
+    const dirs = HexMath.DIRECTIONS;
+    let bestDist = Infinity, bestQ = this.q, bestR = this.r;
+    for (const d of dirs) {
+      const nq = this.q + d.q, nr = this.r + d.r;
+      if (!galaxy.hexes.has(HexMath.key(nq, nr))) continue;
+      const dist = HexMath.distance({ q: nq, r: nr }, target);
+      if (dist < bestDist) { bestDist = dist; bestQ = nq; bestR = nr; }
+    }
+    this._moveTo(bestQ, bestR);
+    // May settle here if this is a resource or starbase sector
+    this._evaluateSector(galaxy);
   }
 
   // ─────────────────────────────────────────────

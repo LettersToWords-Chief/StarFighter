@@ -309,7 +309,7 @@ const SectorView = (() => {
     if (e.code === 'KeyC') { _computerOn = !_computerOn; }           // Attack computer
     if (e.code === 'KeyL') { _lrsOn = !_lrsOn; }                     // Long range scan
     if (e.code === 'KeyM') { /* TODO: manual target */    }           // Manual target
-    if (e.code === 'KeyP') { _paused ? resume() : pause(); }         // Pause
+    if (e.code === 'Backquote') { _paused ? resume() : pause(); }    // Pause (` key — P is now Power Scan)
     if (e.code === 'KeyD') {
       // Initiate docking: must be within range, stopped, starbase present, and idle
       if (_hasStarbase && _dockState === 'idle') {
@@ -3511,14 +3511,14 @@ const SectorView = (() => {
         const warpCol = isAligned ? '#00ff88' : '#ff3300';
         const tR = 14;
 
-        // Arrow lives on a ring of this radius; diamond shows when target is inside the ring.
-        // Using cr * 0.8 keeps it proportional to the scope and guarantees a smooth transition.
-        const circleR = cr * 0.8;
+        // Ring radius = distance from center to nearest screen edge.
+        // Arrow lives on this circle; diamond shows when target is inside it.
+        const circleR = Math.min(cx, cy, W - cx, DY - cy) - 8;  // -8 keeps arrow just inside edge
         const distFromCenter = fwd > 0 ? Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2) : Infinity;
         const onScreen = distFromCenter <= circleR;
 
         if (onScreen) {
-          // Diamond target indicator — appears inside the ring
+          // Diamond target indicator — inside the ring
           oc.strokeStyle = warpCol; oc.lineWidth = 1.8;
           oc.beginPath();
           oc.moveTo(tx, ty - tR); oc.lineTo(tx + tR, ty);
@@ -3529,7 +3529,7 @@ const SectorView = (() => {
           oc.beginPath(); oc.arc(tx, ty, 3, 0, Math.PI * 2); oc.fill();
           oc.globalAlpha = 1;
         } else {
-          // Arrow lives on the ring — directs player toward the warp target.
+          // Arrow lives on the ring at circleR from center.
           // When the target is behind, use lateral (rx, uy) to suggest a turn direction.
           // If directly behind (both near zero), suggest pitching up.
           let adx, ady;
@@ -3547,10 +3547,9 @@ const SectorView = (() => {
           }
           const angle  = Math.atan2(ady, adx);
           const dirLen = Math.sqrt(adx * adx + ady * ady) || 1;
-          // Place arrow exactly on the ring
           const ex = cx + (adx / dirLen) * circleR;
           const ey = cy + (ady / dirLen) * circleR;
-          const arrowSize = 14;
+          const arrowSize = 16;
           oc.save();
           oc.translate(ex, ey);
           oc.rotate(angle);
@@ -3720,6 +3719,19 @@ const SectorView = (() => {
           oc.font = '9px Share Tech Mono, monospace'; oc.textAlign = 'center';
           oc.fillStyle = `rgba(0,255,120,${0.6 + 0.4 * pulse})`;
           oc.fillText('DOCK READY  PRESS D', scopeCx, scopeY + scopeH - 5);
+          // Power Scan hint — shown when tech is unlocked
+          if (window._powerScanUnlocked && _currentStarbase) {
+            const sbEnergy = _currentStarbase.inventory?.energy ?? 0;
+            const canScan  = sbEnergy >= GameConfig.powerScan.energyCost && !_currentStarbase.underAttack;
+            oc.font = '8px Share Tech Mono, monospace';
+            oc.fillStyle = canScan
+              ? `rgba(0,220,255,${0.55 + 0.45 * pulse})`
+              : 'rgba(100,100,100,0.6)';
+            oc.fillText(
+              canScan ? 'P: POWER SCAN' : 'P: POWER SCAN  [UNAVAILABLE]',
+              scopeCx, scopeY + scopeH - 5 - 13
+            );
+          }
         }
       }
 
@@ -4799,6 +4811,11 @@ const SectorView = (() => {
 
   function getZylonCount() { return _zylons ? _zylons.filter(z => !z.dead).length : 0; }
   function getSectorPos()  { return { q: _sectorQ, r: _sectorR }; }
+  function isAtDockingPosition() {
+    if (!_hasStarbase || !_running) return false;
+    const dist = _camera?.position.distanceTo(SB_POS) ?? Infinity;
+    return dist < DOCK_RANGE && _currentVelocity < 0.5 && _dockState === 'idle';
+  }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
            enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel,
@@ -4813,5 +4830,7 @@ const SectorView = (() => {
            get hullHP()        { return _hullHP;         },
            set hullHP(v)       { _hullHP = Math.max(0, Math.min(GameConfig.player.hullHP ?? 600, v)); },
            get onLoss()        { return _onLoss;        },
-           set onLoss(fn)      { _onLoss = fn;          } };
+           set onLoss(fn)      { _onLoss = fn;          },
+           get atDockPosition(){ return isAtDockingPosition(); },
+           get currentStarbase(){ return _currentStarbase; } };
 })();

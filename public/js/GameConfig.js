@@ -302,7 +302,26 @@ const GameConfig = Object.freeze({
   },
 
   // =========================================================
-  // COMBAT
+  // POWER SCAN
+  // =========================================================
+  powerScan: {
+    /** Total starbase energy consumed over the full scan duration. */
+    energyCost:           5000,
+
+    /** Seconds between each outward ring reveal (rings 2 → 5). */
+    ringIntervalSec:        30,
+
+    /** Outermost ring revealed by the scan (ring 1 = inner 6 already visible). */
+    maxRing:                 5,
+
+    /** Total scan duration in seconds before FOW automatically returns. */
+    totalDurationSec:      120,
+
+    /** Seconds between each homing warp step for alerted Seekers. */
+    homingMoveIntervalSec:  30,
+  },
+
+
   // =========================================================
   combat: {
     /** Photon charges a starbase point-defence fires per second. */

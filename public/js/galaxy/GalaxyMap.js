@@ -50,6 +50,10 @@ class GalaxyMap {
     this.revealed = new Set();  // known sectors (ever visited or in sensor range)
     this.visible  = new Set();  // currently live sensor coverage
 
+    // Power Scan
+    this.activePowerScans = [];   // active scan state objects
+    this.scanVisible      = new Set(); // keys temporarily revealed by active power scans
+
     // Input
     this.hoveredHex = null;
     this.onWarpSelected = null; // callback({ from, to, fuelCost })
@@ -366,6 +370,11 @@ class GalaxyMap {
     // Mark hexes as visited
     const playerKey = HexMath.key(this.playerPos.q, this.playerPos.r);
     if (this.hexes.has(playerKey)) this.hexes.get(playerKey).visited = true;
+
+    // Merge in power-scan-revealed sectors
+    for (const k of this.scanVisible) {
+      if (this.hexes.has(k)) this.visible.add(k);
+    }
   }
 
   // =========================================================
@@ -686,6 +695,9 @@ class GalaxyMap {
 
     // Recompute visibility every frame — ships move, so fog must stay current
     this._updateVisibility();
+
+    // Tick active power scans
+    this._tickPowerScans(dt);
   }
 
   // =========================================================
@@ -789,6 +801,125 @@ class GalaxyMap {
   /** Called by ZylonSpawner when it creates a new sub-Spawner. */
   _onSubSpawnerCreated(spawner) {
     // Already pushed into this.zylonSpawners by the parent — nothing extra needed
+  }
+
+  // =========================================================
+  // POWER SCAN
+  // =========================================================
+
+  /** Initiate a power scan from the given starbase. Energy drains inside tick. */
+  initiatePowerScan(starbase) {
+    const cfg = GameConfig.powerScan;
+    const scan = {
+      starbase,
+      currentRing: 1,          // will be incremented to 2 on first reveal
+      ringTimer:   0,
+      totalTimer:  0,
+      scanKeys:    new Set(),
+      drainPerSec: cfg.energyCost / cfg.totalDurationSec,
+    };
+    this.activePowerScans.push(scan);
+    this._revealScanRing(scan);  // reveal ring 2 immediately
+  }
+
+  /** Called every frame from _updateSupplyShips. */
+  _tickPowerScans(dt) {
+    if (!this.activePowerScans.length) return;
+    const cfg = GameConfig.powerScan;
+    for (const scan of this.activePowerScans) {
+      // Interruption: any Zylon in the scanning starbase's galaxy sector?
+      const { q, r } = scan.starbase;
+      const hasZylons =
+        this.zylonSeekers.some(s  => s.alive && s.q === q && s.r === r) ||
+        this.zylonWarriors.some(w => w.alive && w.q === q && w.r === r) ||
+        this.zylonBeacons.some(b  => b.active && b.q === q && b.r === r);
+      if (hasZylons) {
+        this._interruptPowerScan(scan, 'ZYLON INCURSION DETECTED — POWER SCAN INTERRUPTED');
+        continue;
+      }
+
+      // Gradual energy drain
+      const drain = scan.drainPerSec * dt;
+      if ((scan.starbase.inventory?.energy ?? 0) < drain) {
+        if (scan.starbase.inventory) scan.starbase.inventory.energy = 0;
+        this._interruptPowerScan(scan, 'POWER SCAN TERMINATED — ENERGY RESERVES EXHAUSTED');
+        continue;
+      }
+      scan.starbase.inventory.energy -= drain;
+
+      scan.totalTimer += dt;
+      scan.ringTimer  += dt;
+
+      // Expand one ring every ringIntervalSec until maxRing
+      if (scan.ringTimer >= cfg.ringIntervalSec && scan.currentRing < cfg.maxRing) {
+        scan.ringTimer = 0;
+        this._revealScanRing(scan);
+      }
+
+      // Completed full duration
+      if (scan.totalTimer >= cfg.totalDurationSec) {
+        this._endPowerScan(scan);
+      }
+    }
+    this.activePowerScans = this.activePowerScans.filter(s => !s._ended);
+  }
+
+  /** Reveal the next hex ring and alert eligible seekers. */
+  _revealScanRing(scan) {
+    scan.currentRing++;
+    const hexesAtRing = this._hexesAtDistance(scan.starbase.q, scan.starbase.r, scan.currentRing);
+    for (const { q, r } of hexesAtRing) {
+      const k = HexMath.key(q, r);
+      if (!this.hexes.has(k)) continue;
+      scan.scanKeys.add(k);
+      this.scanVisible.add(k);
+      this.revealed.add(k);  // permanently charted
+      // Alert unsettled seekers in this hex
+      for (const seeker of this.zylonSeekers) {
+        if (seeker.alive && seeker.state === 'SEARCHING'
+            && seeker.q === q && seeker.r === r
+            && !seeker._homingTarget) {
+          seeker._homingTarget = { q: scan.starbase.q, r: scan.starbase.r };
+        }
+      }
+    }
+  }
+
+  /** All hexes at exactly `dist` steps from (q0, r0). */
+  _hexesAtDistance(q0, r0, dist) {
+    const results = [];
+    for (const hex of this.hexes.values()) {
+      if (HexMath.distance({ q: q0, r: r0 }, { q: hex.q, r: hex.r }) === dist) {
+        results.push({ q: hex.q, r: hex.r });
+      }
+    }
+    return results;
+  }
+
+  /** Scan completed normally — restore FOW for scan-revealed sectors. */
+  _endPowerScan(scan) {
+    scan._ended = true;
+    for (const k of scan.scanKeys) this.scanVisible.delete(k);
+    if (window.SubspaceComm) {
+      window.SubspaceComm.send(
+        scan.starbase.name.toUpperCase(),
+        window.SubspaceComm.clockStr(),
+        'POWER SCAN COMPLETE — INTELLIGENCE RELAYED TO ALL UNITS'
+      );
+    }
+  }
+
+  /** Scan interrupted (Zylon incursion or energy exhaustion). */
+  _interruptPowerScan(scan, reason) {
+    scan._ended = true;
+    for (const k of scan.scanKeys) this.scanVisible.delete(k);
+    if (window.SubspaceComm) {
+      window.SubspaceComm.send(
+        scan.starbase.name.toUpperCase(),
+        window.SubspaceComm.clockStr(),
+        reason
+      );
+    }
   }
 
   /** Returns all Zylon Seekers currently in the given galaxy sector. */

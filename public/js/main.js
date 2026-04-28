@@ -25,6 +25,8 @@
   // Set by init() when fast-forward has placed Zylons at a starbase before gameplay starts.
   // Consumed on the first keypress so the 3-tone subspace alert plays once audio is live.
   let _pendingStartupAlert = null;
+  let _powerScanUnlocked = false;  // unlocked after first sector clear
+  window._powerScanUnlocked = false; // mirrored on window so SectorView HUD can read it
 
   // ---- Subspace message log ----
   const SubspaceComm = window.SubspaceComm = (() => {
@@ -45,6 +47,16 @@
       if (_sectorLive && SectorView.showMessage) SectorView.showMessage(from, stardate, text);
       // Play the 3-tone subspace chime for every incoming message — including remote sectors.
       if (typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
+      // Milestone: first sector clear → unlock Power Scan technology
+      if (!_powerScanUnlocked && text.includes('ALL ZYLON FORCES ELIMINATED')) {
+        _powerScanUnlocked = true;
+        window._powerScanUnlocked = true;
+        setTimeout(() => {
+          const clk = SubspaceComm.clockStr();
+          SubspaceComm.send('EARTH COMMAND', clk,
+            'NEW TECHNOLOGY ONLINE — POWER SCAN ARRAY — DOCK AT ANY STARBASE AND PRESS P');
+        }, 3000);
+      }
     }
     function getLog() { return [..._log]; }
     function _renderLog() {
@@ -223,6 +235,38 @@
             _cancelWarpReadyMode();
             galaxyMap._warpTo(t);
           }
+          return;
+        }
+        // P key — Power Scan
+        // stopImmediatePropagation prevents SectorView's own keydown listener from
+        // also receiving this event (it previously had P = pause).
+        if (e.code === 'KeyP') {
+          e.stopImmediatePropagation();
+          if (!_powerScanUnlocked) return; // tech not yet unlocked
+          if (!_sectorLive) return;
+
+          if (!SectorView.atDockPosition) { showAlert('DOCK AT A STARBASE TO INITIATE POWER SCAN'); return; }
+          const sb = SectorView.currentStarbase;
+          if (!sb || sb.state !== 'active') { showAlert('STARBASE OFFLINE'); return; }
+          if (sb.underAttack) { showAlert('STARBASE UNDER ATTACK — SCAN UNAVAILABLE'); return; }
+          // Check for Zylon presence in this galaxy sector
+          const { q, r } = galaxyMap.playerPos;
+          const hasZylons =
+            galaxyMap.zylonSeekers.some(s  => s.alive && s.q === q && s.r === r) ||
+            galaxyMap.zylonWarriors.some(w => w.alive && w.q === q && w.r === r) ||
+            galaxyMap.zylonBeacons.some(b  => b.active && b.q === q && b.r === r);
+          if (hasZylons) { showAlert('ZYLON PRESENCE DETECTED — SCAN UNAVAILABLE'); return; }
+          if ((sb.inventory?.energy ?? 0) < GameConfig.powerScan.energyCost) {
+            showAlert('INSUFFICIENT STARBASE ENERGY FOR POWER SCAN'); return;
+          }
+          if (galaxyMap.activePowerScans?.some(s => s.starbase === sb)) {
+            showAlert('POWER SCAN ALREADY IN PROGRESS'); return;
+          }
+          // All conditions met — initiate scan
+          galaxyMap.initiatePowerScan(sb);
+          const clk = SubspaceComm.clockStr();
+          SubspaceComm.send(sb.name.toUpperCase(), clk,
+            'INITIATING POWER SCAN — MONITORING FOR ZYLON SIGNATURES');
           return;
         }
       }
