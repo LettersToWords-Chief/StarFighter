@@ -100,11 +100,14 @@
   // ---- Warp Ready Mode ----
   // Arms the warp drive: shows the destination diamond in the cockpit and starts the 30s
   // countdown. Player must align their ship to the diamond and press E to engage.
+  // Returns true if warp mode was armed, false if rejected (e.g. insufficient fuel).
+  // Callers that open the map should check the return value before closing it,
+  // so the player can read the rejection alert without losing context.
   function _beginWarpReadyMode(t) {
     _cancelWarpReadyMode();
     const from = galaxyMap.playerPos;
     const fc   = HexMath.fuelCost(from, t);
-    if (playerFuel < fc) { showAlert('INSUFFICIENT FUEL'); return; }
+    if (playerFuel < fc) { showAlert('INSUFFICIENT FUEL'); return false; }
     _warpReady       = true;
     _warpReadyTarget = t;
     // Compute 3D direction from player hex to destination hex (XZ plane)
@@ -120,6 +123,7 @@
       if (_sectorLive) SectorView.updateWarpModeTimer(countdown);
       if (countdown <= 0) _cancelWarpReadyMode();
     }, 1000);
+    return true;
   }
 
   function _cancelWarpReadyMode() {
@@ -197,6 +201,9 @@
 
     // Loss condition callbacks
     SectorView.onLoss       = (reason) => _triggerLoss(reason);
+    // Keep playerFuel in sync whenever docking restores energy in SectorView.
+    // Without this, _energy (the E-bar) refills but playerFuel (the warp check) stays depleted.
+    SectorView.onRefuel     = (fuel)   => { playerFuel = fuel; updateHUD(); };
     galaxyMap.onCapitalLost = ()       => _triggerLoss('CAPITAL_LOST');
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
@@ -222,8 +229,9 @@
         if (e.code === 'KeyH') {
           const t = galaxyMap.getTarget();
           if (!t) { showAlert('SELECT A WARP TARGET FIRST'); return; }
-          _beginWarpReadyMode(t);
-          closeMap('front');
+          // Only close the map if the warp was actually armed — keeps the
+          // map open (and the rejection alert readable) if fuel is too low.
+          if (_beginWarpReadyMode(t)) closeMap('front');
           return;
         }
       } else {

@@ -50,6 +50,7 @@ const SectorView = (() => {
   let _onExit = null, _onMapToggle = null;
   let _lastTime = 0;
   let _overlayCanvas = null, _overlayCtx = null;
+  let _onRefuel  = null;   // (newEnergy: number) => void — fired when docking restores energy
 
   // Flight
   let _speed = 0;
@@ -992,6 +993,9 @@ const SectorView = (() => {
     } else {
       _energy = cfg.maxFuel;
     }
+    // Notify main.js so playerFuel stays in sync with _energy after refuelling
+    _onRefuel?.(_energy);
+    _playerFuel = _energy;  // keep internal copy consistent too
 
     // ── 2. TORPEDOES ──
     if (sb) {
@@ -4887,8 +4891,10 @@ const SectorView = (() => {
            get kills()         { return _kills;         },
            get hullHP()        { return _hullHP;         },
            set hullHP(v)       { _hullHP = Math.max(0, Math.min(GameConfig.player.hullHP ?? 600, v)); },
+           get energy()        { return _energy;        },
            get onLoss()        { return _onLoss;        },
            set onLoss(fn)      { _onLoss = fn;          },
+           set onRefuel(fn)    { _onRefuel = fn;        },
            get atDockPosition(){ return isAtDockingPosition(); },
            get currentStarbase(){ return _currentStarbase; } };
 })();
