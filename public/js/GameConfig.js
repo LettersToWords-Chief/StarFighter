@@ -341,6 +341,9 @@ const GameConfig = Object.freeze({
     /** Seconds to produce one unit/pair (Seeker, Warrior, or sub-Spawner). */
     spawnerSpawnIntervalSec:     60,
 
+    /** Seconds after a transit sub-Spawner is born before it hyperjumps to its beacon sector. */
+    spawnerBootSec:              30,
+
     /**
      * Simulated seconds per step in the synchronous fast-forward loop.
      * 45s / 15 = 3 steps per Seeker jump; 60s / 15 = 4 steps per Spawner cycle.

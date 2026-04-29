@@ -800,7 +800,19 @@ class GalaxyMap {
 
   /** Called by ZylonSpawner when it creates a new sub-Spawner. */
   _onSubSpawnerCreated(spawner) {
-    // Already pushed into this.zylonSpawners by the parent — nothing extra needed
+    // Already pushed into this.zylonSpawners by the parent — nothing extra needed.
+    // Notify main.js so it can wire the SectorView arrival handler when the spawner
+    // eventually hyperjumps into the player's sector.
+    if (this.onSubSpawnerCreated) this.onSubSpawnerCreated(spawner);
+  }
+
+  /**
+   * Called by ZylonSpawner.tick() when a transit spawner completes its boot delay
+   * and the player is currently in the beacon's sector.
+   * Notifies main.js, which delegates to SectorView.notifyTransitSpawnerArrived().
+   */
+  _onTransitSpawnerArrived(spawner) {
+    if (this.onTransitSpawnerArrived) this.onTransitSpawnerArrived(spawner);
   }
 
   // =========================================================

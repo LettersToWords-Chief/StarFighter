@@ -4347,6 +4347,64 @@ const SectorView = (() => {
   let _warpDecelTimer = 0;  // kept for compat — actual decel uses _warpMult
 
   // ---- Public ----
+
+  /**
+   * Called by main.js when a transit sub-Spawner hyperjumps into the player's current
+   * sector WHILE the player is already here.  Spawns the amber 3D ship 200u ahead of
+   * the beacon's current orbital path and wires the standard merge callback.
+   *
+   * @param {ZylonSpawner} galaxySpawner  — the transit spawner (phase === 'arriving')
+   */
+  function notifyTransitSpawnerArrived(galaxySpawner) {
+    if (!_scene || !_running) return;
+    if (_spawnerShip && !_spawnerShip.dead) return; // already managing one this session
+
+    // Find the beacon 3D ship this spawner is destined to merge with.
+    // Beacon ships carry the ZylonSeeker as _galaxyRef; the seeker holds .beacon.
+    const beaconShip = _zylons.find(z =>
+      !z.dead && z.type === 'seeker_beacon' &&
+      z._galaxyRef?.beacon === galaxySpawner._destBeacon
+    );
+
+    // Place spawner 200u ahead of the beacon's current orbital tangent direction
+    let spawnPos;
+    if (beaconShip) {
+      const angle   = beaconShip._bOrbitAngle;
+      const dir     = beaconShip._bOrbitDir;
+      const tangent = new THREE.Vector3(
+        (-Math.sin(angle) * beaconShip._orbitU.x + Math.cos(angle) * beaconShip._orbitV.x) * dir,
+        (-Math.sin(angle) * beaconShip._orbitU.y + Math.cos(angle) * beaconShip._orbitV.y) * dir,
+        (-Math.sin(angle) * beaconShip._orbitU.z + Math.cos(angle) * beaconShip._orbitV.z) * dir
+      ).normalize();
+      spawnPos = beaconShip.mesh.position.clone().addScaledVector(tangent, 200);
+    } else {
+      // Matching beacon not visible in this session — place at a random orbit-radius point
+      const a    = Math.random() * Math.PI * 2;
+      const DIST = GameConfig.zylon.beaconPlacementUnits ?? 750;
+      spawnPos   = new THREE.Vector3(Math.cos(a) * DIST, 0, Math.sin(a) * DIST);
+    }
+
+    const spShip = new ZylonShip(_scene, spawnPos, 'spawner', galaxySpawner.clanId);
+    spShip._chaseBeaconShip = beaconShip ?? null;
+
+    // Mirror the merge callback from enter() — galaxy and sector state are updated together
+    spShip._onMerge = (sShip, bShip) => {
+      const newClanId = ZylonSpawner._nextClanId++;
+      sShip.activateMerge(newClanId);
+      if (bShip && !bShip.dead) { bShip.detach(); }
+      _zylons = _zylons.filter(z => z !== bShip);
+      galaxySpawner.onMerged(newClanId);
+      galaxySpawner._onDefenderBirth = (type) => _triggerDefenderBirth(sShip, type, galaxySpawner);
+      galaxySpawner._onSpawnerKilled = () => _cascadeSpawnerKill(sShip.clanId ?? newClanId);
+    };
+
+    _spawnerShip      = spShip;
+    _spawnerGalaxyRef = galaxySpawner;
+    _zylons.push(spShip);
+    _targets++;
+    _queueTicker('ALERT \u2014 ZYLON AMBER SPAWNER HAS ARRIVED IN SECTOR', 'spawner_arrival', 0);
+  }
+
   function enter({ canvas, sector, arrivalOffset = null, arrivalSpeed = 0, arrivalVelocity, throttleSpeed, onExit, onMapToggle, seekerGalaxyRefs = [], warriorGalaxyRefs = [], spawnerGalaxyRef = null }) {
     if (_running) return;
     _canvas       = canvas;
@@ -4818,7 +4876,7 @@ const SectorView = (() => {
   }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
-           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifyTransitSpawnerArrived,
             get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },

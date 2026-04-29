@@ -46,8 +46,9 @@ class ZylonSpawner {
     this._bloomSent = 0;
 
     // ── Lifecycle phase ───────────────────────────────────
-    this._phase        = 'active';  // 'transit' | 'active'
+    this._phase        = 'active';  // 'transit' | 'arriving' | 'active'
     this._destBeacon   = null;      // for transit spawners: the beacon they will merge with
+    this._transitTimer = 0;         // seconds since sub-Spawner was born (boot delay)
     this._defenseQueued = false;    // true once the initial defender sequence is queued
 
     // ── Defender inventory (galaxy-side, player-independent) ──────────────
@@ -80,7 +81,25 @@ class ZylonSpawner {
 
   tick(dt, galaxy) {
     if (!this.alive) return;
-    if (this._phase === 'transit') return;  // transit spawners don't produce until merged
+    // ── Transit phase: 30-second boot, then hyperjump to beacon sector ─────────
+    if (this._phase === 'transit') {
+      if (!this._destBeacon?.active) { this.alive = false; return; } // beacon lost mid-transit
+      this._transitTimer += dt;
+      if (this._transitTimer < GameConfig.zylon.spawnerBootSec) return;
+      // Boot complete — teleport to the beacon's galaxy sector
+      this.q = this._destBeacon.q;
+      this.r = this._destBeacon.r;
+      const playerHere = galaxy.playerPos.q === this.q && galaxy.playerPos.r === this.r;
+      if (!playerHere) {
+        this._instantMerge(galaxy);
+      } else {
+        this._phase = 'arriving';
+        galaxy._onTransitSpawnerArrived(this);
+      }
+      return;
+    }
+    // ── Arriving phase: SectorView is running the 3D merge; wait for onMerged() ─
+    if (this._phase === 'arriving') return;
 
     const isFastForwardBloom = galaxy.fastForwarding && this._bloomSent < 6;
     // Peek at next queued job's interval (replacements use 30s, normal is 60s)
@@ -323,12 +342,26 @@ class ZylonSpawner {
   // MERGE & DEFENDER CALLBACKS
   // ─────────────────────────────────────────────
 
+  /**
+   * Galaxy-level instant merge — called when the player is NOT in the sector.
+   * Deactivates the beacon (it is "absorbed") and switches the spawner to active.
+   */
+  _instantMerge(galaxy) {
+    if (GameConfig.debug.spawner) {
+      console.log(`[Spawner] clan ${this.clanId} instant-merged at (${this.q},${this.r}) — player absent`);
+    }
+    this._destBeacon.destroy();   // sets beacon.active = false; filtered next GalaxyMap pass
+    this._phase        = 'active';
+    this._destBeacon   = null;
+    this._produceTimer = 0;        // start fresh production cadence
+  }
+
   /** Called by SectorView when the transit spawner catches and merges with its beacon in 3D. */
   onMerged(newClanId) {
-    this._phase      = 'active';
-    this._destBeacon = null;
-    this.clanId      = newClanId;   // new clan identity — all future units use this ID
-    this._produceTimer = 0;         // start fresh production cadence
+    this._phase        = 'active';
+    this._destBeacon   = null;
+    this.clanId        = newClanId;   // new clan identity — all future units use this ID
+    this._produceTimer = 0;           // start fresh production cadence
   }
 
   /** Called by SectorView when an on-site defender is destroyed. Decrements live count;

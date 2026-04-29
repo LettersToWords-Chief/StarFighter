@@ -188,6 +188,13 @@
       }
     };
 
+    // When a transit sub-Spawner finishes its boot delay and hyperjumps into the player's
+    // current sector, hand it off to SectorView for the 3D arrival and merge sequence.
+    galaxyMap.onTransitSpawnerArrived = (spawner) => {
+      if (!_sectorLive) return;
+      SectorView.notifyTransitSpawnerArrived(spawner);
+    };
+
     // Loss condition callbacks
     SectorView.onLoss       = (reason) => _triggerLoss(reason);
     galaxyMap.onCapitalLost = ()       => _triggerLoss('CAPITAL_LOST');
