@@ -53,7 +53,7 @@
         window._powerScanUnlocked = true;
         setTimeout(() => {
           const clk = SubspaceComm.clockStr();
-          SubspaceComm.send('EARTH COMMAND', clk,
+          SubspaceComm.send('CENTRAL COMMAND', clk,
             'NEW TECHNOLOGY ONLINE — POWER SCAN ARRAY — DOCK AT ANY STARBASE AND PRESS P');
         }, 3000);
       }
@@ -510,7 +510,10 @@
   function _triggerLoss(reason) {
     if (_gameLost) return;
     _gameLost = true;
+    // Halt both simulation loops so nothing continues behind the postmortem screen
     if (_sectorLive) SectorView.pause();
+    if (galaxyMap) galaxyMap.frozen = true;
+    if (typeof SoundManager !== 'undefined') SoundManager.stopRedAlert();
     const tc = Math.floor(SectorView.galacticClock || 0);
     const hh = String(Math.floor(tc / 3600)).padStart(2,'0');
     const mm = String(Math.floor((tc % 3600) / 60)).padStart(2,'0');

@@ -197,7 +197,7 @@ class GalaxyMap {
     const capitalRes = SECTOR_RESOURCE.nebula;
     const capital = new Starbase({
       q: 0, r: 0,
-      name: 'Earth Command',
+      name: 'Central Command',
       isCapital: true,
       sensorRange: 1,
       produces: capitalRes,
@@ -916,7 +916,7 @@ class GalaxyMap {
       window.SubspaceComm.send(
         scan.starbase.name.toUpperCase(),
         window.SubspaceComm.clockStr(),
-        'POWER SCAN COMPLETE — INTELLIGENCE RELAYED TO ALL UNITS'
+        'POWER SCAN COMPLETE — SCAN DATA UPLOADED TO ALL STATIONS'
       );
     }
   }

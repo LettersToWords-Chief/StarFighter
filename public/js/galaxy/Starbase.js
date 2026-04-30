@@ -470,6 +470,7 @@ class Starbase {
    */
   onSectorCleared() {
     this._seekerDetected = false;
+    this.underAttack     = false;   // combat is over — lift the scan lock
   }
 
   /** Internal helper — sends via window.SubspaceComm if available. */

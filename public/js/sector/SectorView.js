@@ -1946,21 +1946,7 @@ const SectorView = (() => {
             : `${_sectorName} — ALL ZYLON FORCES ELIMINATED`;
           window.SubspaceComm.send(clearFrom, clk, clearMsg);
         }
-        // Fog-of-war intelligence: total remaining Zylon units across the galaxy
-        if (window.GalaxyRef) {
-          const gm = window.GalaxyRef;
-          const remaining =
-            (gm.zylonSeekers?.filter(s => s.alive).length  ?? 0) * 2 +
-            (gm.zylonWarriors?.filter(w => w.alive).length ?? 0) +
-            (gm.zylonSpawners?.filter(s => s.alive).length ?? 0);
-          if (remaining > 0) {
-            _queueTicker(
-              `INTELLIGENCE: ESTIMATED ${remaining} ZYLON UNIT${remaining > 1 ? 'S' : ''} STILL ACTIVE IN GALAXY \u2014 KEEP SEARCHING`,
-              'fog_intel', 0);
-          } else {
-            _queueTicker('INTELLIGENCE: NO FURTHER ZYLON ACTIVITY DETECTED \u2014 ALL FORCES ELIMINATED', 'fog_intel', 0);
-          }
-        }
+
         // Reset detection flag on starbase so next Zylon arrival triggers a fresh message
         if (_currentStarbase?.onSectorCleared) _currentStarbase.onSectorCleared();
       }
@@ -4709,6 +4695,27 @@ const SectorView = (() => {
     cancelAnimationFrame(_rafId);
     _unbind();
     _rmOverlay();
+
+    // ── Spawner defender handoff ──────────────────────────────────────────────
+    // Before tearing down the 3D scene, write all live defenders (and any still
+    // queued in the birth queue) back into the galaxy spawner's _pendingDefenders.
+    // This ensures they re-appear in formation on the next sector entry.
+    // Also disconnect the live sector callbacks so that defenders produced while
+    // the player is away land in _pendingDefenders (not a stale closure).
+    if (_spawnerGalaxyRef?.alive) {
+      _spawnerGalaxyRef._onDefenderBirth = null;
+      _spawnerGalaxyRef._onSpawnerKilled = null;
+      // Clear first — prevents exponential accumulation across multiple visits
+      _spawnerGalaxyRef._pendingDefenders = [];
+      for (const d of _activeDefenders) {
+        if (!d.ship.dead) _spawnerGalaxyRef._pendingDefenders.push(d.defType);
+      }
+      for (const b of _birthQueue) {
+        if (!b.warpAway && b.defType) _spawnerGalaxyRef._pendingDefenders.push(b.defType);
+      }
+    }
+    _activeDefenders = [];
+
     if (_renderer) { _renderer.dispose(); _renderer = null; }
     if (_glCanvas?.parentElement) { _glCanvas.parentElement.removeChild(_glCanvas); _glCanvas = null; }
     _sbGroup = null; _starsMesh = null; _dustMesh = null;
