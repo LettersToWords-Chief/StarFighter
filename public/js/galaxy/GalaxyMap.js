@@ -69,6 +69,8 @@ class GalaxyMap {
     this._initGrid();
     this._initInput();
     this.frozen = false;   // set true by main.js intro screen; skips simulation updates
+    this._victoryFired  = false;
+    this._winCheckTimer = 0;
     this._loop();
   }
 
@@ -105,7 +107,6 @@ class GalaxyMap {
     this._buildLanes();
     this._spawnSupplyShips();
     this._placeZylonSpawner();
-    this._fastForwardZylons();   // always runs — synchronous, invisible, completes before frame 1
     this._updateVisibility();
     this._centerOrigin();
   }
@@ -649,6 +650,12 @@ class GalaxyMap {
         if (!this.frozen) {
           this._updateSupplyShips(dt);
           this._updateZylons(dt);
+          // Check win condition every 2 seconds
+          this._winCheckTimer += dt;
+          if (this._winCheckTimer >= 2) {
+            this._winCheckTimer = 0;
+            this._checkWinCondition();
+          }
         }
 
         // Capital loss detection — fires once when capital goes dormant
@@ -747,6 +754,30 @@ class GalaxyMap {
       steps++;
     }
     this.fastForwarding = false;
+    // Clear any defenders that accumulated during the bootstrap sim — they should not
+    // pre-populate the sector on the player's very first entry.  The in-game audit
+    // cycle will queue real defenders within seconds of gameplay starting.
+    for (const sp of this.zylonSpawners) {
+      sp._pendingDefenders = [];
+      sp._defenderActive   = { warrior: 0, tie: 0, bird: 0 };
+      sp._defenseQueued    = false; // allow priority 2.5 to re-queue defenders at interval:60
+      sp._inventoryTimer   = 0;    // let audit fire naturally; priority 2.5 handles first queue
+    }
+  }
+
+  /** Fires onVictory once all Zylon units have been eliminated. */
+  _checkWinCondition() {
+    if (this._victoryFired) return;
+    // Need at least one spawner to have existed (can't win before the game starts)
+    if (this.zylonSpawners.length === 0) return;
+    const allGone =
+      this.zylonSpawners.every(sp => !sp.alive)  &&
+      this.zylonSeekers.every(s  => !s.alive)    &&
+      this.zylonWarriors.every(w => !w.alive)    &&
+      this.zylonBeacons.every(b  => !b.active);
+    if (!allGone) return;
+    this._victoryFired = true;
+    this.onVictory?.();
   }
 
   /** Tick all Zylon units. Called every frame (and during fast-forward). */
@@ -916,7 +947,8 @@ class GalaxyMap {
       window.SubspaceComm.send(
         scan.starbase.name.toUpperCase(),
         window.SubspaceComm.clockStr(),
-        'POWER SCAN COMPLETE — SCAN DATA UPLOADED TO ALL STATIONS'
+        'POWER SCAN COMPLETE — SCAN DATA UPLOADED TO ALL STATIONS',
+        { silent: true }
       );
     }
   }
@@ -929,7 +961,8 @@ class GalaxyMap {
       window.SubspaceComm.send(
         scan.starbase.name.toUpperCase(),
         window.SubspaceComm.clockStr(),
-        reason
+        reason,
+        { silent: true }
       );
     }
   }

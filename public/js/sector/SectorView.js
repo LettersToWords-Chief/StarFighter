@@ -95,6 +95,7 @@ const SectorView = (() => {
   let _energy       = 9999;
   let _torpedoCount = 200;   // current torpedo inventory
   let _kills   = 0;
+let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   let _targets = 0;
   let _currentStarbase = null;  // Starbase object for the sector we're in
 
@@ -978,6 +979,7 @@ const SectorView = (() => {
 
   // ---- Repair & Refuel (energy + torpedoes only) ----
   function _repairAndRefuel() {
+    _dockCount++;  // count every dock event for end-game scoring
     const sb  = _currentStarbase;
     const cfg = GameConfig.player;
     const log = [];  // collects messages about what was done / unavailable
@@ -4896,6 +4898,7 @@ const SectorView = (() => {
            get shieldCharge()  { return _shieldCharge;  },
            get shieldCapacity(){ return _shieldCapacity;},
            get kills()         { return _kills;         },
+           get dockCount()     { return _dockCount;     },
            get hullHP()        { return _hullHP;         },
            set hullHP(v)       { _hullHP = Math.max(0, Math.min(GameConfig.player.hullHP ?? 600, v)); },
            get energy()        { return _energy;        },

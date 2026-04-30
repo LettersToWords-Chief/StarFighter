@@ -108,7 +108,10 @@ class ZylonSeeker {
       if (!this._trackReady) {
         // Phase 1: 30s hold — seeker is "charging up"
         this._trackInitTimer += dt;
-        if (this._trackInitTimer >= 30) this._trackReady = true;
+        if (this._trackInitTimer >= 30) {
+          this._trackReady    = true;
+          this._trackWaitTimer = 0; // start patience clock
+        }
         return; // hold position
       }
       // Phase 2: latch onto a cargo ship in this sector
@@ -128,8 +131,20 @@ class ZylonSeeker {
           this._moveTo(dest.q, dest.r);
           this._evaluateSector(galaxy);
         }
+      } else {
+        // No cargo ship available — count patience time
+        this._trackWaitTimer = (this._trackWaitTimer ?? 0) + dt;
+        if (this._trackWaitTimer >= 60) {
+          // Gave up waiting — exit tracking and resume pachinko movement
+          this._isTracking     = false;
+          this._trackReady     = false;
+          this._trackInitTimer = 0;
+          this._trackWaitTimer = 0;
+          this._trackShip      = null;
+          // Fall through to normal pachinko movement below
+        }
       }
-      return; // always skip the normal pachinko timer while tracking
+      if (this._isTracking) return; // still tracking — skip normal movement
     }
     // Tracking but fast-forwarding: hold position (prevents cap breach via pachinko)
     if (this._isTracking) return;

@@ -133,6 +133,30 @@
     </div>
   </div>
 
+  <!-- Victory screen — shown when all Zylons are eliminated -->
+  <div id="victory">
+    <div id="vc-vignette"></div>
+    <div id="vc-content">
+      <div id="vc-prefix">COMMAND TO STAR FIGHTER</div>
+      <h1 id="vc-header">MISSION COMPLETE</h1>
+      <p id="vc-flavor">All Zylon forces have been eliminated. The galaxy is safe.</p>
+      <div id="vc-rank-block">
+        <div id="vc-rank-label">YOUR NEW RANK</div>
+        <div id="vc-rank">— —</div>
+      </div>
+      <div id="vc-stats">
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-kills">0</div><div class="vc-stat-label">ZYLONS DESTROYED</div></div>
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-starbases">0</div><div class="vc-stat-label">STARBASES PRESERVED</div></div>
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-time">00:00:00</div><div class="vc-stat-label">MISSION TIME</div></div>
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-docks">0</div><div class="vc-stat-label">STARBASE DOCKINGS</div></div>
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-sectors">0</div><div class="vc-stat-label">SECTORS VISITED</div></div>
+        <div class="vc-stat"><div class="vc-stat-val" id="vc-hull">100%</div><div class="vc-stat-label">HULL INTEGRITY</div></div>
+      </div>
+      <div id="vc-score-block">MISSION SCORE: <span id="vc-score">0</span></div>
+      <button id="vc-retry">[ NEW MISSION ]</button>
+    </div>
+  </div>
+
   <!-- Scripts -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>

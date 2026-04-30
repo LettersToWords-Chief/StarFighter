@@ -21,6 +21,7 @@
   let _warpReadyInterval = null; // setInterval handle for 30s countdown
   const currentDifficulty = 'cadet';
   let _gameLost       = false;
+  let _gameWon        = false;
   let _sectorsVisited = 0;
   // Set by init() when fast-forward has placed Zylons at a starbase before gameplay starts.
   // Consumed on the first keypress so the 3-tone subspace alert plays once audio is live.
@@ -40,13 +41,13 @@
       return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
     }
 
-    function send(from, stardate, text) {
+    function send(from, stardate, text, opts = {}) {
       const entry = { from, clock: stardate, text };
       _log.unshift(entry);
       _renderLog();
       if (_sectorLive && SectorView.showMessage) SectorView.showMessage(from, stardate, text);
-      // Play the 3-tone subspace chime for every incoming message — including remote sectors.
-      if (typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
+      // Play the 3-tone subspace chime — suppressed for silent messages (e.g. power scan).
+      if (!opts.silent && typeof SoundManager !== 'undefined') SoundManager.starbsMessage();
       // Milestone: first sector clear → unlock Power Scan technology
       if (!_powerScanUnlocked && text.includes('ALL ZYLON FORCES ELIMINATED')) {
         _powerScanUnlocked = true;
@@ -140,29 +141,11 @@
     window.GalaxyRef = galaxyMap;   // exposes live Zylon count to SectorView fog-intelligence
     galaxyMap.getStardate = () => _stardate;
 
-    // ---- Freeze simulation during intro screen ----
-    // Fast-forward already ran in the constructor. Hold everything else
-    // until the player clicks BEGIN MISSION.
+    // Freeze simulation until the player clicks BEGIN MISSION.
+    // Fast-forward runs at that point, not here.
     galaxyMap.frozen = true;
 
-    // ---- Deferred startup alert — fast-forward fires before audio/callbacks are ready ----
-    // The GalaxyMap constructor runs _fastForwardZylons() synchronously, which may place a
-    // Zylon beacon at a starbase and set galaxy.redAlert=true BEFORE onRedAlert is wired.
-    // Capture that event here; _beginGame will display it with audio once the screen opens.
     let _startupAlertText = '';
-    if (galaxyMap.redAlert) {
-      const beacon = galaxyMap.zylonBeacons.find(b => b.active && b.type === 'starbase');
-      if (beacon) {
-        const sb   = galaxyMap.starbases.find(s => s.q === beacon.q && s.r === beacon.r);
-        const name = (sb?.name ?? `SECTOR ${beacon.q},${beacon.r}`).toUpperCase();
-        _pendingStartupAlert = { q: beacon.q, r: beacon.r, name };
-        SubspaceComm.send(
-          'CENTRAL COMMAND',
-          SubspaceComm.clockStr(),
-          `ZYLON INCURSION DETECTED — ${name} UNDER ATTACK`);
-        _startupAlertText = `⚠ ZYLON INCURSION DETECTED — ${name} UNDER ATTACK`;
-      }
-    }
 
     // Start Three.js glass-sheet crawl (defer so flexbox layout has real dimensions)
     const crawlWrap = document.getElementById('intro-crawl-wrap');
@@ -191,6 +174,8 @@
         SectorView.spawnZylons(1, 'seeker_bird',   seeker);
       }
     };
+
+    galaxyMap.onVictory = () => _triggerWin();
 
     // When a transit sub-Spawner finishes its boot delay and hyperjumps into the player's
     // current sector, hand it off to SectorView for the 3D arrival and merge sequence.
@@ -281,7 +266,7 @@
           galaxyMap.initiatePowerScan(sb);
           const clk = SubspaceComm.clockStr();
           SubspaceComm.send(sb.name.toUpperCase(), clk,
-            'INITIATING POWER SCAN — MONITORING FOR ZYLON SIGNATURES');
+            'INITIATING POWER SCAN — MONITORING FOR ZYLON SIGNATURES', { silent: true });
           return;
         }
       }
@@ -303,14 +288,30 @@
     const intro = document.getElementById('intro-overlay');
     if (intro) intro.style.display = 'none';
 
-    // Unfreeze simulation
-    galaxyMap.frozen = false;
-
-    // Start the stardate clock now that time is actually running
-    _stardateInterval = setInterval(() => { _stardate++; }, 1000);
-
     // Initialize audio — the click is the required user gesture
     if (typeof SoundManager !== 'undefined') SoundManager.init();
+
+    // Run fast-forward NOW — after the player clicks Begin Mission.
+    // This keeps the galactic clock honest: no Zylon activity before game start.
+    galaxyMap._fastForwardZylons();
+
+    // Detect any beacon placed by fast-forward and queue the startup alert
+    if (galaxyMap.redAlert) {
+      const beacon = galaxyMap.zylonBeacons.find(b => b.active && b.type === 'starbase');
+      if (beacon) {
+        const sb   = galaxyMap.starbases.find(s => s.q === beacon.q && s.r === beacon.r);
+        const name = (sb?.name ?? `SECTOR ${beacon.q},${beacon.r}`).toUpperCase();
+        _pendingStartupAlert = { q: beacon.q, r: beacon.r, name };
+        SubspaceComm.send(
+          'CENTRAL COMMAND',
+          SubspaceComm.clockStr(),
+          `ZYLON INCURSION DETECTED — ${name} UNDER ATTACK`);
+      }
+    }
+
+    // Unfreeze simulation and start the stardate clock
+    galaxyMap.frozen = false;
+    _stardateInterval = setInterval(() => { _stardate++; }, 1000);
 
     // Enter the cockpit
     _enterSector({ q: 0, r: 0 });
@@ -504,6 +505,75 @@
       if (galaxyMap.hexes.has(key) && !(pos.q === target.q && pos.r === target.r)) return pos;
     }
     return target;
+  }
+
+  // ---- Victory ----
+  function _triggerWin() {
+    if (_gameWon) return;
+    _gameWon = true;
+    if (_sectorLive) SectorView.pause();
+    if (galaxyMap)   galaxyMap.frozen = true;
+    if (typeof SoundManager !== 'undefined') SoundManager.stopRedAlert();
+
+    const kills       = SectorView.kills     || 0;
+    const docks       = SectorView.dockCount || 0;
+    const sectors     = _sectorsVisited      || 1;
+    const tc          = Math.floor(SectorView.galacticClock || 0);
+    const timeMinutes = tc / 60;
+    const hull        = Math.max(0, Math.min(600, SectorView.hullHP || 600));
+    const hullPct     = (hull / 600) * 100;
+    const sbPreserved = (galaxyMap?.starbases || []).filter(s => s.state === 'active').length;
+
+    let score = kills       * 20
+              + sbPreserved * 50
+              + Math.floor(hullPct * 0.5)
+              - docks       * 30
+              - Math.max(0, sectors - kills) * 3
+              - Math.floor(timeMinutes * 3);
+    score = Math.max(0, Math.min(1000, score));
+
+    const RANKS = [
+      { min: 900, name: 'STAR COMMANDER' },
+      { min: 800, name: 'COMMANDER'      },
+      { min: 700, name: 'CAPTAIN'        },
+      { min: 600, name: 'WARRIOR'        },
+      { min: 500, name: 'LIEUTENANT'     },
+      { min: 400, name: 'ACE'            },
+      { min: 300, name: 'PILOT'          },
+      { min: 200, name: 'ENSIGN'         },
+      { min: 100, name: 'NOVICE'         },
+      { min:  50, name: 'ROOKIE'         },
+      { min:   0, name: 'GARBAGE SCOW CAPTAIN' },
+    ];
+    const rankEntry   = RANKS.find(r => score >= r.min) || RANKS[RANKS.length - 1];
+    const nextMin     = RANKS[RANKS.indexOf(rankEntry) - 1]?.min ?? (rankEntry.min + 100);
+    const span        = nextMin - rankEntry.min;
+    const scoreInRank = score - rankEntry.min;
+    const classNum    = Math.max(1, 5 - Math.floor((scoreInRank / span) * 5));
+
+    const hh = String(Math.floor(tc / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((tc % 3600) / 60)).padStart(2, '0');
+    const ss = String(tc % 60).padStart(2, '0');
+
+    _showVictory(score, rankEntry.name, classNum, {
+      kills, sectors, docks, starbases: sbPreserved,
+      time: `${hh}:${mm}:${ss}`,
+      hull: Math.floor(hullPct),
+    });
+  }
+
+  function _showVictory(score, rank, cls, stats) {
+    document.getElementById('vc-kills').textContent     = stats.kills;
+    document.getElementById('vc-sectors').textContent   = stats.sectors;
+    document.getElementById('vc-time').textContent      = stats.time;
+    document.getElementById('vc-docks').textContent     = stats.docks;
+    document.getElementById('vc-starbases').textContent = stats.starbases;
+    document.getElementById('vc-hull').textContent      = stats.hull + '%';
+    document.getElementById('vc-score').textContent     = score;
+    document.getElementById('vc-rank').textContent      = `${rank}  CLASS ${cls}`;
+    const overlay = document.getElementById('victory');
+    overlay.style.display = 'flex';
+    document.getElementById('vc-retry').addEventListener('click', () => location.reload());
   }
 
   // ---- Loss conditions ----

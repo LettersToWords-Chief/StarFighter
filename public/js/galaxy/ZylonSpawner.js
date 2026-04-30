@@ -102,11 +102,16 @@ class ZylonSpawner {
     if (this._phase === 'arriving') return;
 
     const isFastForwardBloom = galaxy.fastForwarding && this._bloomSent < 6;
-    // Peek at next queued job's interval (replacements use 30s, normal is 60s)
-    const queueInterval = this._queue[0]?.interval;
+    // If a warrior (or sub-spawner) signal job is waiting, always use the full spawn interval
+    // so the first pair never arrives in less than 60s regardless of defender queue intervals.
+    const hasSignalJob = this._queue.some(j =>
+      j.type === 'warrior' || (j.type === 'spawner' && j.beaconRef));
+    const queueInterval = hasSignalJob
+      ? GameConfig.zylon.spawnerSpawnIntervalSec
+      : (this._queue[0]?.interval ?? GameConfig.zylon.spawnerSpawnIntervalSec);
     this._produceInterval = isFastForwardBloom
       ? GameConfig.zylon.fastForwardStepSec
-      : (queueInterval ?? GameConfig.zylon.spawnerSpawnIntervalSec);
+      : queueInterval;
 
     this._produceTimer += dt;
 
