@@ -128,19 +128,17 @@ class ZylonSpawner {
     this._processProductionCycle(galaxy);
   }
 
-  /** Compare live defender counts to targets; queue any deficit. */
+  /** Compare live defender counts to targets; produce one of each missing type directly.
+   *  Defenders bypass the main production queue so warrior signal jobs can't starve them. */
   _auditDefenders() {
     const types = ['warrior', 'tie', 'bird'];
     for (const type of types) {
       const deficit = (this._defenderTarget[type] ?? 0) - (this._defenderActive[type] ?? 0);
       if (deficit <= 0) continue;
-      const jobType = `defender_${type}`;
-      const existing = this._queue.find(j => j.type === jobType);
-      if (existing) {
-        existing.remaining = Math.max(existing.remaining, deficit);
-      } else {
-        this._queue.push({ type: jobType, remaining: deficit, interval: 30 });
-      }
+      // Produce directly — no queue, no priority battle
+      this._defenderActive[type] = (this._defenderActive[type] ?? 0) + 1;
+      if (this._onDefenderBirth) this._onDefenderBirth(type);
+      else this._pendingDefenders.push(type);
     }
   }
 
@@ -176,14 +174,6 @@ class ZylonSpawner {
       return;
     }
 
-    // ── Priority 2.5: queue on-site defender sequence once bloom is complete ──
-    if (!this._defenseQueued) {
-      this._defenseQueued = true;
-      this._queue.push({ type: 'defender_warrior', remaining: 2, interval: 60 });
-      this._queue.push({ type: 'defender_tie',     remaining: 1, interval: 60 });
-      this._queue.push({ type: 'defender_bird',    remaining: 1, interval: 60 });
-    }
-
     // ── Priority 3: remaining queue items ──
     if (this._queue.length === 0) return;
     const job = this._queue[0];
@@ -195,21 +185,9 @@ class ZylonSpawner {
         this._onUnitBorn?.('seeker_group', { clanId: this.clanId, warpAway: true });
       }
       this._queue.shift();
-    } else if (job.type === 'defender_warrior') {
-      this._defenderActive.warrior = (this._defenderActive.warrior ?? 0) + 1;
-      if (this._onDefenderBirth) this._onDefenderBirth('warrior');
-      else this._pendingDefenders.push('warrior');
-      job.remaining--;
-      if (job.remaining <= 0) this._queue.shift();
-    } else if (job.type === 'defender_tie') {
-      this._defenderActive.tie = (this._defenderActive.tie ?? 0) + 1;
-      if (this._onDefenderBirth) this._onDefenderBirth('tie');
-      else this._pendingDefenders.push('tie');
-      this._queue.shift();
-    } else if (job.type === 'defender_bird') {
-      this._defenderActive.bird = (this._defenderActive.bird ?? 0) + 1;
-      if (this._onDefenderBirth) this._onDefenderBirth('bird');
-      else this._pendingDefenders.push('bird');
+    } else if (job.type.startsWith('defender_')) {
+      // Defender jobs are now handled exclusively by _auditDefenders().
+      // If any stale defender jobs remain in the queue, discard them.
       this._queue.shift();
     }
 

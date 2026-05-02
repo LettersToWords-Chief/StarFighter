@@ -71,6 +71,7 @@ class GalaxyMap {
     this.frozen = false;   // set true by main.js intro screen; skips simulation updates
     this._victoryFired  = false;
     this._winCheckTimer = 0;
+    this._spawnerEverPlaced = false; // true once the first spawner is placed; guards win check
     this._loop();
   }
 
@@ -731,6 +732,7 @@ class GalaxyMap {
 
     const spawner = new ZylonSpawner({ q: best.q, r: best.r, galaxy: this });
     this.zylonSpawners.push(spawner);
+    this._spawnerEverPlaced = true;
   }
 
   /**
@@ -754,27 +756,28 @@ class GalaxyMap {
       steps++;
     }
     this.fastForwarding = false;
-    // Clear any defenders that accumulated during the bootstrap sim — they should not
-    // pre-populate the sector on the player's very first entry.  The in-game audit
-    // cycle will queue real defenders within seconds of gameplay starting.
+    // Clear fast-forward defender accumulation and give each spawner a clean slate.
+    // The initial spawner gets a TIE and Bird escort pre-loaded so it is never alone
+    // at game start — they materialise the moment the player enters its sector.
     for (const sp of this.zylonSpawners) {
-      sp._pendingDefenders = [];
-      sp._defenderActive   = { warrior: 0, tie: 0, bird: 0 };
-      sp._defenseQueued    = false; // allow priority 2.5 to re-queue defenders at interval:60
-      sp._inventoryTimer   = 0;    // let audit fire naturally; priority 2.5 handles first queue
+      sp._pendingDefenders = ['tie', 'bird'];
+      sp._defenderActive   = { warrior: 0, tie: 1, bird: 1 };
+      sp._defenseQueued    = false;
+      sp._inventoryTimer   = 0;
     }
   }
 
   /** Fires onVictory once all Zylon units have been eliminated. */
   _checkWinCondition() {
     if (this._victoryFired) return;
-    // Need at least one spawner to have existed (can't win before the game starts)
-    if (this.zylonSpawners.length === 0) return;
+    // Need at least one spawner to have been placed (can't win before the game starts).
+    // NOTE: zylonSpawners is filtered to alive-only each frame, so we can't use .length.
+    if (!this._spawnerEverPlaced) return;
     const allGone =
-      this.zylonSpawners.every(sp => !sp.alive)  &&
-      this.zylonSeekers.every(s  => !s.alive)    &&
-      this.zylonWarriors.every(w => !w.alive)    &&
-      this.zylonBeacons.every(b  => !b.active);
+      this.zylonSpawners.length  === 0 &&   // all spawners dead (filtered out)
+      this.zylonSeekers.length   === 0 &&   // all seekers dead
+      this.zylonWarriors.length  === 0 &&   // all warriors dead
+      this.zylonBeacons.length   === 0;     // all beacons inactive (filtered out)
     if (!allGone) return;
     this._victoryFired = true;
     this.onVictory?.();
@@ -852,14 +855,19 @@ class GalaxyMap {
 
   /** Initiate a power scan from the given starbase. Energy drains inside tick. */
   initiatePowerScan(starbase) {
-    const cfg = GameConfig.powerScan;
+    const cfg    = GameConfig.powerScan;
+    const maxRing     = starbase.isCapital ? cfg.capitalMaxRing          : cfg.maxRing;
+    const totalDur    = starbase.isCapital ? cfg.capitalTotalDurationSec : cfg.totalDurationSec;
+    const energyCost  = starbase.isCapital ? cfg.capitalEnergyCost       : cfg.energyCost;
     const scan = {
       starbase,
-      currentRing: 1,          // will be incremented to 2 on first reveal
+      currentRing: 1,
       ringTimer:   0,
       totalTimer:  0,
       scanKeys:    new Set(),
-      drainPerSec: cfg.energyCost / cfg.totalDurationSec,
+      maxRing,
+      totalDuration: totalDur,
+      drainPerSec: energyCost / totalDur,
     };
     this.activePowerScans.push(scan);
     this._revealScanRing(scan);  // reveal ring 2 immediately
@@ -894,13 +902,13 @@ class GalaxyMap {
       scan.ringTimer  += dt;
 
       // Expand one ring every ringIntervalSec until maxRing
-      if (scan.ringTimer >= cfg.ringIntervalSec && scan.currentRing < cfg.maxRing) {
+      if (scan.ringTimer >= cfg.ringIntervalSec && scan.currentRing < scan.maxRing) {
         scan.ringTimer = 0;
         this._revealScanRing(scan);
       }
 
       // Completed full duration
-      if (scan.totalTimer >= cfg.totalDurationSec) {
+      if (scan.totalTimer >= scan.totalDuration) {
         this._endPowerScan(scan);
       }
     }

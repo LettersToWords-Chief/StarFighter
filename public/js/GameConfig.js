@@ -319,6 +319,14 @@ const GameConfig = Object.freeze({
 
     /** Seconds between each homing warp step for alerted Seekers. */
     homingMoveIntervalSec:  30,
+
+    // ── Capital scan (initiated from Central Command) ──────────────────────
+    /** Full-galaxy scan: 7 rings covers the entire map. */
+    capitalMaxRing:          7,
+    /** 6 ring intervals × 30s each. */
+    capitalTotalDurationSec: 180,
+    /** Double the cost of an outer-starbase scan. */
+    capitalEnergyCost:    10000,
   },
 
 
