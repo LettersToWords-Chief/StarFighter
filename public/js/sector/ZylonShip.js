@@ -312,10 +312,11 @@ class ZylonShip {
     g.add(new THREE.Mesh(
       new THREE.IcosahedronGeometry(8, 0),
       new THREE.MeshBasicMaterial({ color: 0x330000 })));
-    // Bright red wireframe overlay
-    g.add(new THREE.Mesh(
+    // Bright red wireframe overlay — stored so addMergeLayer can reference the radius
+    this._beaconWireframe = new THREE.Mesh(
       new THREE.IcosahedronGeometry(8.1, 0),
-      new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true })));
+      new THREE.MeshBasicMaterial({ color: 0xff2200, wireframe: true }));
+    g.add(this._beaconWireframe);
     // Inner glow core
     g.add(new THREE.Mesh(
       new THREE.IcosahedronGeometry(3, 0),
@@ -324,6 +325,29 @@ class ZylonShip {
     this._light = new THREE.PointLight(0xff3300, 3.0, 80);
     g.add(this._light);
     g.add(new THREE.PointLight(0xff1100, 1.2, 50));
+    // ── Tip lights (hidden until setBroadcasting(true)) ────────────────────
+    // Place a small bright point at each of the 12 icosahedron vertices
+    this._tipGroup = new THREE.Group();
+    this._tipGroup.visible = false;
+    const icoGeo = new THREE.IcosahedronGeometry(9.5, 0);
+    const posAttr = icoGeo.attributes.position;
+    const seenKeys = new Set();
+    for (let i = 0; i < posAttr.count; i++) {
+      const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
+      const key = `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      const tipMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.7, 4, 4),
+        new THREE.MeshBasicMaterial({ color: 0xff8844 }));
+      tipMesh.position.set(x, y, z);
+      const tipLight = new THREE.PointLight(0xff6622, 0.6, 20);
+      tipLight.position.set(x, y, z);
+      this._tipGroup.add(tipMesh);
+      this._tipGroup.add(tipLight);
+    }
+    icoGeo.dispose();
+    g.add(this._tipGroup);
     // ── Shield bubble ─────────────────────────────────────────────────────────────────────────
     // Deep-red additive sphere — opacity tracks shield charge each frame in _updateBeaconShip
     const _sbMat = new THREE.MeshBasicMaterial({
@@ -338,9 +362,32 @@ class ZylonShip {
     g.add(new THREE.Mesh(new THREE.SphereGeometry(22.7, 24, 18), _sbOMat));
     this._shieldBubbleMat      = _sbMat;
     this._shieldBubbleOuterMat = _sbOMat;
+    this._beaconMergeCount = 0;
     this._addClanMarkings(g);
     // Note: beacon is NOT scaled — it lives at full size
     return g;
+  }
+
+  /** Show tip-point lights to indicate the beacon is actively transmitting. */
+  setBroadcasting(active) {
+    if (this._tipGroup) this._tipGroup.visible = !!active;
+  }
+
+  /**
+   * Visually absorb one more seeker group — adds an extra wireframe shell
+   * slightly larger than the last, giving the impression of thicker lines.
+   */
+  addMergeLayer() {
+    if (!this.mesh) return;
+    this._beaconMergeCount = (this._beaconMergeCount ?? 0) + 1;
+    const r = 8.1 + this._beaconMergeCount * 0.6; // each layer 0.6u larger
+    const shell = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(r, 0),
+      new THREE.MeshBasicMaterial({
+        color: 0xff3300, wireframe: true,
+        transparent: true, opacity: Math.max(0.3, 1 - this._beaconMergeCount * 0.15),
+      }));
+    this.mesh.add(shell);
   }
 
   // ───────────────────────────────── spawner mesh builder ────────────────────

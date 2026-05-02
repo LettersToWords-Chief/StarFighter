@@ -97,18 +97,15 @@ class ZylonWarrior {
 
     if (this.state === 'COMBAT') return; // managed by SectorView
 
-    // READY: check every 30 seconds for any active beacon to warp to
+    // READY: check every 30 seconds for assigned beacon
     this._waitTimer += dt;
     if (this._waitTimer >= 30) {
       this._waitTimer = 0;
-      // Prefer own beacon; fall back to any active beacon if ours was destroyed
-      const beacon = (this.beacon?.active ? this.beacon : null)
-        ?? galaxy.zylonBeacons.find(b => b.active);
-      if (beacon) {
-        // Warp is instant — move to beacon's sector and notify galaxy
-        this.beacon            = beacon;
-        this.q                 = beacon.q;
-        this.r                 = beacon.r;
+      // Only warp to our own assigned beacon — no fallback to foreign beacons.
+      // If our beacon is dead, stay idle at the spawner as an available guard.
+      if (this.beacon?.active) {
+        this.q                 = this.beacon.q;
+        this.r                 = this.beacon.r;
         this.state             = 'ASSAULTING';
         this._distToStarbase   = 900;
         this._combatTimer      = 0;

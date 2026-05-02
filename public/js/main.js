@@ -164,14 +164,29 @@
       }
     };
 
-    // When a Seeker group steps into the player's current sector, spawn all 3 ships.
+    // When a Seeker group steps into the player's current sector, spawn the right ships.
+    // A GUARDING seeker deploys a full group (Beacon + TIE + Bird).
+    // A MERGED seeker (sector already has a transmitting beacon) deploys only TIE + Bird
+    // and adds a visual merge layer to the existing beacon.
     galaxyMap.onSeekerArrived = (seeker) => {
       if (!_sectorLive) return;
       const pos = galaxyMap.playerPos;
-      if (seeker.q === pos.q && seeker.r === pos.r) {
+      if (seeker.q !== pos.q || seeker.r !== pos.r) return;
+
+      const hasBeacon = (galaxyMap.zylonBeacons ?? []).some(
+        b => b.active && b.q === seeker.q && b.r === seeker.r
+      );
+
+      if (!hasBeacon) {
+        // First beacon in sector — spawn full group, then mark it broadcasting
         SectorView.spawnZylons(1, 'seeker_beacon', seeker);
         SectorView.spawnZylons(1, 'seeker_tie',    seeker);
         SectorView.spawnZylons(1, 'seeker_bird',   seeker);
+      } else {
+        // Merge: spawn only escort, add a visual layer to the existing beacon ship
+        SectorView.spawnZylons(1, 'seeker_tie',  seeker);
+        SectorView.spawnZylons(1, 'seeker_bird', seeker);
+        SectorView.addMergeLayerToBeacon();
       }
     };
 

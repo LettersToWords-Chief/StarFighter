@@ -203,18 +203,18 @@ class ZylonSpawner {
     if (!this.alive) return;
 
     if (beacon.type === 'starbase') {
-      // Fire Red Alert the first time any starbase Beacon is planted —
-      // works in both normal play and test mode.
+      // Fire Red Alert the first time any starbase Beacon is planted.
       if (!galaxy.redAlert) {
         galaxy.redAlert = true;
         if (galaxy.onRedAlert) galaxy.onRedAlert();
       }
-      // Queue 2 Warrior pairs for this beacon
-      const pairs = GameConfig.zylon.warriorPairsPerBeacon; // 2
-      this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairs });
-      // Reset the production timer — the beacon deployment IS the starting gun.
-      // Warriors should take exactly one full cycle (60s) from this moment.
-      this._produceTimer = 0;
+      // Do NOT queue warriors during fast-forward — the player hasn't started yet.
+      // Warriors begin accumulating only once real gameplay is underway.
+      if (!galaxy.fastForwarding) {
+        const pairs = GameConfig.zylon.warriorPairsPerBeacon;
+        this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairs });
+        this._produceTimer = 0;
+      }
     } else if (beacon.type === 'resource') {
       this._queue.push({ type: 'spawner', beaconRef: beacon, remaining: 1 });
     }
@@ -310,14 +310,32 @@ class ZylonSpawner {
   onResupplyRequested(beacon, pairsNeeded, galaxy) {
     if (!this.alive) return;
     if (!beacon.active) return;
-    if (this._warriorPairsSpawned >= this._maxWarriorPairs) return; // lifetime cap reached
+    if (this._warriorPairsSpawned >= this._maxWarriorPairs) return;
 
-    const existing = this._queue.find(j => j.type === 'warrior' && j.beaconRef === beacon);
-    if (existing) {
-      // Increase the pending count if the deficit grew since last request
-      existing.remaining = Math.max(existing.remaining, pairsNeeded);
-    } else {
-      this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairsNeeded });
+    // Prefer idle (orphaned) warriors already in existence — send them first.
+    // An orphaned warrior is READY but its assigned beacon is no longer active.
+    const idle = this._warriors.filter(w => w.alive && w.state === 'READY' && !w.beacon?.active);
+    let dispatched = 0;
+    while (dispatched < pairsNeeded && idle.length >= 2) {
+      const w1 = idle.shift();
+      const w2 = idle.shift();
+      w1.beacon = beacon;
+      w2.beacon = beacon;
+      // Reset warp timer so they warp on the next tick (within ~1 second)
+      w1._waitTimer = 29;
+      w2._waitTimer = 29;
+      dispatched++;
+    }
+
+    // If idle warriors didn’t cover the full request, queue new production.
+    const remaining = pairsNeeded - dispatched;
+    if (remaining > 0) {
+      const existing = this._queue.find(j => j.type === 'warrior' && j.beaconRef === beacon);
+      if (existing) {
+        existing.remaining = Math.max(existing.remaining, remaining);
+      } else {
+        this._queue.push({ type: 'warrior', beaconRef: beacon, remaining });
+      }
     }
   }
 
@@ -390,10 +408,15 @@ class ZylonSpawner {
     this.alive  = false;
     this._queue = [];
     // ── Clan kill cascade: all units hatched by this Spawner die with it ──
-    for (const s of this._seekers)  s.dead = true;
-    for (const w of this._warriors) w.dead = true;
-    // Mark all beacons of this clan dead on the galaxy map
-    this.galaxy?._markBeaconsDeadForClan?.(this.clanId);
+    for (const s of this._seekers) {
+      if (s.alive) {
+        s.alive = false;
+        if (s.beacon?.active) s.beacon.destroy();
+      }
+    }
+    for (const w of this._warriors) {
+      if (w.alive) w.alive = false;
+    }
     // Notify SectorView (if player is present) to purge all matching 3D Zylons
     this._onSpawnerKilled?.();
   }

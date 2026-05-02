@@ -651,12 +651,7 @@ class GalaxyMap {
         if (!this.frozen) {
           this._updateSupplyShips(dt);
           this._updateZylons(dt);
-          // Check win condition every 2 seconds
-          this._winCheckTimer += dt;
-          if (this._winCheckTimer >= 2) {
-            this._winCheckTimer = 0;
-            this._checkWinCondition();
-          }
+          this._checkWinCondition();
         }
 
         // Capital loss detection — fires once when capital goes dormant
@@ -770,15 +765,12 @@ class GalaxyMap {
   /** Fires onVictory once all Zylon units have been eliminated. */
   _checkWinCondition() {
     if (this._victoryFired) return;
-    // Need at least one spawner to have been placed (can't win before the game starts).
-    // NOTE: zylonSpawners is filtered to alive-only each frame, so we can't use .length.
-    if (!this._spawnerEverPlaced) return;
-    const allGone =
-      this.zylonSpawners.length  === 0 &&   // all spawners dead (filtered out)
-      this.zylonSeekers.length   === 0 &&   // all seekers dead
-      this.zylonWarriors.length  === 0 &&   // all warriors dead
-      this.zylonBeacons.length   === 0;     // all beacons inactive (filtered out)
-    if (!allGone) return;
+    // redAlert means Zylons actually showed up. Without it, zero counts at startup would win instantly.
+    if (!this.redAlert) return;
+    if (this.zylonSpawners.length  > 0) return;
+    if (this.zylonSeekers.length   > 0) return;
+    if (this.zylonWarriors.length  > 0) return;
+    if (this.zylonBeacons.length   > 0) return;
     this._victoryFired = true;
     this.onVictory?.();
   }
@@ -905,6 +897,19 @@ class GalaxyMap {
       if (scan.ringTimer >= cfg.ringIntervalSec && scan.currentRing < scan.maxRing) {
         scan.ringTimer = 0;
         this._revealScanRing(scan);
+      }
+
+      // Every tick: pin all alive Zylons inside the scanned area to scanVisible.
+      // The scan sees everything from the starbase outward — not just the leading edge.
+      const allUnits = [
+        ...this.zylonSeekers.filter(s => s.alive),
+        ...this.zylonWarriors.filter(w => w.alive),
+        ...this.zylonBeacons.filter(b => b.active),
+        ...this.zylonSpawners.filter(s => s.alive),
+      ];
+      for (const unit of allUnits) {
+        const uk = HexMath.key(unit.q, unit.r);
+        if (scan.scanKeys.has(uk)) this.scanVisible.add(uk);
       }
 
       // Completed full duration
@@ -1052,6 +1057,7 @@ class GalaxyMap {
 
     // Zylon units — visible in any monitored sector; fogBypass shows ALL in testMode
     this._drawZylons(ctx, GameConfig.testMode);
+    this._drawZylonCount(ctx);
 
     // Frozen banner — test mode only
     if (GameConfig.testMode && this._testFrozen) {
@@ -1446,6 +1452,51 @@ class GalaxyMap {
    *  fogBypass=true  → draw ALL units everywhere (test/debug mode).
    *  fogBypass=false → only draw units whose hex is currently visible.
    */
+  /** Persistent Zylon census — to the right of the subspace log panel. */
+  _drawZylonCount(ctx) {
+    const spawners = this.zylonSpawners.filter(s => s.alive).length;
+    const seekers  = this.zylonSeekers.filter(s => s.alive).length;
+    const warriors = this.zylonWarriors.filter(w => w.alive).length;
+    const beacons  = this.zylonBeacons.filter(b => b.active).length;
+    const total    = spawners + seekers + warriors + beacons;
+
+    // Subspace log: left=16, width=180 → right edge at 196px. Gap of 12px = 208px start.
+    const x    = 208;
+    const y    = 16;
+    const lh   = 18;
+    const boxW = 180;
+    const boxH = lh * 5 + 10;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 6, 22, 0.88)';
+    ctx.fillRect(x, y, boxW, boxH);
+    ctx.strokeStyle = total === 0 ? '#00ff88' : 'rgba(0, 180, 255, 0.25)';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(x, y, boxW, boxH);
+
+    ctx.font         = 'bold 11px Share Tech Mono, monospace';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    const headerColor = total === 0 ? '#00ff88' : '#ff4444';
+    const rowColor    = '#ffaa44';
+
+    const rows = [
+      { label: `ZYLON FORCES: ${total}`, color: headerColor },
+      { label: `  SPAWNERS   ${spawners}`, color: rowColor },
+      { label: `  SEEKERS    ${seekers}`,  color: rowColor },
+      { label: `  WARRIORS   ${warriors}`, color: rowColor },
+      { label: `  BEACONS    ${beacons}`,  color: rowColor },
+    ];
+
+    rows.forEach((row, i) => {
+      ctx.fillStyle = row.color;
+      ctx.fillText(row.label, x + 8, y + 6 + i * lh);
+    });
+
+    ctx.restore();
+  }
+
   _drawZylons(ctx, fogBypass = false) {
     const t = Date.now() * 0.003;
 

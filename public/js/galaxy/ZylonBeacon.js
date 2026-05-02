@@ -33,6 +33,11 @@ class ZylonBeacon {
     // Inactive while traveling — activates when seeker reaches a qualifying sector
     this.active   = false;
 
+    // HP — base value; increases with each absorbed seeker group
+    this.hp       = GameConfig.zylon?.beaconBaseHP ?? 100;
+    this.maxHp    = this.hp;
+    this.mergeCount = 0;  // number of seeker groups absorbed into this beacon
+
     // Galaxy reference — set when activated so tick() can count warriors
     this._galaxy       = null;
     this._resupplyTimer = 0;
@@ -50,11 +55,13 @@ class ZylonBeacon {
 
     if (!this.active || !this._galaxy) return;
 
-    // ── Resupply check ──────────────────────────────────────────────
+    // ── Resupply check (real gameplay only — not during fast-forward) ──────────
     const cfg       = GameConfig.zylon;
     const checkSec  = cfg.warriorResupplyCheckSec  ?? 30;
     const target    = cfg.warriorResupplyTarget     ?? 4;
-    this._resupplyTimer += dt;
+    if (!this._galaxy.fastForwarding) {
+      this._resupplyTimer += dt;
+    }
     if (this._resupplyTimer >= checkSec) {
       this._resupplyTimer = 0;
       // Count alive same-clan warriors in this sector (fighting or assigned and waiting)
@@ -69,8 +76,9 @@ class ZylonBeacon {
       ).length;
 
       if (present < target) {
-        const pairsNeeded = Math.ceil((target - present) / 2);
-        this.spawner.onResupplyRequested(this, pairsNeeded, this._galaxy);
+        // Dispatch exactly 1 pair per check — warriors accumulate gradually,
+        // not all at once. Hitting the target cap takes multiple resupply cycles.
+        this.spawner.onResupplyRequested(this, 1, this._galaxy);
       }
     }
   }
@@ -94,11 +102,11 @@ class ZylonBeacon {
    */
   activate(type, galaxy) {
     if (this.active) return; // already activated
-    // Hard cap: never allow more than 2 active beacons at the same sector
+    // Hard cap: only 1 active (transmitting) beacon per sector — extras must merge
     const alreadyHere = (galaxy.zylonBeacons ?? []).filter(
       b => b.active && b.q === this.q && b.r === this.r
     ).length;
-    if (alreadyHere >= 2) return; // cap reached — silently refuse
+    if (alreadyHere >= 1) return; // sector already has a transmitting beacon
     this.type    = type;
     this.active  = true;
     this._galaxy = galaxy;   // store for resupply checks in tick()
@@ -106,6 +114,21 @@ class ZylonBeacon {
     galaxy.zylonBeacons.push(this);
     // Notify spawner so it queues warriors / sub-spawner production
     this.spawner.onBeaconDeployed(this, galaxy);
+  }
+
+  /**
+   * Absorb an incoming seeker group into this transmitting beacon.
+   * The merged seeker's TIE and Bird will fight on as escort.
+   * @param {ZylonSeeker} seeker
+   */
+  absorb(seeker) {
+    const added   = seeker.beacon?.hp ?? (GameConfig.zylon?.beaconBaseHP ?? 100);
+    this.hp      += added;
+    this.maxHp   += added;
+    this.mergeCount++;
+    // The merged seeker is consumed — it ceases to exist as a galaxy-level unit.
+    // Its TIE and Bird will be re-assigned to the primary seeker in SectorView.
+    seeker.alive = false;
   }
 
   /** Destroy this beacon — called when the beacon ZylonShip is killed. */

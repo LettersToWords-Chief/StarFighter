@@ -1528,8 +1528,9 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     if (_redAlert) _redAlertTimer += dt;
     _updateTicker(dt);
     _checkAlerts();
-    // Targeting computer malfunction: randomly drop lock when at or below 50 HP
-    if (_targetLocked && _computer && _computer.targeting <= 50 && Math.random() < 0.002) {
+    // Targeting computer malfunction: randomly drop lock when at or below 50 HP,
+    // or immediately when energy is depleted — computers need power to run.
+    if (_targetLocked && (_energy <= 0 || (_computer && _computer.targeting <= 50 && Math.random() < 0.002))) {
       _targetLocked = false;
     }
     // Energy stranded: zero energy + no fuel + no dockable starbase = adrift
@@ -1793,12 +1794,15 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       }
     } else {
       // Normal throttle ramping — each engine contributes SPD_VALS[min(speed, engMaxIdx)] / 4
-      const targetVel = _engines
+      // Engines and computers require energy — if depleted, target velocity drops to zero
+      // and the ship coasts to a halt.
+      const _powerOnline = _energy > 0;
+      const targetVel = (_powerOnline && _engines)
         ? _engines.reduce((sum, eng) => {
             const engMaxIdx = Math.max(0, Math.floor(eng.hp / 100 * 9));
             return sum + SPD_VALS[Math.min(_speed, engMaxIdx)] / 4;
           }, 0)
-        : SPD_VALS[_speed];
+        : 0;
       const diff = targetVel - _currentVelocity;
       const step = ACCEL_RATE * dt;
       _currentVelocity += diff > 0 ? Math.min(diff, step) : Math.max(diff, -step);
@@ -4482,7 +4486,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     const warriorCount = sector?.warriorCount ?? 0;
     const totalZylons  = seekerCount * 2 + warriorCount;
     _targets = totalZylons;
-    if (totalZylons > 0 && (!_computer || _computer.scanner > 0)) {
+    if (totalZylons > 0 && _energy > 0 && (!_computer || _computer.scanner > 0)) {
       _redAlert      = true;
       _redAlertTimer = 0;
       if (typeof SoundManager !== 'undefined') SoundManager.redAlert();
@@ -4501,36 +4505,71 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     const _zEntryBase  = new THREE.Vector3(
       Math.cos(_zEntryAngle) * _zEntryDist, 0, Math.sin(_zEntryAngle) * _zEntryDist);
 
+    // Primary (GUARDING) seekers get the full three-ship group.
+    // MERGED seekers get only TIE + Bird, which become defenders of the primary seeker.
+    let primaryBeaconShip = null;
+    let primarySeekerRef  = null;  // the GUARDING seeker that owns the primary beacon
+
     for (let i = 0; i < seekerCount; i++) {
       const seekerRef = seekerGalaxyRefs[i] ?? null;
+      // A merged seeker is now alive=false (killed by absorb()), but state was 'MERGED'
+      const isMerged  = !seekerRef?.alive || seekerRef?.state === 'MERGED';
 
-      // BEACON ship starts at its orbit position (750u) along the entry angle
-      const BEACON_DIST  = GameConfig.zylon.beaconPlacementUnits ?? 750;
-      const beaconStart  = new THREE.Vector3(
-        Math.cos(_zEntryAngle) * BEACON_DIST, 0, Math.sin(_zEntryAngle) * BEACON_DIST);
-      const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon', seekerRef?.clanId ?? 0);
-      if (seekerRef) beaconShip.setGalaxyRef(seekerRef);
-      // Snap beacon to its true tilted orbit position so TIE/Bird spawn at the right spot
-      const _bc = Math.cos(beaconShip._bOrbitAngle) * BEACON_DIST;
-      const _bs = Math.sin(beaconShip._bOrbitAngle) * BEACON_DIST;
-      beaconShip.mesh.position.set(
-        beaconShip._orbitU.x * _bc + beaconShip._orbitV.x * _bs,
-        beaconShip._orbitU.y * _bc + beaconShip._orbitV.y * _bs,
-        beaconShip._orbitU.z * _bc + beaconShip._orbitV.z * _bs
-      );
-      _zylons.push(beaconShip);
+      if (!isMerged) {
+        // ── Full spawn: BEACON + TIE + Bird ──────────────────────────────────
+        const BEACON_DIST  = GameConfig.zylon.beaconPlacementUnits ?? 750;
+        const beaconStart  = new THREE.Vector3(
+          Math.cos(_zEntryAngle) * BEACON_DIST, 0, Math.sin(_zEntryAngle) * BEACON_DIST);
+        const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon', seekerRef?.clanId ?? 0);
+        if (seekerRef) beaconShip.setGalaxyRef(seekerRef);
+        // Snap beacon to its true tilted orbit position so TIE/Bird spawn at the right spot
+        const _bc = Math.cos(beaconShip._bOrbitAngle) * BEACON_DIST;
+        const _bs = Math.sin(beaconShip._bOrbitAngle) * BEACON_DIST;
+        beaconShip.mesh.position.set(
+          beaconShip._orbitU.x * _bc + beaconShip._orbitV.x * _bs,
+          beaconShip._orbitU.y * _bc + beaconShip._orbitV.y * _bs,
+          beaconShip._orbitU.z * _bc + beaconShip._orbitV.z * _bs
+        );
+        _zylons.push(beaconShip);
+        beaconShip.setBroadcasting(true);
+        if (!primaryBeaconShip) primaryBeaconShip = beaconShip;
+        if (!primarySeekerRef)  primarySeekerRef  = seekerRef;
 
-      // TIE and Bird spawn within 100u of the beacon's TRUE orbit position
-      const beaconActual = beaconShip.mesh.position;
-      ['seeker_tie', 'seeker_bird'].forEach(type => {
-        const jAngle   = Math.random() * Math.PI * 2;
-        const jitter   = Math.random() * 100;
-        const spawnPos = beaconActual.clone().addScaledVector(
-          new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-        const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
-        if (seekerRef) ship.setGalaxyRef(seekerRef);
-        _zylons.push(ship);
-      });
+        // TIE and Bird spawn within 100u of the beacon's TRUE orbit position
+        const beaconActual = beaconShip.mesh.position;
+        ['seeker_tie', 'seeker_bird'].forEach(type => {
+          const jAngle   = Math.random() * Math.PI * 2;
+          const jitter   = Math.random() * 100;
+          const spawnPos = beaconActual.clone().addScaledVector(
+            new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+          const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
+          if (seekerRef) ship.setGalaxyRef(seekerRef);
+          _zylons.push(ship);
+        });
+      } else {
+        // ── Merged spawn: TIE + Bird become defenders of the PRIMARY seeker ───
+        const origin = primaryBeaconShip
+          ? primaryBeaconShip.mesh.position.clone()
+          : new THREE.Vector3(
+              Math.cos(_zEntryAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750),
+              0,
+              Math.sin(_zEntryAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750));
+        ['seeker_tie', 'seeker_bird'].forEach(type => {
+          const jAngle   = Math.random() * Math.PI * 2;
+          const jitter   = 80 + Math.random() * 120;
+          const spawnPos = origin.clone().addScaledVector(
+            new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
+          const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
+          // Re-assign to primary seeker — these ships now defend the primary beacon
+          if (primarySeekerRef) {
+            ship.setGalaxyRef(primarySeekerRef);
+            primarySeekerRef._liveComponents = (primarySeekerRef._liveComponents ?? 3) + 1;
+          }
+          _zylons.push(ship);
+        });
+        // Add a visual merge layer to the primary beacon
+        primaryBeaconShip?.addMergeLayer();
+      }
     }
     // Warriors at sector entry come from galaxy ZylonWarriors in ASSAULTING/COMBAT state.
     // Spawn each at its real approach distance so the player sees them in the right place.
@@ -4791,17 +4830,13 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
         const angle = Math.random() * Math.PI * 2;
         const dist  = GameConfig.zylon.beaconPlacementUnits ?? 750;
         pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-        // Snap beacon to its true tilted orbit position
-        // (the constructor sets _orbitU/_orbitV/_bOrbitAngle from a random tilted plane)
-        // We must compute the real position before TIE/Bird spawn near it.
-        // We do this AFTER creating the ship below, then update pos — see after ship creation.
       } else if (isSeeker) {
-        // Find the already-spawned beacon from the same seeker group and spawn near it
+        // Find the beacon: prefer same-clan beacon, fall back to any active beacon
         const beacon = _zylons.find(z =>
           !z.dead && z.type === 'seeker_beacon' && z._galaxyRef === galaxyRef
-        );
+        ) ?? _zylons.find(z => !z.dead && z.type === 'seeker_beacon');
         const jAngle  = Math.random() * Math.PI * 2;
-        const jitter  = Math.random() * 100;
+        const jitter  = 80 + Math.random() * 120;
         const origin  = beacon ? beacon.position.clone()
           : new THREE.Vector3(Math.cos(jAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750), 0,
                               Math.sin(jAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750));
@@ -4828,6 +4863,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
           ship._orbitU.y * _bc + ship._orbitV.y * _bs,
           ship._orbitU.z * _bc + ship._orbitV.z * _bs
         );
+        ship.setBroadcasting(true); // tip lights on — this beacon is transmitting
       }
       _zylons.push(ship);
     }
@@ -4888,7 +4924,14 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     return dist < DOCK_RANGE && _currentVelocity < 0.5 && _dockState === 'idle';
   }
 
-  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
+  /** Called when a MERGED seeker group arrives live — adds a wireframe shell to the primary beacon. */
+  function addMergeLayerToBeacon() {
+    if (!_zylons) return;
+    const beacon = _zylons.find(z => !z.dead && z.type === 'seeker_beacon');
+    beacon?.addMergeLayer();
+  }
+
+  return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, addMergeLayerToBeacon, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
            enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifyTransitSpawnerArrived,
             get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },

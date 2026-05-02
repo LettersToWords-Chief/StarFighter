@@ -59,14 +59,6 @@ class ZylonSeeker {
     this._followableShips = [];  // subset still in sector at T=5s
     this._followDest      = null; // {q,r} recorded when a followable ship departs
 
-    // Tracking Mode state (Section 5B)
-    // Activated when entering a starbase that already has 2 active beacons.
-    // Waits 30s to become "ready", then warps as soon as any cargo ship departs.
-    this._isTracking     = false;  // true while shadowing a cargo ship
-    this._trackReady     = false;  // true after 30s initial hold
-    this._trackInitTimer = 0;      // seconds elapsed in 30s hold
-    this._trackShip      = null;   // the cargo ship currently being watched
-
     // In-sector combat (managed by SectorView when player is present)
     this.hp        = 1;        // one hit and they die
     this.sectorPos = null;     // { x, y } — set by SectorView on entry
@@ -85,7 +77,7 @@ class ZylonSeeker {
 
   tick(dt, galaxy) {
     if (!this.alive) return;
-    if (this.state === 'GUARDING') return;
+    if (this.state === 'GUARDING' || this.state === 'MERGED') return;
     if (this.inCombat) return;
 
     // ── Power Scan Homing ──────────────────────────────────────────────────────
@@ -100,57 +92,9 @@ class ZylonSeeker {
       return; // skip all other movement logic while homing
     }
 
-    // ── Tracking Mode (Section 5B) ─────────────────────────────────────────
-
-    // Entered a starbase with ≥2 active beacons: wait 30s, then instantly
-    // warp after the next cargo ship that leaves the sector.
-    if (this._isTracking && !galaxy.fastForwarding) {
-      if (!this._trackReady) {
-        // Phase 1: 30s hold — seeker is "charging up"
-        this._trackInitTimer += dt;
-        if (this._trackInitTimer >= 30) {
-          this._trackReady    = true;
-          this._trackWaitTimer = 0; // start patience clock
-        }
-        return; // hold position
-      }
-      // Phase 2: latch onto a cargo ship in this sector
-      if (!this._trackShip || this._trackShip.destroyed) {
-        this._trackShip = (galaxy.supplyShips ?? []).find(s =>
-          !s.destroyed &&
-          s.currentHex?.q === this.q &&
-          s.currentHex?.r === this.r
-        ) ?? null;
-      }
-      // Watch for latched ship to depart, then warp immediately after it
-      if (this._trackShip && !this._trackShip.destroyed) {
-        const sx = this._trackShip.currentHex;
-        if (sx && (sx.q !== this.q || sx.r !== this.r)) {
-          const dest = { q: sx.q, r: sx.r };
-          this._trackShip = null;
-          this._moveTo(dest.q, dest.r);
-          this._evaluateSector(galaxy);
-        }
-      } else {
-        // No cargo ship available — count patience time
-        this._trackWaitTimer = (this._trackWaitTimer ?? 0) + dt;
-        if (this._trackWaitTimer >= 60) {
-          // Gave up waiting — exit tracking and resume pachinko movement
-          this._isTracking     = false;
-          this._trackReady     = false;
-          this._trackInitTimer = 0;
-          this._trackWaitTimer = 0;
-          this._trackShip      = null;
-          // Fall through to normal pachinko movement below
-        }
-      }
-      if (this._isTracking) return; // still tracking — skip normal movement
-    }
-    // Tracking but fast-forwarding: hold position (prevents cap breach via pachinko)
-    if (this._isTracking) return;
-
     // Interval is always the real game value — the caller scales dt during fast-forward
     this._moveInterval = GameConfig.zylon.seekerMoveIntervalSec;
+
 
     // ── Cargo tracking (real-time only) ───────────────────────────────────────
     if (!galaxy.fastForwarding) {
@@ -329,67 +273,52 @@ class ZylonSeeker {
       sp => sp.alive && sp.q === this.q && sp.r === this.r
     );
 
-    // ── Already in Tracking Mode: re-check for a beacon opportunity ─────────
-    if (this._isTracking) {
-      if (starbase) {
-        const beaconsHere = (galaxy.zylonBeacons ?? []).filter(
-          b => b.active && b.q === this.q && b.r === this.r
-        ).length;
-        if (beaconsHere < 2) {
-          // A slot opened up — place our beacon and guard
-          this._isTracking = false;
-          starbase.onSeekerEntered?.();
-          this.beacon.activate('starbase', galaxy);
-          this.state = 'GUARDING';
-          return;
-        }
-        // Still full — continue tracking here, no 30s wait
-        this._trackReady = true;
-        this._trackShip  = null;
-        return;
-      }
-      // Resource slot while tracking?
-      if (hex?.isResource && !hasSpawner) {
-        this._isTracking = false;
-        this.beacon.activate('resource', galaxy);
-        this.state = 'GUARDING';
-        return;
-      }
-      // No opportunity — keep tracking, immediately ready, no wait
-      this._trackReady = true;
-      this._trackShip  = null;
+    // ── Merge check: if a transmitting beacon is already here, absorb into it ─
+    const existingBeacon = (galaxy.zylonBeacons ?? []).find(
+      b => b.active && b.q === this.q && b.r === this.r
+    );
+    if (existingBeacon) {
+      existingBeacon.absorb(this);
+      this.state = 'MERGED';
+      this._liveComponents = 2; // only TIE + Bird need to be killed
       return;
     }
 
-    // ── Normal evaluation (not yet in Tracking Mode) ─────────────────────────
-
+    // ── Starbase: deploy beacon and guard ─────────────────────────────────────
     if (starbase) {
       starbase.onSeekerEntered?.();
-      const beaconsHere = (galaxy.zylonBeacons ?? []).filter(
-        b => b.active && b.q === this.q && b.r === this.r
-      ).length;
-      if (beaconsHere < 2) {
-        // Priority A: deploy beacon and guard
-        this.beacon.activate('starbase', galaxy);
+      this.beacon.activate('starbase', galaxy);
+      if (this.beacon.active) {
         this.state = 'GUARDING';
-        return;
+      } else {
+        // activate() was silently rejected — another beacon got here first; merge into it
+        const winner = (galaxy.zylonBeacons ?? []).find(
+          b => b.active && b.q === this.q && b.r === this.r
+        );
+        if (winner) winner.absorb(this);
+        this.state = 'MERGED';
+        this._liveComponents = 2;
       }
-      // Priority B: both slots taken — enter Tracking Mode, 30s hold
-      this._isTracking     = true;
-      this._trackReady     = false;
-      this._trackInitTimer = 0;
-      this._trackShip      = null;
       return;
     }
 
-    // Priority C: resource sector with no spawner — place beacon for sub-spawner
+    // ── Resource sector with no spawner: place beacon for sub-spawner ─────────
     if (hex?.isResource && !hasSpawner) {
       this.beacon.activate('resource', galaxy);
-      this.state = 'GUARDING';
+      if (this.beacon.active) {
+        this.state = 'GUARDING';
+      } else {
+        const winner = (galaxy.zylonBeacons ?? []).find(
+          b => b.active && b.q === this.q && b.r === this.r
+        );
+        if (winner) winner.absorb(this);
+        this.state = 'MERGED';
+        this._liveComponents = 2;
+      }
       return;
     }
 
-    // Priority D: cargo ships present — snapshot for standard 45s pachinko follow
+    // ── Cargo ships present: snapshot for standard 45s pachinko follow ────────
     if (!galaxy.fastForwarding) {
       const shipsHere = (galaxy.supplyShips ?? []).filter(s =>
         !s.destroyed &&

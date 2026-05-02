@@ -381,10 +381,13 @@ const GameConfig = Object.freeze({
     warriorHp:                    3,
 
     /** Warrior pairs dispatched per new starbase Beacon. */
-    warriorPairsPerBeacon:        2,
-    /** Ongoing resupply: how many warriors each beacon tries to maintain. */
-    warriorResupplyTarget:        4,   // warriors per beacon
+    warriorPairsPerBeacon:        1,
+    /** Ongoing resupply: max warriors one (merged) beacon tries to maintain. */
+    warriorResupplyTarget:        8,   // warriors per sector (merged beacon)
     warriorResupplyCheckSec:     30,   // seconds between resupply checks
+
+    /** Base HP for a freshly-deployed Beacon; each absorbed seeker adds this amount. */
+    beaconBaseHP:               100,
 
     /** Lifetime production caps per Spawner. */
     maxSeekerPairsPerSpawner:    12,
