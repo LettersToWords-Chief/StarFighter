@@ -39,9 +39,7 @@ class GalaxyMap {
     // Zylon units
     this.zylonSpawners = [];
     this.zylonSeekers  = [];
-    this.zylonWarriors = [];
-    this.zylonBeacons  = [];
-    this.redAlert      = false;   // true once first starbase Beacon is placed
+    this.redAlert      = false;   // true once first Seeker settles at a starbase
 
     // Callbacks
     this.onRedAlert    = null;    // () => void — fired once at game start
@@ -735,42 +733,29 @@ class GalaxyMap {
    * starbase Beacon is placed. This ensures Red Alert fires on frame 1.
    */
   _fastForwardZylons() {
-    // Each step = 15 simulated seconds. At 45s/jump a Seeker moves every 3 steps;
-    // at 60s/cycle a Spawner produces every 4 steps.
+    // Each step = 15 simulated seconds. At 45s/jump a Seeker moves every 3 steps.
     // Runs synchronously with no rendering — completes in milliseconds.
     const step = GameConfig.zylon.fastForwardStepSec;
-    const MAX_STEPS = 2000; // safety cap (~500 simulated minutes)
+    const MAX_STEPS = 2000; // safety cap
     let steps = 0;
     this.fastForwarding = true;
-    // The Spawner fires redAlert + onRedAlert() automatically when the beacon is deployed.
+    // Run until the first Seeker has evolved into a Spawner at a starbase sector.
     while (
-      !this.zylonBeacons.some(b => b.active && b.type === 'starbase') &&
+      !this.redAlert &&
       steps < MAX_STEPS
     ) {
       this._updateZylons(step);
       steps++;
     }
     this.fastForwarding = false;
-    // Clear fast-forward defender accumulation and give each spawner a clean slate.
-    // The initial spawner gets a TIE and Bird escort pre-loaded so it is never alone
-    // at game start — they materialise the moment the player enters its sector.
-    for (const sp of this.zylonSpawners) {
-      sp._pendingDefenders = ['tie', 'bird'];
-      sp._defenderActive   = { warrior: 0, tie: 1, bird: 1 };
-      sp._defenseQueued    = false;
-      sp._inventoryTimer   = 0;
-    }
   }
 
-  /** Fires onVictory once all Zylon units have been eliminated. */
+  /** Fires onVictory once all Spawners have been eliminated. */
   _checkWinCondition() {
     if (this._victoryFired) return;
-    // redAlert means Zylons actually showed up. Without it, zero counts at startup would win instantly.
+    // redAlert means the first Seeker evolved — game actually started.
     if (!this.redAlert) return;
-    if (this.zylonSpawners.length  > 0) return;
-    if (this.zylonSeekers.length   > 0) return;
-    if (this.zylonWarriors.length  > 0) return;
-    if (this.zylonBeacons.length   > 0) return;
+    if (this.zylonSpawners.length > 0) return;
     this._victoryFired = true;
     this.onVictory?.();
   }
@@ -783,27 +768,32 @@ class GalaxyMap {
     for (const seeker of this.zylonSeekers) {
       seeker.tick(dt, this);
     }
-    for (const warrior of this.zylonWarriors) {
-      warrior.tick(dt, this);
-    }
-    for (const beacon of this.zylonBeacons) {
-      beacon.tick(dt);
-    }
     // Clean up dead units
     this.zylonSpawners = this.zylonSpawners.filter(s => s.alive);
     this.zylonSeekers  = this.zylonSeekers.filter(s => s.alive);
-    this.zylonWarriors = this.zylonWarriors.filter(w => w.alive);
-    this.zylonBeacons  = this.zylonBeacons.filter(b => b.active);
-  }
-
-  /** Called when a Warrior arrives at its beacon sector. */
-  _onWarriorArrived(warrior) {
-    if (this.onWarriorArrived) this.onWarriorArrived(warrior);
   }
 
   /** Called by ZylonSeeker._moveTo when it steps into a new sector. */
   _onSeekerArrived(seeker) {
     if (this.onSeekerArrived) this.onSeekerArrived(seeker);
+  }
+
+  /**
+   * Called by ZylonSeeker._evaluateSector when it enters a resource sector.
+   * Instantly evolves the Seeker into a Spawner.
+   */
+  _onSeekerEvolved(seeker) {
+    seeker.alive = false; // remove from zylonSeekers on next filter pass
+    const spawner = new ZylonSpawner({ q: seeker.q, r: seeker.r, galaxy: this });
+    this.zylonSpawners.push(spawner);
+    // Fire Red Alert the first time a Seeker settles at a starbase sector
+    const sb = this.starbases.find(s => s.q === seeker.q && s.r === seeker.r);
+    if (sb && !this.redAlert) {
+      this.redAlert = true;
+      if (this.onRedAlert) this.onRedAlert();
+    }
+    // Notify main.js so SectorView can be wired up if player is in this sector
+    if (this.onSpawnerEvolved) this.onSpawnerEvolved(spawner);
   }
 
   /** Called when a starbase's shields fail and it goes dormant. */
@@ -824,22 +814,6 @@ class GalaxyMap {
     if (this.onStarbaseRestored) this.onStarbaseRestored(sb);
   }
 
-  /** Called by ZylonSpawner when it creates a new sub-Spawner. */
-  _onSubSpawnerCreated(spawner) {
-    // Already pushed into this.zylonSpawners by the parent — nothing extra needed.
-    // Notify main.js so it can wire the SectorView arrival handler when the spawner
-    // eventually hyperjumps into the player's sector.
-    if (this.onSubSpawnerCreated) this.onSubSpawnerCreated(spawner);
-  }
-
-  /**
-   * Called by ZylonSpawner.tick() when a transit spawner completes its boot delay
-   * and the player is currently in the beacon's sector.
-   * Notifies main.js, which delegates to SectorView.notifyTransitSpawnerArrived().
-   */
-  _onTransitSpawnerArrived(spawner) {
-    if (this.onTransitSpawnerArrived) this.onTransitSpawnerArrived(spawner);
-  }
 
   // =========================================================
   // POWER SCAN
@@ -874,8 +848,7 @@ class GalaxyMap {
       const { q, r } = scan.starbase;
       const hasZylons =
         this.zylonSeekers.some(s  => s.alive && s.q === q && s.r === r) ||
-        this.zylonWarriors.some(w => w.alive && w.q === q && w.r === r) ||
-        this.zylonBeacons.some(b  => b.active && b.q === q && b.r === r);
+        this.zylonSpawners.some(sp => sp.alive && sp.q === q && sp.r === r);
       if (hasZylons) {
         this._interruptPowerScan(scan, 'ZYLON INCURSION DETECTED — POWER SCAN INTERRUPTED');
         continue;
@@ -902,10 +875,8 @@ class GalaxyMap {
       // Every tick: pin all alive Zylons inside the scanned area to scanVisible.
       // The scan sees everything from the starbase outward — not just the leading edge.
       const allUnits = [
-        ...this.zylonSeekers.filter(s => s.alive),
-        ...this.zylonWarriors.filter(w => w.alive),
-        ...this.zylonBeacons.filter(b => b.active),
-        ...this.zylonSpawners.filter(s => s.alive),
+        ...this.zylonSeekers.filter(s  => s.alive),
+        ...this.zylonSpawners.filter(sp => sp.alive),
       ];
       for (const unit of allUnits) {
         const uk = HexMath.key(unit.q, unit.r);
@@ -985,21 +956,9 @@ class GalaxyMap {
     return this.zylonSeekers.filter(s => s.q === q && s.r === r && s.alive);
   }
 
-  /** Returns all Zylon Warriors currently in the given galaxy sector. */
-  warriorsInSector(q, r) {
-    return this.zylonWarriors.filter(w => w.q === q && w.r === r && w.alive && w.state !== 'WARPING');
-  }
-
-  /** Returns all Beacons in the given galaxy sector. */
-  beaconsInSector(q, r) {
-    return this.zylonBeacons.filter(b => b.q === q && b.r === r && b.active);
-  }
-
-  /** Mark all active beacons belonging to the given clan as inactive (clan kill cascade). */
-  _markBeaconsDeadForClan(clanId) {
-    for (const b of this.zylonBeacons) {
-      if (b.clanId === clanId && b.active) b.active = false;
-    }
+  /** Returns all Spawners currently in the given galaxy sector. */
+  spawnersInSector(q, r) {
+    return this.zylonSpawners.filter(sp => sp.alive && sp.q === q && sp.r === r);
   }
 
 
@@ -1456,21 +1415,18 @@ class GalaxyMap {
   _drawZylonCount(ctx) {
     const spawners = this.zylonSpawners.filter(s => s.alive).length;
     const seekers  = this.zylonSeekers.filter(s => s.alive).length;
-    const warriors = this.zylonWarriors.filter(w => w.alive).length;
-    const beacons  = this.zylonBeacons.filter(b => b.active).length;
-    const total    = spawners + seekers + warriors + beacons;
+    const total    = spawners + seekers;
 
-    // Subspace log: left=16, width=180 → right edge at 196px. Gap of 12px = 208px start.
     const x    = 208;
     const y    = 16;
     const lh   = 18;
     const boxW = 180;
-    const boxH = lh * 5 + 10;
+    const boxH = lh * 3 + 10;
 
     ctx.save();
     ctx.fillStyle = 'rgba(0, 6, 22, 0.88)';
     ctx.fillRect(x, y, boxW, boxH);
-    ctx.strokeStyle = total === 0 ? '#00ff88' : 'rgba(0, 180, 255, 0.25)';
+    ctx.strokeStyle = (total === 0 && this.redAlert) ? '#00ff88' : 'rgba(0, 180, 255, 0.25)';
     ctx.lineWidth   = 1;
     ctx.strokeRect(x, y, boxW, boxH);
 
@@ -1478,15 +1434,13 @@ class GalaxyMap {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
 
-    const headerColor = total === 0 ? '#00ff88' : '#ff4444';
+    const headerColor = (total === 0 && this.redAlert) ? '#00ff88' : '#ff4444';
     const rowColor    = '#ffaa44';
 
     const rows = [
       { label: `ZYLON FORCES: ${total}`, color: headerColor },
-      { label: `  SPAWNERS   ${spawners}`, color: rowColor },
-      { label: `  SEEKERS    ${seekers}`,  color: rowColor },
-      { label: `  WARRIORS   ${warriors}`, color: rowColor },
-      { label: `  BEACONS    ${beacons}`,  color: rowColor },
+      { label: `  SPAWNERS   ${spawners}`,  color: rowColor },
+      { label: `  SEEKERS    ${seekers}`,   color: rowColor },
     ];
 
     rows.forEach((row, i) => {
@@ -1567,47 +1521,11 @@ class GalaxyMap {
       ctx.stroke();
       ctx.restore();
 
-      const stateAbbr = sk.state === 'GUARDING' ? 'GRD' : sk.state === 'FOLLOWING' ? 'FOL' : sk.state === 'FALLBACK' ? 'FBK' : 'SKR';
+      const stateAbbr = 'SKR';
       label(ctx, `${stateAbbr} f${sk.facing}`, sc.x, sc.y + 9 * this.zoom, '#00ffee');
     }
-
-    // ── Beacons ───────────────────────────────────────────
-    for (const bc of this.zylonBeacons) {
-      if (!bc.active) continue;
-      if (!fogBypass && !this.visible.has(HexMath.key(bc.q, bc.r))) continue;
-      const sc    = this._hexToScreen(bc.q, bc.r);
-      const pulse = 0.5 + 0.5 * Math.sin(t * 3 + bc.q);
-      const color = bc.type === 'starbase' ? '#ff3a3a' : '#ff9900';
-
-      ctx.save();
-      ctx.globalAlpha = 0.85 * pulse;
-      ctx.font        = `${Math.max(12, 12 * this.zoom)}px monospace`;
-      ctx.fillStyle   = color;
-      ctx.textAlign   = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('◆', sc.x, sc.y - 5 * this.zoom);
-      ctx.restore();
-      label(ctx, 'BCN ' + bc.type.toUpperCase(), sc.x, sc.y + 6 * this.zoom, color);
-    }
-
-    // ── Warriors ──────────────────────────────────────────
-    for (const wr of this.zylonWarriors) {
-      if (!wr.alive || wr.state === 'WARPING') continue;
-      if (!fogBypass && !this.visible.has(HexMath.key(wr.q, wr.r))) continue;
-      const sc    = this._hexToScreen(wr.q, wr.r);
-      const pulse = 0.6 + 0.4 * Math.sin(t * 2.5 + wr.q);
-
-      ctx.save();
-      ctx.globalAlpha = 0.9 * pulse;
-      ctx.font        = `${Math.max(12, 12 * this.zoom)}px monospace`;
-      ctx.fillStyle   = '#ff44ff';
-      ctx.textAlign   = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('★', sc.x, sc.y + 14 * this.zoom);
-      ctx.restore();
-      label(ctx, 'WRR', sc.x, sc.y + 22 * this.zoom, '#ff44ff');
-    }
   }
+
 
   _drawTarget(ctx) {
     const sc = this._hexToScreen(this.targetPos.q, this.targetPos.r);

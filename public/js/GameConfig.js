@@ -346,20 +346,14 @@ const GameConfig = Object.freeze({
     /** Seconds between each Seeker one-hex galaxy move (normal gameplay). */
     seekerMoveIntervalSec:       45,
 
-    /** Seconds to produce one unit/pair (Seeker, Warrior, or sub-Spawner). */
-    spawnerSpawnIntervalSec:     60,
-
-    /** Seconds after a transit sub-Spawner is born before it hyperjumps to its beacon sector. */
-    spawnerBootSec:              30,
+    /** Seconds after birth before a Seeker makes its first warp. */
+    seekerBirthWarpDelaySec:      5,
 
     /**
      * Simulated seconds per step in the synchronous fast-forward loop.
-     * 45s / 15 = 3 steps per Seeker jump; 60s / 15 = 4 steps per Spawner cycle.
+     * 45s / 15 = 3 steps per Seeker jump.
      */
     fastForwardStepSec:          15,
-
-    /** Visual delay (seconds) after a Warrior is dispatched before it "arrives". */
-    warriorWarpDelaySec:          5,
 
     /** Energy the player must transfer to kickstart a dormant starbase (fully restores shields). */
     starbaseKickstartEnergy:   1000,
@@ -380,19 +374,11 @@ const GameConfig = Object.freeze({
     /** Warrior hp — hits required to destroy one. */
     warriorHp:                    3,
 
-    /** Warrior pairs dispatched per new starbase Beacon. */
-    warriorPairsPerBeacon:        1,
-    /** Ongoing resupply: max warriors one (merged) beacon tries to maintain. */
-    warriorResupplyTarget:        8,   // warriors per sector (merged beacon)
-    warriorResupplyCheckSec:     30,   // seconds between resupply checks
+    /** Maximum Seekers a Spawner will ever produce in its lifetime. */
+    maxSeekersPerSpawner:         6,
 
-    /** Base HP for a freshly-deployed Beacon; each absorbed seeker adds this amount. */
-    beaconBaseHP:               100,
-
-    /** Lifetime production caps per Spawner. */
-    maxSeekerPairsPerSpawner:    12,
-    maxWarriorPairsPerSpawner:   12,
-    maxSubSpawnersPerSpawner:     2,
+    /** Seconds the Spawner pauses production after being hit. */
+    spawnerFleeTimeSec:          10,
 
     // ---- Sector combat ----
     // Seeker

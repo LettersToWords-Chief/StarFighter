@@ -1,426 +1,255 @@
 /**
  * ZylonSpawner.js — Zylon production hub.
  *
- * Every Spawner (initial and sub-spawners) is identical in behavior:
- *  1. Immediately begins producing 6 Seeker pairs — one per hex direction, 1 pair per minute.
- *  2. After the bloom, waits for Beacon signals to decide what to produce next.
- *  3. Responds to beacon signals: starbase → 2 Warrior pairs; resource → 1 sub-Spawner.
- *  4. Re-sends 1 Seeker pair whenever one of its Beacons is destroyed.
- *  5. Lifetime caps: 12 Seeker pairs · 12 Warrior pairs · 2 sub-Spawners → then dies.
+ * The Spawner is a Seeker that has settled in a resource sector. It remains
+ * stationary (at 750U from the sector center) for its entire life.
  *
- * Each Seeker/Warrior is tied to the Spawner that created it.
+ * Production formula: 5 * sqrt(childOrdinal) seconds per child.
+ *   Child 1 = 5s, Child 2 ≈ 7.07s, Child 3 ≈ 8.66s, Child 4 = 10s, …
+ *
+ * Priority order:
+ *   Phase 1 (first 6 children): fill 1 TIE + 1 Bird + 4 Warriors — in that order
+ *   Phase 2 (seekersMade < 6): produce Seekers
+ *     — BLOCKED while this sector's starbase has active shields
+ *     — while blocked, warriors continue bombarding the starbase
+ *   Phase 3 (seekersMade >= 6): maintain 2 TIE + 2 Birds + 5 Warriors
+ *
+ * If a fleet member is killed, the Spawner queues a replacement using the
+ * standard sqrt-formula timer (production never stops).
+ *
+ * Off-screen simulation:
+ *   The Spawner tracks fleet.warrior and fires off starbase bombardment hits
+ *   every warriorFireIntervalSec while the player is not in the sector.
+ *
+ * Production pauses:
+ *   When the Spawner is hit it flees for spawnerFleeTimeSec (10s), during which
+ *   _produceTimer does not advance.
  */
-
 class ZylonSpawner {
   /**
    * @param {object} opts
-   * @param {number}    opts.q        — galaxy hex col
-   * @param {number}    opts.r        — galaxy hex row
-   * @param {GalaxyMap} opts.galaxy   — reference for callbacks
+   * @param {number}    opts.q      — galaxy hex col
+   * @param {number}    opts.r      — galaxy hex row
+   * @param {GalaxyMap} opts.galaxy — reference
    */
   constructor({ q, r, galaxy }) {
-    this.q       = q;
-    this.r       = r;
-    this.galaxy  = galaxy;
-    this.alive   = true;
-    this.clanId  = ZylonSpawner._nextClanId++;
+    this.q      = q;
+    this.r      = r;
+    this.galaxy = galaxy;
+    this.alive  = true;
+    this.clanId = ZylonSpawner._nextClanId++;
 
-    // ── Lifetime counters ──────────────────────────────────
-    const cfg = GameConfig.zylon;
-    this._maxSeekerPairs   = cfg.maxSeekerPairsPerSpawner;   // 12
-    this._maxWarriorPairs  = cfg.maxWarriorPairsPerSpawner;  // 12
-    this._maxSubSpawners   = cfg.maxSubSpawnersPerSpawner;   // 2
+    // ── Fleet inventory (live ships in sector) ──────────────────────────
+    this.fleet = { tie: 0, bird: 0, warrior: 0 };
 
-    this._seekerPairsSpawned   = 0;
-    this._warriorPairsSpawned  = 0;
-    this._subSpawnersSpawned   = 0;
+    // ── Seeker production counter ───────────────────────────────────────
+    this.seekersMade = 0;
+    this._maxSeekers = GameConfig.zylon.maxSeekersPerSpawner ?? 6;
 
-    // ── Production queue ──────────────────────────────────
-    // Each item: { type: 'seeker'|'warrior'|'spawner', beaconRef, remaining }
-    this._queue        = [];
-    this._produceTimer    = 0;
-    this._produceInterval = GameConfig.zylon.spawnerSpawnIntervalSec; // 60 s
+    // ── Production ──────────────────────────────────────────────────────
+    this.childCount     = 0;    // total children ever produced
+    this._produceTimer  = 0;    // accumulates dt toward next child
+    this._fleeTimer     = 0;    // > 0 while fleeing (production paused)
 
-    // ── Bloom state ──────────────────────────────────────
-    this._bloomDirections = [0, 1, 2, 3, 4, 5];
-    this._bloomSent = 0;
+    // ── Off-screen bombardment ──────────────────────────────────────────
+    this._bombardTimer = 0;
 
-    // ── Lifecycle phase ───────────────────────────────────
-    this._phase        = 'active';  // 'transit' | 'arriving' | 'active'
-    this._destBeacon   = null;      // for transit spawners: the beacon they will merge with
-    this._transitTimer = 0;         // seconds since sub-Spawner was born (boot delay)
-    this._defenseQueued = false;    // true once the initial defender sequence is queued
+    // ── SectorView callbacks (set when player enters this sector) ────────
+    this._onUnitBorn     = null;  // (type) → SectorView spawns a 3D ship
+    this._onSpawnerKilled = null; // () → SectorView purges 3D ships
 
-    // ── Defender inventory (galaxy-side, player-independent) ──────────────
-    const defCfg = GameConfig.zylon;
-    this._defenderTarget = {
-      warrior: defCfg.spawnerDefenderWarriors ?? 2,
-      tie:     defCfg.spawnerDefenderTIEs    ?? 1,
-      bird:    defCfg.spawnerDefenderBirds   ?? 1,
-    };
-    this._defenderActive = { warrior: 0, tie: 0, bird: 0 };  // live defender count
-    this._inventoryTimer = 28;  // first audit fires at ~2s after creation
-
-    // ── SectorView callbacks (set when player is in this sector) ──
-    this._onUnitBorn      = null;   // (type, data) — visual birth flash
-    this._onDefenderBirth = null;   // (type) — spawn a sector-only defender
-    this._onSpawnerKilled = null;   // () — sector-level clan kill cascade
-    // Defenders that were produced while player was away — drained on sector entry
-    this._pendingDefenders = [];    // array of type strings: 'warrior'|'tie'|'bird'
-
-    // ── Tracking ─────────────────────────────────────────
-    this._seekers  = [];
-    this._warriors = [];
+    // ── Seeker tracking (for onSeekerDestroyed callback) ─────────────────
+    this._seekers = [];
   }
 
   get key() { return `${this.q},${this.r}`; }
 
   // ─────────────────────────────────────────────
-  // TICK — called every frame by GalaxyMap._updateZylons
+  // PRODUCTION FORMULA
+  // ─────────────────────────────────────────────
+
+  /** Seconds to produce child number (childCount + 1). */
+  get _nextProductionTime() {
+    return 5 * Math.sqrt(this.childCount + 1);
+  }
+
+  // ─────────────────────────────────────────────
+  // FLEET TARGETS
+  // ─────────────────────────────────────────────
+
+  get _targets() {
+    if (this.seekersMade < this._maxSeekers) {
+      return { tie: 1, bird: 1, warrior: 4 };
+    }
+    return { tie: 2, bird: 2, warrior: 5 };
+  }
+
+  // ─────────────────────────────────────────────
+  // TICK
   // ─────────────────────────────────────────────
 
   tick(dt, galaxy) {
     if (!this.alive) return;
-    // ── Transit phase: 30-second boot, then hyperjump to beacon sector ─────────
-    if (this._phase === 'transit') {
-      if (!this._destBeacon?.active) { this.alive = false; return; } // beacon lost mid-transit
-      this._transitTimer += dt;
-      if (this._transitTimer < GameConfig.zylon.spawnerBootSec) return;
-      // Boot complete — teleport to the beacon's galaxy sector
-      this.q = this._destBeacon.q;
-      this.r = this._destBeacon.r;
-      const playerHere = galaxy.playerPos.q === this.q && galaxy.playerPos.r === this.r;
-      if (!playerHere) {
-        this._instantMerge(galaxy);
-      } else {
-        this._phase = 'arriving';
-        galaxy._onTransitSpawnerArrived(this);
-      }
+
+    // ── Flee timer (pauses production) ─────────────────────────────────
+    if (this._fleeTimer > 0) {
+      this._fleeTimer = Math.max(0, this._fleeTimer - dt);
       return;
     }
-    // ── Arriving phase: SectorView is running the 3D merge; wait for onMerged() ─
-    if (this._phase === 'arriving') return;
 
-    const isFastForwardBloom = galaxy.fastForwarding && this._bloomSent < 6;
-    // If a warrior (or sub-spawner) signal job is waiting, always use the full spawn interval
-    // so the first pair never arrives in less than 60s regardless of defender queue intervals.
-    const hasSignalJob = this._queue.some(j =>
-      j.type === 'warrior' || (j.type === 'spawner' && j.beaconRef));
-    const queueInterval = hasSignalJob
-      ? GameConfig.zylon.spawnerSpawnIntervalSec
-      : (this._queue[0]?.interval ?? GameConfig.zylon.spawnerSpawnIntervalSec);
-    this._produceInterval = isFastForwardBloom
-      ? GameConfig.zylon.fastForwardStepSec
-      : queueInterval;
+    // ── Off-screen starbase bombardment ────────────────────────────────
+    const playerHere = galaxy.playerPos?.q === this.q && galaxy.playerPos?.r === this.r;
+    if (!playerHere && this.fleet.warrior > 0) {
+      const sb = galaxy.starbases.find(s => s.q === this.q && s.r === this.r && s.state === 'active');
+      if (sb) {
+        const interval = GameConfig.zylon.warriorFireIntervalSec ?? 8;
+        this._bombardTimer += dt;
+        if (this._bombardTimer >= interval) {
+          this._bombardTimer = 0;
+          sb.takeCombatHit(GameConfig.zylon.zylonTorpedoDamage ?? 10);
+        }
+      }
+    }
 
+    // ── Production timer ────────────────────────────────────────────────
     this._produceTimer += dt;
+    if (this._produceTimer < this._nextProductionTime) return;
+    this._produceTimer = 0;
 
-    // ── Periodic defender inventory audit (every 30s, player-independent) ──
-    this._inventoryTimer += dt;
-    if (this._inventoryTimer >= 30) {
-      this._inventoryTimer = 0;
-      this._auditDefenders();
-    }
-
-    if (this._produceTimer < this._produceInterval) return;
-    this._produceTimer -= this._produceInterval;
-
-    this._processProductionCycle(galaxy);
+    this._produce(galaxy);
   }
 
-  /** Compare live defender counts to targets; produce one of each missing type directly.
-   *  Defenders bypass the main production queue so warrior signal jobs can't starve them. */
-  _auditDefenders() {
-    const types = ['warrior', 'tie', 'bird'];
-    for (const type of types) {
-      const deficit = (this._defenderTarget[type] ?? 0) - (this._defenderActive[type] ?? 0);
-      if (deficit <= 0) continue;
-      // Produce directly — no queue, no priority battle
-      this._defenderActive[type] = (this._defenderActive[type] ?? 0) + 1;
-      if (this._onDefenderBirth) this._onDefenderBirth(type);
-      else this._pendingDefenders.push(type);
-    }
-  }
+  // ─────────────────────────────────────────────
+  // PRODUCTION LOGIC
+  // ─────────────────────────────────────────────
 
-  _processProductionCycle(galaxy) {
-    // ── Priority 1: ANY beacon-signal job (warrior defence OR sub-spawner) ──
-    const signalJob = this._queue.find(j => j.type === 'warrior' || (j.type === 'spawner' && j.beaconRef));
-    if (signalJob) {
-      if (signalJob.type === 'warrior') {
-        if (this._warriorPairsSpawned < this._maxWarriorPairs) {
-          this._spawnWarriorPair(signalJob.beaconRef, galaxy);
-          signalJob.remaining--;
-          if (signalJob.remaining <= 0) this._queue.splice(this._queue.indexOf(signalJob), 1);
-        } else {
-          this._queue.splice(this._queue.indexOf(signalJob), 1);
-        }
-      } else {
-        // sub-spawner from resource beacon signal
-        if (this._subSpawnersSpawned < this._maxSubSpawners) {
-          this._spawnSubSpawner(signalJob.beaconRef, galaxy);
-        }
-        this._queue.splice(this._queue.indexOf(signalJob), 1);
-      }
-      this._checkExhaustion();
+  _produce(galaxy) {
+    const targets = this._targets;
+
+    // Priority 1: fill TIE
+    if (this.fleet.tie < targets.tie) {
+      this._birthFleetMember('tie', galaxy);
+      return;
+    }
+    // Priority 2: fill Bird
+    if (this.fleet.bird < targets.bird) {
+      this._birthFleetMember('bird', galaxy);
+      return;
+    }
+    // Priority 3: fill Warriors
+    if (this.fleet.warrior < targets.warrior) {
+      this._birthFleetMember('warrior', galaxy);
       return;
     }
 
-    // ── Priority 2: initial bloom (6 seeker groups, one per direction) ──
-    if (this._bloomSent < 6 && this._bloomDirections.length > 0) {
-      const dir = this._bloomDirections.shift();
-      this._spawnSeekerPair(dir, galaxy);
-      this._bloomSent++;
-      this._onUnitBorn?.('seeker_group', { clanId: this.clanId, warpAway: true });
-      return;
-    }
-
-    // ── Priority 3: remaining queue items ──
-    if (this._queue.length === 0) return;
-    const job = this._queue[0];
-
-    if (job.type === 'seeker') {
-      if (this._seekerPairsSpawned < this._maxSeekerPairs) {
-        const dir = this._pickReplacementDirection(galaxy);
-        this._spawnSeekerPair(dir, galaxy);
-        this._onUnitBorn?.('seeker_group', { clanId: this.clanId, warpAway: true });
+    // Priority 4: produce Seekers (if under cap and not blocked by starbase)
+    if (this.seekersMade < this._maxSeekers) {
+      const sb = galaxy.starbases.find(s => s.q === this.q && s.r === this.r && s.state === 'active');
+      if (sb) {
+        // Blocked — warriors are already bombarding. Skip Seeker, produce nothing this cycle.
+        return;
       }
-      this._queue.shift();
-    } else if (job.type.startsWith('defender_')) {
-      // Defender jobs are now handled exclusively by _auditDefenders().
-      // If any stale defender jobs remain in the queue, discard them.
-      this._queue.shift();
+      this._birthSeeker(galaxy);
     }
-
-    this._checkExhaustion();
+    // After maxSeekers, loop continues filling Phase 3 targets (handled above)
   }
 
-  // ─────────────────────────────────────────────
-  // BEACON EVENTS
-  // ─────────────────────────────────────────────
-
-  /** Called by a Seeker when it deploys a Beacon. */
-  onBeaconDeployed(beacon, galaxy) {
-    if (!this.alive) return;
-
-    if (beacon.type === 'starbase') {
-      // Fire Red Alert the first time any starbase Beacon is planted.
-      if (!galaxy.redAlert) {
-        galaxy.redAlert = true;
-        if (galaxy.onRedAlert) galaxy.onRedAlert();
-      }
-      // Do NOT queue warriors during fast-forward — the player hasn't started yet.
-      // Warriors begin accumulating only once real gameplay is underway.
-      if (!galaxy.fastForwarding) {
-        const pairs = GameConfig.zylon.warriorPairsPerBeacon;
-        this._queue.push({ type: 'warrior', beaconRef: beacon, remaining: pairs });
-        this._produceTimer = 0;
-      }
-    } else if (beacon.type === 'resource') {
-      this._queue.push({ type: 'spawner', beaconRef: beacon, remaining: 1 });
+  _birthFleetMember(type, galaxy) {
+    this.fleet[type]++;
+    this.childCount++;
+    this._onUnitBorn?.(type);
+    if (GameConfig.debug?.spawner) {
+      console.log(`[Spawner ${this.clanId}] born ${type} (child ${this.childCount}, fleet=${JSON.stringify(this.fleet)})`);
     }
   }
 
-  /** Called when a Beacon guarded by our Seekers is destroyed. */
-  onBeaconDestroyed(beacon, galaxy) {
-    if (!this.alive) return;
-    // If a transit sub-spawner was destined for this beacon, kill it — they are linked
-    for (const sp of (galaxy?.zylonSpawners ?? [])) {
-      if (sp._destBeacon === beacon && sp._phase === 'transit' && sp.alive) {
-        sp.alive  = false;
-        sp._queue = [];
-        break;
-      }
-    }
-    // Queue a replacement Seeker pair
-    this._queue.push({ type: 'seeker', beaconRef: null, remaining: 1 });
-  }
-
-  // ─────────────────────────────────────────────
-  // UNIT CREATION
-  // ─────────────────────────────────────────────
-
-  _spawnSeekerPair(direction, galaxy) {
-    if (this._seekerPairsSpawned >= this._maxSeekerPairs) return;
-
-    const seeker = new ZylonSeeker({
-      q: this.q,
-      r: this.r,
-      facing: direction,   // direction is now an integer 0–5
-      spawner: this,
-      galaxy,
-    });
+  _birthSeeker(galaxy) {
+    const dir    = this._pickSeekerDirection(galaxy);
+    const seeker = new ZylonSeeker({ q: this.q, r: this.r, facing: dir, spawner: this, galaxy });
     this._seekers.push(seeker);
     galaxy.zylonSeekers.push(seeker);
-    this._seekerPairsSpawned++;
-  }
-
-  _spawnWarriorPair(beacon, galaxy) {
-    if (this._warriorPairsSpawned >= this._maxWarriorPairs) return;
-
-    // Spawn TWO warriors per pair — they begin as READY and warp to any active beacon
-    for (let i = 0; i < 2; i++) {
-      const warrior = new ZylonWarrior({
-        q: this.q,   // start at spawner's sector
-        r: this.r,
-        beacon,
-        spawner: this,
-      });
-      // Near-immediate first check so they warp right away if a beacon is already active
-      warrior._waitTimer = 29;
-      this._warriors.push(warrior);
-      galaxy.zylonWarriors.push(warrior);
+    this.seekersMade++;
+    this.childCount++;
+    this._onUnitBorn?.('seeker');
+    if (GameConfig.debug?.spawner) {
+      console.log(`[Spawner ${this.clanId}] born seeker #${this.seekersMade} facing ${dir}`);
     }
-    this._warriorPairsSpawned++; // counts pairs, not individual warriors
   }
 
-  _spawnSubSpawner(beacon, galaxy) {
-    if (!beacon?.active) return;
-    if (this._subSpawnersSpawned >= this._maxSubSpawners) return;
-
-    const sub = new ZylonSpawner({ q: beacon.q, r: beacon.r, galaxy });
-    sub._phase      = 'transit';  // born in transit — waits for merge before producing
-    sub._destBeacon = beacon;     // the specific beacon it is destined to merge with
-    galaxy.zylonSpawners.push(sub);
-    this._subSpawnersSpawned++;
-
-    // Birth visual in parent's sector (if player is present)
-    this._onUnitBorn?.('sub_spawner', { clanId: this.clanId, warpAway: true });
-
-    galaxy._onSubSpawnerCreated(sub);
+  _pickSeekerDirection(galaxy) {
+    const usedFacings = new Set(this._seekers.filter(s => s.alive).map(s => s.facing));
+    const free = [0, 1, 2, 3, 4, 5].filter(f => !usedFacings.has(f));
+    if (free.length > 0) return free[Math.floor(Math.random() * free.length)];
+    return Math.floor(Math.random() * 6);
   }
 
   // ─────────────────────────────────────────────
-  // UNIT DEATH CALLBACKS
+  // FLEET LOSS (called by SectorView when a ship is killed)
+  // ─────────────────────────────────────────────
+
+  onFleetLoss(type) {
+    if (!this.alive) return;
+    if (this.fleet[type] !== undefined) {
+      this.fleet[type] = Math.max(0, this.fleet[type] - 1);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // SEEKER CALLBACKS
   // ─────────────────────────────────────────────
 
   onSeekerDestroyed(seeker) {
     this._seekers = this._seekers.filter(s => s !== seeker);
   }
 
-  onWarriorDestroyed(warrior) {
-    this._warriors = this._warriors.filter(w => w !== warrior);
-  }
+  // ─────────────────────────────────────────────
+  // FLEE (called when Spawner ship is hit)
+  // ─────────────────────────────────────────────
 
-  /**
-   * Called by an active Beacon when its warrior count drops below the target.
-   * Queues additional warrior pairs through the existing production pipeline.
-   * If a warrior job for this beacon is already queued, tops it up rather than
-   * adding a duplicate entry.
-   */
-  onResupplyRequested(beacon, pairsNeeded, galaxy) {
-    if (!this.alive) return;
-    if (!beacon.active) return;
-    if (this._warriorPairsSpawned >= this._maxWarriorPairs) return;
-
-    // Prefer idle (orphaned) warriors already in existence — send them first.
-    // An orphaned warrior is READY but its assigned beacon is no longer active.
-    const idle = this._warriors.filter(w => w.alive && w.state === 'READY' && !w.beacon?.active);
-    let dispatched = 0;
-    while (dispatched < pairsNeeded && idle.length >= 2) {
-      const w1 = idle.shift();
-      const w2 = idle.shift();
-      w1.beacon = beacon;
-      w2.beacon = beacon;
-      // Reset warp timer so they warp on the next tick (within ~1 second)
-      w1._waitTimer = 29;
-      w2._waitTimer = 29;
-      dispatched++;
-    }
-
-    // If idle warriors didn’t cover the full request, queue new production.
-    const remaining = pairsNeeded - dispatched;
-    if (remaining > 0) {
-      const existing = this._queue.find(j => j.type === 'warrior' && j.beaconRef === beacon);
-      if (existing) {
-        existing.remaining = Math.max(existing.remaining, remaining);
-      } else {
-        this._queue.push({ type: 'warrior', beaconRef: beacon, remaining });
-      }
-    }
+  onHit() {
+    this._fleeTimer = GameConfig.zylon.spawnerFleeTimeSec ?? 10;
   }
 
   // ─────────────────────────────────────────────
-  // MERGE & DEFENDER CALLBACKS
+  // RED ALERT (called by GalaxyMap on first Spawner in a starbase sector)
+  // ─────────────────────────────────────────────
+
+  get isInStarbaseSector() {
+    return !!(this.galaxy?.starbases?.find(sb => sb.q === this.q && sb.r === this.r));
+  }
+
+  // ─────────────────────────────────────────────
+  // FAST-FORWARD SEEDING
   // ─────────────────────────────────────────────
 
   /**
-   * Galaxy-level instant merge — called when the player is NOT in the sector.
-   * Deactivates the beacon (it is "absorbed") and switches the spawner to active.
+   * Called by GalaxyMap._fastForwardZylons to run production at accelerated speed.
+   * Ticks the spawner with a large dt until the first Seeker is ready.
    */
-  _instantMerge(galaxy) {
-    if (GameConfig.debug.spawner) {
-      console.log(`[Spawner] clan ${this.clanId} instant-merged at (${this.q},${this.r}) — player absent`);
-    }
-    this._destBeacon.destroy();   // sets beacon.active = false; filtered next GalaxyMap pass
-    this._phase        = 'active';
-    this._destBeacon   = null;
-    this._produceTimer = 0;        // start fresh production cadence
-  }
-
-  /** Called by SectorView when the transit spawner catches and merges with its beacon in 3D. */
-  onMerged(newClanId) {
-    this._phase        = 'active';
-    this._destBeacon   = null;
-    this.clanId        = newClanId;   // new clan identity — all future units use this ID
-    this._produceTimer = 0;           // start fresh production cadence
-  }
-
-  /** Called by SectorView when an on-site defender is destroyed. Decrements live count;
-   *  the inventory audit (running every 30s) will queue a replacement. */
-  reportDefenderDeath(type) {
-    if (!this.alive) return;
-    if (this._defenderActive[type] !== undefined) {
-      this._defenderActive[type] = Math.max(0, this._defenderActive[type] - 1);
+  fastForwardTick(dt, galaxy) {
+    this._produceTimer += dt;
+    while (this._produceTimer >= this._nextProductionTime) {
+      this._produceTimer -= this._nextProductionTime;
+      this._produce(galaxy);
     }
   }
 
   // ─────────────────────────────────────────────
-  // HELPERS
-  // ─────────────────────────────────────────────
-
-  _pickReplacementDirection(galaxy) {
-    // Prefer a facing not already used by a living Seeker
-    const usedFacings = new Set(this._seekers.map(s => s.facing));
-    const free = [0, 1, 2, 3, 4, 5].filter(f => !usedFacings.has(f));
-    if (free.length > 0) return free[Math.floor(Math.random() * free.length)];
-    // All facings occupied — pick random
-    return Math.floor(Math.random() * 6);
-  }
-
-  _checkExhaustion() {
-    const done =
-      this._seekerPairsSpawned  >= this._maxSeekerPairs &&
-      this._warriorPairsSpawned >= this._maxWarriorPairs &&
-      this._subSpawnersSpawned  >= this._maxSubSpawners &&
-      this._queue.length === 0;
-
-    if (done) {
-      this.alive = false;
-      // GalaxyMap will clean up dead spawners on next pass
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  // COMBAT (player destroys the Spawner itself)
+  // DESTROY
   // ─────────────────────────────────────────────
 
   destroy() {
-    this.alive  = false;
-    this._queue = [];
-    // ── Clan kill cascade: all units hatched by this Spawner die with it ──
+    if (!this.alive) return;
+    this.alive       = false;
+    this.fleet       = { tie: 0, bird: 0, warrior: 0 };
+    // Kill all living Seekers that this Spawner produced
     for (const s of this._seekers) {
-      if (s.alive) {
-        s.alive = false;
-        if (s.beacon?.active) s.beacon.destroy();
-      }
+      if (s.alive) s.alive = false;
     }
-    for (const w of this._warriors) {
-      if (w.alive) w.alive = false;
-    }
-    // Notify SectorView (if player is present) to purge all matching 3D Zylons
+    this._seekers = [];
     this._onSpawnerKilled?.();
   }
 }
 
-// Global clan counter — increments each time a new Spawner (initial or sub) is created.
+// Global clan counter
 ZylonSpawner._nextClanId = 0;

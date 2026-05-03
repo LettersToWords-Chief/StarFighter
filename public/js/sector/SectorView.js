@@ -1927,6 +1927,8 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
             _spawnerGalaxyRef.destroy();
             _spawnerShip = null;
           }
+        } else if (z.type === 'spawner' && _spawnerGalaxyRef) {
+          _spawnerGalaxyRef.onHit?.();
         }
       }
     }  // end for loop over _zylons
@@ -2076,13 +2078,13 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
 
   /**
    * Poll active defenders each frame for death.
-   * When dead, report to the galaxy Spawner so the 30s inventory audit queues a replacement.
+   * When dead, notify the galaxy Spawner so it queues a replacement.
    */
   function _checkDefenderDeaths() {
     if (!_activeDefenders.length) return;
     _activeDefenders = _activeDefenders.filter(d => {
       if (d.ship.dead) {
-        d.galaxyRef?.reportDefenderDeath?.(d.defType);
+        d.galaxyRef?.onFleetLoss?.(d.defType);
         return false;
       }
       return true;
@@ -2899,6 +2901,8 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
                   _spawnerGalaxyRef.destroy();
                   _spawnerShip = null;
                 }
+              } else if (z.type === 'spawner' && _spawnerGalaxyRef) {
+                _spawnerGalaxyRef.onHit?.();
               }
               hit = true;
               break;
@@ -4351,57 +4355,42 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
    *
    * @param {ZylonSpawner} galaxySpawner  — the transit spawner (phase === 'arriving')
    */
-  function notifyTransitSpawnerArrived(galaxySpawner) {
+
+  /**
+   * Called when a Seeker evolves into a Spawner while the player is in this sector.
+   * Removes the seeker's icosahedron and spawns the Spawner + initial fleet.
+   */
+  function notifySpawnerEvolved(galaxySpawner) {
     if (!_scene || !_running) return;
-    if (_spawnerShip && !_spawnerShip.dead) return; // already managing one this session
 
-    // Find the beacon 3D ship this spawner is destined to merge with.
-    // Beacon ships carry the ZylonSeeker as _galaxyRef; the seeker holds .beacon.
-    const beaconShip = _zylons.find(z =>
-      !z.dead && z.type === 'seeker_beacon' &&
-      z._galaxyRef?.beacon === galaxySpawner._destBeacon
-    );
+    // Remove any dead seeker icosahedrons (the evolved seeker was just marked alive=false)
+    _zylons = _zylons.filter(z => {
+      if (z.type === 'seeker_beacon' && z._galaxyRef && !z._galaxyRef.alive) {
+        z.detach();
+        return false;
+      }
+      return true;
+    });
 
-    // Place spawner 200u ahead of the beacon's current orbital tangent direction
-    let spawnPos;
-    if (beaconShip) {
-      const angle   = beaconShip._bOrbitAngle;
-      const dir     = beaconShip._bOrbitDir;
-      const tangent = new THREE.Vector3(
-        (-Math.sin(angle) * beaconShip._orbitU.x + Math.cos(angle) * beaconShip._orbitV.x) * dir,
-        (-Math.sin(angle) * beaconShip._orbitU.y + Math.cos(angle) * beaconShip._orbitV.y) * dir,
-        (-Math.sin(angle) * beaconShip._orbitU.z + Math.cos(angle) * beaconShip._orbitV.z) * dir
-      ).normalize();
-      spawnPos = beaconShip.mesh.position.clone().addScaledVector(tangent, 200);
-    } else {
-      // Matching beacon not visible in this session — place at a random orbit-radius point
-      const a    = Math.random() * Math.PI * 2;
-      const DIST = GameConfig.zylon.beaconPlacementUnits ?? 750;
-      spawnPos   = new THREE.Vector3(Math.cos(a) * DIST, 0, Math.sin(a) * DIST);
-    }
-
-    const spShip = new ZylonShip(_scene, spawnPos, 'spawner', galaxySpawner.clanId);
-    spShip._chaseBeaconShip = beaconShip ?? null;
-
-    // Mirror the merge callback from enter() — galaxy and sector state are updated together
-    spShip._onMerge = (sShip, bShip) => {
-      const newClanId = ZylonSpawner._nextClanId++;
-      sShip.activateMerge(newClanId);
-      if (bShip && !bShip.dead) { bShip.detach(); }
-      _zylons = _zylons.filter(z => z !== bShip);
-      galaxySpawner.onMerged(newClanId);
-      galaxySpawner._onDefenderBirth = (type) => _triggerDefenderBirth(sShip, type, galaxySpawner);
-      galaxySpawner._onSpawnerKilled = () => _cascadeSpawnerKill(sShip.clanId ?? newClanId);
-    };
-
+    // Spawn the Spawner at its orbital distance
+    const DIST    = GameConfig.zylon.beaconPlacementUnits ?? 750;
+    const angle   = Math.random() * Math.PI * 2;
+    const pos     = new THREE.Vector3(Math.cos(angle) * DIST, 0, Math.sin(angle) * DIST);
+    const spShip  = new ZylonShip(_scene, pos, 'spawner', galaxySpawner.clanId);
+    spShip.activateMerge(galaxySpawner.clanId);
     _spawnerShip      = spShip;
     _spawnerGalaxyRef = galaxySpawner;
     _zylons.push(spShip);
     _targets++;
-    _queueTicker('ALERT \u2014 ZYLON AMBER SPAWNER HAS ARRIVED IN SECTOR', 'spawner_arrival', 0);
+
+    // Wire production and kill callbacks
+    galaxySpawner._onUnitBorn     = (type) => { if (type !== 'seeker') _triggerDefenderBirth(spShip, type, galaxySpawner); };
+    galaxySpawner._onSpawnerKilled = () => _cascadeSpawnerKill(galaxySpawner.clanId);
+
+    _queueTicker('ALERT \u2014 ZYLON SPAWNER HAS EVOLVED IN SECTOR', 'spawner_evolved', 0);
   }
 
-  function enter({ canvas, sector, arrivalOffset = null, arrivalSpeed = 0, arrivalVelocity, throttleSpeed, onExit, onMapToggle, seekerGalaxyRefs = [], warriorGalaxyRefs = [], spawnerGalaxyRef = null }) {
+  function enter({ canvas, sector, arrivalOffset = null, arrivalSpeed = 0, arrivalVelocity, throttleSpeed, onExit, onMapToggle, seekerGalaxyRefs = [], spawnerGalaxyRef = null }) {
     if (_running) return;
     _canvas       = canvas;
     _onExit       = onExit;
@@ -4499,162 +4488,71 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _buildScene();
     _spawnCargoShips(sector?.supplyShips || []);
 
-    // Entry angle — deterministic per sector so the group always arrives from same direction
+    // Entry angle — deterministic per sector
     const _zEntryAngle = ((_sectorQ * 3 + _sectorR * 7) % 12) * (Math.PI * 2 / 12);
-    const _zEntryDist  = (GameConfig.zylon.beaconPlacementUnits ?? 750) + 200; // 950u
-    const _zEntryBase  = new THREE.Vector3(
-      Math.cos(_zEntryAngle) * _zEntryDist, 0, Math.sin(_zEntryAngle) * _zEntryDist);
+    const ORBIT_DIST   = GameConfig.zylon.beaconPlacementUnits ?? 750;
 
-    // Primary (GUARDING) seekers get the full three-ship group.
-    // MERGED seekers get only TIE + Bird, which become defenders of the primary seeker.
-    let primaryBeaconShip = null;
-    let primarySeekerRef  = null;  // the GUARDING seeker that owns the primary beacon
-
+    // ── Spawn solo Seeker icosahedrons ───────────────────────────────────────
     for (let i = 0; i < seekerCount; i++) {
       const seekerRef = seekerGalaxyRefs[i] ?? null;
-      // A merged seeker is now alive=false (killed by absorb()), but state was 'MERGED'
-      const isMerged  = !seekerRef?.alive || seekerRef?.state === 'MERGED';
-
-      if (!isMerged) {
-        // ── Full spawn: BEACON + TIE + Bird ──────────────────────────────────
-        const BEACON_DIST  = GameConfig.zylon.beaconPlacementUnits ?? 750;
-        const beaconStart  = new THREE.Vector3(
-          Math.cos(_zEntryAngle) * BEACON_DIST, 0, Math.sin(_zEntryAngle) * BEACON_DIST);
-        const beaconShip   = new ZylonShip(_scene, beaconStart, 'seeker_beacon', seekerRef?.clanId ?? 0);
-        if (seekerRef) beaconShip.setGalaxyRef(seekerRef);
-        // Snap beacon to its true tilted orbit position so TIE/Bird spawn at the right spot
-        const _bc = Math.cos(beaconShip._bOrbitAngle) * BEACON_DIST;
-        const _bs = Math.sin(beaconShip._bOrbitAngle) * BEACON_DIST;
-        beaconShip.mesh.position.set(
-          beaconShip._orbitU.x * _bc + beaconShip._orbitV.x * _bs,
-          beaconShip._orbitU.y * _bc + beaconShip._orbitV.y * _bs,
-          beaconShip._orbitU.z * _bc + beaconShip._orbitV.z * _bs
-        );
-        _zylons.push(beaconShip);
-        beaconShip.setBroadcasting(true);
-        if (!primaryBeaconShip) primaryBeaconShip = beaconShip;
-        if (!primarySeekerRef)  primarySeekerRef  = seekerRef;
-
-        // TIE and Bird spawn within 100u of the beacon's TRUE orbit position
-        const beaconActual = beaconShip.mesh.position;
-        ['seeker_tie', 'seeker_bird'].forEach(type => {
-          const jAngle   = Math.random() * Math.PI * 2;
-          const jitter   = Math.random() * 100;
-          const spawnPos = beaconActual.clone().addScaledVector(
-            new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-          const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
-          if (seekerRef) ship.setGalaxyRef(seekerRef);
-          _zylons.push(ship);
-        });
-      } else {
-        // ── Merged spawn: TIE + Bird become defenders of the PRIMARY seeker ───
-        const origin = primaryBeaconShip
-          ? primaryBeaconShip.mesh.position.clone()
-          : new THREE.Vector3(
-              Math.cos(_zEntryAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750),
-              0,
-              Math.sin(_zEntryAngle) * (GameConfig.zylon.beaconPlacementUnits ?? 750));
-        ['seeker_tie', 'seeker_bird'].forEach(type => {
-          const jAngle   = Math.random() * Math.PI * 2;
-          const jitter   = 80 + Math.random() * 120;
-          const spawnPos = origin.clone().addScaledVector(
-            new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-          const ship = new ZylonShip(_scene, spawnPos, type, seekerRef?.clanId ?? 0);
-          // Re-assign to primary seeker — these ships now defend the primary beacon
-          if (primarySeekerRef) {
-            ship.setGalaxyRef(primarySeekerRef);
-            primarySeekerRef._liveComponents = (primarySeekerRef._liveComponents ?? 3) + 1;
-          }
-          _zylons.push(ship);
-        });
-        // Add a visual merge layer to the primary beacon
-        primaryBeaconShip?.addMergeLayer();
-      }
-    }
-    // Warriors at sector entry come from galaxy ZylonWarriors in ASSAULTING/COMBAT state.
-    // Spawn each at its real approach distance so the player sees them in the right place.
-    for (let i = 0; i < warriorCount; i++) {
-      const wRef = warriorGalaxyRefs[i] ?? null;
-      const dist = wRef?._distToStarbase ?? 200;
-      let wSpawn;
-      if (dist <= 200) {
-        // Already at orbit — place at random angle on the 200u orbit circle
-        const orbAngle = Math.random() * Math.PI * 2;
-        wSpawn = new THREE.Vector3(Math.cos(orbAngle) * 200, 0, Math.sin(orbAngle) * 200);
-      } else {
-        // Still approaching — place at current distance along entry angle with jitter
-        const jAngle = Math.random() * Math.PI * 2;
-        const jitter = 30 + Math.random() * 50;
-        wSpawn = new THREE.Vector3(
-          Math.cos(_zEntryAngle) * dist, 0, Math.sin(_zEntryAngle) * dist
-        ).addScaledVector(new THREE.Vector3(Math.cos(jAngle), 0, Math.sin(jAngle)), jitter);
-      }
-      const wShip = new ZylonShip(_scene, wSpawn, 'warrior', wRef?.clanId ?? 0);
-      if (wRef) wShip.setGalaxyRef(wRef);
-      _zylons.push(wShip);
+      if (!seekerRef?.alive) continue;
+      const angle = (_zEntryAngle + (i * Math.PI / 3)) % (Math.PI * 2);
+      const pos   = new THREE.Vector3(Math.cos(angle) * ORBIT_DIST, 0, Math.sin(angle) * ORBIT_DIST);
+      const ship  = new ZylonShip(_scene, pos, 'seeker_beacon', seekerRef.clanId);
+      ship.setGalaxyRef(seekerRef);
+      _zylons.push(ship);
     }
 
-    if (totalZylons > 0 && typeof showMessage === 'function') {
-      // showMessage('RED ALERT', '', `${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED`);
-    }
-
-    // ── Spawn Spawner (transit or active) ────────────────────────────────────
+    // ── Spawn Spawner + fleet ────────────────────────────────────────────────
     _spawnerGalaxyRef = spawnerGalaxyRef;
     if (spawnerGalaxyRef?.alive) {
-      const BEACON_DIST = GameConfig.zylon.beaconPlacementUnits ?? 750;
-      // Spawn the amber transit form at the sector entry angle
       const spawnPos = new THREE.Vector3(
-        Math.cos(_zEntryAngle) * (BEACON_DIST + 300), 0,
-        Math.sin(_zEntryAngle) * (BEACON_DIST + 300));
+        Math.cos(_zEntryAngle) * ORBIT_DIST, 0, Math.sin(_zEntryAngle) * ORBIT_DIST);
       const spShip = new ZylonShip(_scene, spawnPos, 'spawner', spawnerGalaxyRef.clanId);
+      spShip.activateMerge(spawnerGalaxyRef.clanId);
       _spawnerShip = spShip;
       _zylons.push(spShip);
 
-      if (spawnerGalaxyRef._phase === 'transit') {
-        // Find the beacon ship this spawner will chase (same clan)
-        const beaconShip = _zylons.find(z =>
-          !z.dead && z.type === 'seeker_beacon' &&
-          z._clanId === spawnerGalaxyRef.clanId
-        );
-        // Set the merge callback — fired when spawner reaches the beacon
-        spShip._onMerge = (sShip, bShip) => {
-          const newClanId = ZylonSpawner._nextClanId++;
-          sShip.activateMerge(newClanId);
-          // Remove beacon from scene and _zylons
-          if (bShip && !bShip.dead) { bShip.detach(); }
-          _zylons = _zylons.filter(z => z !== bShip);
-          // Notify galaxy-level spawner
-          spawnerGalaxyRef.onMerged(newClanId);
-          // Wire up defender birth callback and drain any banked defenders
-          spawnerGalaxyRef._onDefenderBirth = (type) => {
-            _triggerDefenderBirth(sShip, type, spawnerGalaxyRef);
-          };
-          // Wire up spawner killed cascade
-          spawnerGalaxyRef._onSpawnerKilled = () => {
-            _cascadeSpawnerKill(sShip.clanId ?? newClanId);
-          };
-        };
-        // Pass beaconShip via context each frame
-        spShip._chaseBeaconShip = beaconShip ?? null;
-      } else {
-        // Active spawner — already merged. Show active form immediately.
-        spShip.activateMerge(spawnerGalaxyRef.clanId);
-        spawnerGalaxyRef._onDefenderBirth = (type) => {
-          _triggerDefenderBirth(spShip, type, spawnerGalaxyRef);
-        };
-        spawnerGalaxyRef._onSpawnerKilled = () => {
-          _cascadeSpawnerKill(spawnerGalaxyRef.clanId);
-        };
-        // Drain any defenders that were produced while no player was present
-        const pending = spawnerGalaxyRef._pendingDefenders ?? [];
-        for (const type of pending) _triggerDefenderBirth(spShip, type, spawnerGalaxyRef);
-        spawnerGalaxyRef._pendingDefenders = [];
+      // Spawn TIE escorts
+      for (let i = 0; i < (spawnerGalaxyRef.fleet.tie ?? 0); i++) {
+        const a   = Math.random() * Math.PI * 2;
+        const pos = spawnPos.clone().addScaledVector(
+          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 80 + Math.random() * 120);
+        const ship = new ZylonShip(_scene, pos, 'seeker_tie', spawnerGalaxyRef.clanId);
+        ship.setGalaxyRef(spawnerGalaxyRef);
+        _zylons.push(ship);
+        _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'tie' });
       }
+      // Spawn Bird escorts
+      for (let i = 0; i < (spawnerGalaxyRef.fleet.bird ?? 0); i++) {
+        const a   = Math.random() * Math.PI * 2;
+        const pos = spawnPos.clone().addScaledVector(
+          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 80 + Math.random() * 120);
+        const ship = new ZylonShip(_scene, pos, 'seeker_bird', spawnerGalaxyRef.clanId);
+        ship.setGalaxyRef(spawnerGalaxyRef);
+        _zylons.push(ship);
+        _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'bird' });
+      }
+      // Spawn Warrior guards
+      for (let i = 0; i < (spawnerGalaxyRef.fleet.warrior ?? 0); i++) {
+        const a   = Math.random() * Math.PI * 2;
+        const pos = spawnPos.clone().addScaledVector(
+          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 150 + Math.random() * 200);
+        const ship = new ZylonShip(_scene, pos, 'warrior', spawnerGalaxyRef.clanId);
+        ship.setGalaxyRef(spawnerGalaxyRef);
+        ship._guardMode  = 'spawner';
+        ship._guardIndex = i;
+        _zylons.push(ship);
+        _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'warrior' });
+      }
+
+      // Wire: new unit born during player visit → spawn in sector
+      spawnerGalaxyRef._onUnitBorn = (type) => {
+        if (type !== 'seeker') _triggerDefenderBirth(spShip, type, spawnerGalaxyRef);
+      };
+      // Wire: spawner killed → cascade-kill all fleet ships
+      spawnerGalaxyRef._onSpawnerKilled = () => _cascadeSpawnerKill(spawnerGalaxyRef.clanId);
     }
-
-
-
-
 
 
     // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
@@ -4737,23 +4635,15 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _unbind();
     _rmOverlay();
 
-    // ── Spawner defender handoff ──────────────────────────────────────────────
-    // Before tearing down the 3D scene, write all live defenders (and any still
-    // queued in the birth queue) back into the galaxy spawner's _pendingDefenders.
-    // This ensures they re-appear in formation on the next sector entry.
-    // Also disconnect the live sector callbacks so that defenders produced while
-    // the player is away land in _pendingDefenders (not a stale closure).
+    // ── Spawner callback teardown + fleet sync ────────────────────────────────
+    // Disconnect live sector callbacks. Sync actual surviving fleet counts
+    // back to the galaxy Spawner so it accurately tracks replacements needed.
     if (_spawnerGalaxyRef?.alive) {
-      _spawnerGalaxyRef._onDefenderBirth = null;
+      _spawnerGalaxyRef._onUnitBorn      = null;
       _spawnerGalaxyRef._onSpawnerKilled = null;
-      // Clear first — prevents exponential accumulation across multiple visits
-      _spawnerGalaxyRef._pendingDefenders = [];
-      for (const d of _activeDefenders) {
-        if (!d.ship.dead) _spawnerGalaxyRef._pendingDefenders.push(d.defType);
-      }
-      for (const b of _birthQueue) {
-        if (!b.warpAway && b.defType) _spawnerGalaxyRef._pendingDefenders.push(b.defType);
-      }
+      _spawnerGalaxyRef.fleet.tie     = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'tie').length;
+      _spawnerGalaxyRef.fleet.bird    = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'bird').length;
+      _spawnerGalaxyRef.fleet.warrior = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'warrior').length;
     }
     _activeDefenders = [];
 
@@ -4932,7 +4822,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, addMergeLayerToBeacon, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
-           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifyTransitSpawnerArrived,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifySpawnerEvolved,
             get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
