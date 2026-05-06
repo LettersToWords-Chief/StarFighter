@@ -380,6 +380,14 @@ const GameConfig = Object.freeze({
     /** Seconds the Spawner pauses production after being hit. */
     spawnerFleeTimeSec:          10,
 
+    /** Maximum live Spawners allowed in a single sector at once.
+     *  When full, additional Seekers that settle donate HP instead of evolving. */
+    maxSpawnersPerSector:         2,
+
+    /** Shield + hull HP donated to each existing Spawner in the sector
+     *  when the cap is full and a new Seeker would otherwise have evolved. */
+    spawnerHPDonation:           50,
+
     // ---- Sector combat ----
     // Seeker
     seekerHP:                   400,   // ~3 hits to kill (185 dmg/hit)

@@ -236,6 +236,9 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   let _activeDefenders  = [];    // [ { ship, defType, galaxyRef } ] — live spawner guards, polled for death
   let _guardReassignTimer = 0;   // fires _reassignGuardIndices every 1s when defenders are present
   let _shipCollisionCd    = 0;   // cooldown between ship-body collision damage events
+  // Victory-pending state (Item #5): set when all spawners are destroyed; win triggers on Capital dock
+  let _victoryPending     = false;   // true when all spawners destroyed but player hasn't docked at Capital
+  let _onVictory          = null;    // callback() — set by main.js to fire the actual win screen
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -271,6 +274,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   let _repairPlan     = [];    // [{id, label, hp, maxHP, partKey, checked, damaged, apply}]
   let _repairReserved = {};   // { engineParts: N, ... } — total taken from base at dock-start
   let _repairDockMode = false; // true=docking, false=read-only (R key)
+  let _onStarbaseAction = null; // callback(action) wired by main.js
   let _repairPanelOpen = false;
 
   // ---- Mouse-in-view tracking ----
@@ -317,14 +321,21 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       if (_hasStarbase && _dockState === 'idle') {
         const distToSB = _camera.position.distanceTo(SB_POS);
         if (distToSB < DOCK_RANGE && _currentVelocity < 0.5) {
-          _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
-          _plugMesh.position.copy(SB_POS);
-          _plugMesh.visible = true;
-          // Choose dock type based on starbase state
+          // ── Item #5: Victory fires the instant D is pressed at the Capital ──
+          if (_victoryPending && _currentStarbase?.isCapital) {
+            _victoryPending = false;
+            setTimeout(() => { _onVictory?.(); }, 500);
+          }
           _dockIsKickstart = (_currentStarbase?.state === 'dormant');
-          _dockState = 'outbound';
-          // Build repair plan and open overlay (drone departs simultaneously)
-          if (!_dockIsKickstart) {
+          if (_dockIsKickstart) {
+            // Kickstart (dormant base): drone launches immediately — no repair plan
+            _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
+            _plugMesh.position.copy(SB_POS);
+            _plugMesh.visible = true;
+            _dockState = 'outbound';
+          } else {
+            // Normal dock: open Starbase Controls + damage report first.
+            // Drone launches only when player clicks REPAIR AND REFUEL.
             _buildRepairPlan(true);
             _openDamageReport();
           }
@@ -734,6 +745,10 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       { id:'shields',    label:'SHIELD GENERATOR', group:'SHIELDS',    sortPriority:0,
         hp: _shieldCapacity, maxHP: 400, partKey:'shieldParts',
         apply: () => { _shieldCapacity = 400; _shieldRechargeRate = 67; } },
+      // -- STRUCTURE � sentinel so the group renders; bar is built by the special STRUCTURE block --
+      { id:'hull', label:'HULL INTEGRITY', group:'STRUCTURE', sortPriority:0,
+        hp: _hullHP, maxHP: GameConfig.player.hullHP ?? 600, partKey:'spareParts',
+        apply: () => {} },   // actual repair is handled via _hullRepair in _applyRepairPlan
     ];
 
     // Annotate damaged flag + initial checked = false
@@ -747,7 +762,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       // (warpDrive is first in the array so it wins ties over regular engines)
       const byKey = {};
       for (const s of allSystems) {
-        if (!s.damaged) continue;
+        if (!s.damaged || s.id === 'hull') continue;  // hull handled separately by _hullRepair
         if (!byKey[s.partKey]) byKey[s.partKey] = [];
         byKey[s.partKey].push(s);
       }
@@ -809,18 +824,71 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     if (el) el.style.display = 'none';
   }
 
+  /** Launches the docking drone. Called by the REPAIR AND REFUEL button inside the damage report. */
+  function _startDockDrone() {
+    if (_dockState !== 'idle' || !_hasStarbase) return;
+    _plugEndPos.copy(PLUG_CAM_LOCAL).applyMatrix4(_camera.matrixWorld);
+    _plugMesh.position.copy(SB_POS);
+    _plugMesh.visible = true;
+    _dockState = 'outbound';
+    // Re-render to update button state (disable REPAIR AND REFUEL)
+    _renderDamageReport();
+  }
+
   function _renderDamageReport() {
-    const badge = document.getElementById('dr-mode-badge');
-    const hint  = document.getElementById('dr-hint');
+    const badge    = document.getElementById('dr-mode-badge');
+    const hint     = document.getElementById('dr-hint');
     const budgetEl = document.getElementById('dr-budget');
     const rowsEl   = document.getElementById('dr-rows');
+    const sbCtrlEl = document.getElementById('dr-sb-controls');
     if (!rowsEl) return;
+
+    // ── Starbase Controls section ────────────────────────────────────────────
+    if (sbCtrlEl) {
+      if (_hasStarbase && _currentStarbase && _repairDockMode && !_dockIsKickstart) {
+        const droneActive = _dockState !== 'idle';
+        const repairLabel = droneActive ? 'DRONE DISPATCHED' : '[ REPAIR AND REFUEL ]';
+        // Power scan availability
+        const sbEnergy = _currentStarbase.inventory?.energy ?? 0;
+        const canScan  = window._powerScanUnlocked
+          && sbEnergy >= (GameConfig.powerScan?.energyCost ?? 500)
+          && !_currentStarbase.underAttack;
+        const scanLabel   = canScan ? '[ POWER SCAN ]' : '[ POWER SCAN ]';
+        const scanDisAttr = canScan ? '' : 'disabled';
+        sbCtrlEl.innerHTML =
+          '<div class="dr-sb-label">STARBASE CONTROLS</div>'
+          + '<div class="dr-sb-btns">'
+          + '<button class="sb-ctrl-btn sb-action" id="dr-btn-repair"'
+          + (droneActive ? ' disabled' : '') + '>' + repairLabel + '</button>'
+          + '<button class="sb-ctrl-btn" id="dr-btn-scan" ' + scanDisAttr + '>' + scanLabel + '</button>'
+          + '</div>';
+        // Wire buttons
+        const repBtn = document.getElementById('dr-btn-repair');
+        const scnBtn = document.getElementById('dr-btn-scan');
+        if (repBtn && !droneActive) {
+          repBtn.addEventListener('click', () => { _startDockDrone(); }, { once: true });
+        }
+        if (scnBtn && canScan) {
+          scnBtn.addEventListener('click', () => {
+            scnBtn.disabled = true;
+            scnBtn.textContent = '[ SCANNING... ]';
+            scnBtn.classList.add('sb-scanning');
+            _onStarbaseAction?.('powerScan');
+          }, { once: true });
+        }
+      } else {
+        sbCtrlEl.innerHTML = ''; // hidden by :empty rule
+      }
+    }
 
     if (badge) {
       if (_repairDockMode) {
-        badge.textContent = 'DOCK IN PROGRESS';
+        const droneActive = _dockState !== 'idle';
+        badge.textContent = droneActive ? 'DOCK IN PROGRESS' : 'DOCK PENDING';
         badge.classList.remove('dr-readonly');
-        if (hint) hint.textContent = 'Uncheck to skip a repair — unused parts return to base.';
+        if (hint) hint.textContent = droneActive
+          ? 'Drone dispatched — uncheck items to skip repairs.'
+          : 'Click Repair and Refuel to dispatch the docking drone.';
       } else {
         badge.textContent = 'STATUS ONLY';
         badge.classList.add('dr-readonly');
@@ -857,9 +925,9 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     for (const g of groups) {
       const items = _repairPlan.filter(s => s.group === g);
       if (!items.length) continue;
-      html += `<div class="dr-group-header">${g}</div>`;
+      let groupHtml = '<div class="dr-group-header">' + g + '</div>';
 
-      // ── STRUCTURE is a special read-only hull section ──────────────────────
+      // ── STRUCTURE: special read-only hull row ──
       if (g === 'STRUCTURE') {
         const maxHullHP = GameConfig.player.hullHP ?? 600;
         const pct       = Math.round((_hullHP / maxHullHP) * 100);
@@ -870,22 +938,23 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
           const { partsNeeded, partsAllocated } = _hullRepair;
           if (_repairDockMode) {
             partsInfo = partsAllocated > 0
-              ? `${partsAllocated}/${partsNeeded} spare parts → restores ${partsAllocated * 100} HP`
-              : `${partsNeeded} spare parts needed — none available`;
+              ? partsAllocated + '/' + partsNeeded + ' spare parts → restores ' + (partsAllocated * 100) + ' HP'
+              : partsNeeded + ' spare parts needed — none available';
           } else {
             const sbAvail = _currentStarbase ? Math.floor(_currentStarbase.inventory.spareParts ?? 0) : 0;
-            partsInfo = `${partsNeeded} spare part${partsNeeded !== 1 ? 's' : ''} to repair (${sbAvail} available at dock)`;
+            partsInfo = partsNeeded + ' spare part' + (partsNeeded !== 1 ? 's' : '') + ' to repair (' + sbAvail + ' available at dock)';
           }
         }
-        html += `<div class="dr-row${dmgCls}">
-          <div class="dr-row-name">HULL INTEGRITY</div>
-          <div>
-            <div class="dr-bar-wrap"><div class="dr-bar ${barClass}" style="width:${pct}%"></div></div>
-            <div class="dr-row-hp">${_hullHP}/${maxHullHP}</div>
-          </div>
-          <div></div>
-          <div style="font-size:9px;color:rgba(160,204,238,0.55);text-align:center;grid-column:span 1">${partsInfo}</div>
-        </div>`;
+        groupHtml += '<div class="dr-row' + dmgCls + '">'
+          + '<div class="dr-row-name">HULL INTEGRITY</div>'
+          + '<div>'
+          + '<div class="dr-bar-wrap"><div class="dr-bar ' + barClass + '" style="width:' + pct + '%"></div></div>'
+          + '<div class="dr-row-hp">' + _hullHP + '/' + maxHullHP + '</div>'
+          + '</div>'
+          + '<div></div>'
+          + '<div style="font-size:9px;color:rgba(160,204,238,0.55);text-align:center;grid-column:span 1">' + partsInfo + '</div>'
+          + '</div>';
+        html += '<div class="dr-group-block">' + groupHtml + '</div>';
         continue;
       }
 
@@ -895,27 +964,28 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
         const dmg  = item.damaged ? ' dr-damaged' : '';
         const reserved = _repairReserved[item.partKey] ?? 0;
         const checked  = _checkedCount(item.partKey);
-        // Checkbox: enabled only if item is damaged AND (checked OR there's a free reserved slot)
+        // Checkbox: enabled only if item is damaged AND (checked OR there is a free reserved slot)
         const canCheck = item.damaged && (item.checked || checked < reserved);
         const chkDisabled = (!item.damaged || (!item.checked && checked >= reserved)) ? 'disabled' : '';
         const chkChecked  = item.checked ? 'checked' : '';
         // In read-only mode, all checkboxes disabled
         const disabled = (!_repairDockMode || !canCheck) ? 'disabled' : chkDisabled;
         const checkboxHtml = item.damaged
-          ? `<input type="checkbox" class="dr-check" data-id="${item.id}" ${chkChecked} ${disabled}>`
-          : `<input type="checkbox" class="dr-check" disabled>`;
-        html += `<div class="dr-row${dmg}">
-          <div class="dr-row-name">${item.label}</div>
-          <div>
-            <div class="dr-bar-wrap"><div class="dr-bar ${barClass}" style="width:${pct}%"></div></div>
-            <div class="dr-row-hp">${item.hp}/${item.maxHP}</div>
-          </div>
-          ${checkboxHtml}
-          <div style="font-size:9px;color:rgba(160,204,238,0.4);text-align:center">${item.damaged && item.checked ? '✓' : item.damaged ? '—' : 'OK'}</div>
-        </div>`;
+          ? '<input type="checkbox" class="dr-check" data-id="' + item.id + '" ' + chkChecked + ' ' + disabled + '>'
+          : '<input type="checkbox" class="dr-check" disabled>';
+        groupHtml += '<div class="dr-row' + dmg + '">'
+          + '<div class="dr-row-name">' + item.label + '</div>'
+          + '<div>'
+          + '<div class="dr-bar-wrap"><div class="dr-bar ' + barClass + '" style="width:' + pct + '%"></div></div>'
+          + '<div class="dr-row-hp">' + item.hp + '/' + item.maxHP + '</div>'
+          + '</div>'
+          + checkboxHtml
+          + '<div style="font-size:9px;color:rgba(160,204,238,0.4);text-align:center">' + (item.damaged && item.checked ? '✓' : item.damaged ? '—' : 'OK') + '</div>'
+          + '</div>';
       }
+      html += '<div class="dr-group-block">' + groupHtml + '</div>';
     }
-    rowsEl.innerHTML = html;
+        rowsEl.innerHTML = html;
 
     // Attach checkbox listeners
     rowsEl.querySelectorAll('.dr-check:not([disabled])').forEach(cb => {
@@ -1430,6 +1500,63 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _explosions.push(exp);
   }
 
+  /**
+   * Multi-stage, high-fidelity Spawner destruction sequence (Item #4).
+   * Three overlapping blasts staged over 1.5 seconds, with colored expanding rings
+   * and a bright persistent debris cloud.
+   */
+  function _spawnSpawnerExplosion(pos) {
+    if (!_scene) return;
+    // Stage 1: immediate primary white blast
+    _spawnExplosion(pos, { scale: 3.5, debris: 12, fireColor: 0xffffff, debrisColor: 0xffaa00 });
+    // Stage 2: 0.5s later — amber secondary
+    setTimeout(() => {
+      if (!_scene) return;
+      _spawnExplosion(pos, { scale: 2.5, debris: 8,  fireColor: 0xff8800, debrisColor: 0xff4400 });
+      // Expanding amber ring
+      const ring1 = new THREE.Mesh(
+        new THREE.RingGeometry(4, 12, 48),
+        new THREE.MeshBasicMaterial({
+          color: 0xff9900, transparent: true, opacity: 0.9,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      ring1.position.copy(pos);
+      ring1.rotation.x = Math.PI / 2;
+      _scene.add(ring1);
+      let age1 = 0;
+      const tick1 = () => { age1 += 1/60; const t = age1 / 1.2; ring1.scale.setScalar(1 + t * 18);
+        ring1.material.opacity = 0.9 * (1 - t); if (t < 1 && _scene) requestAnimationFrame(tick1);
+        else _scene?.remove(ring1); };
+      requestAnimationFrame(tick1);
+    }, 500);
+    // Stage 3: 1.0s later — green plasma secondary (Zylon power core)
+    setTimeout(() => {
+      if (!_scene) return;
+      _spawnExplosion(pos, { scale: 2.0, debris: 6,  fireColor: 0x44ff88, debrisColor: 0x00aa44 });
+      // Expanding teal ring
+      const ring2 = new THREE.Mesh(
+        new THREE.RingGeometry(6, 16, 48),
+        new THREE.MeshBasicMaterial({
+          color: 0x00ff88, transparent: true, opacity: 0.85,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      ring2.position.copy(pos);
+      _scene.add(ring2);
+      let age2 = 0;
+      const tick2 = () => { age2 += 1/60; const t = age2 / 1.5; ring2.scale.setScalar(1 + t * 24);
+        ring2.material.opacity = 0.85 * (1 - t); if (t < 1 && _scene) requestAnimationFrame(tick2);
+        else _scene?.remove(ring2); };
+      requestAnimationFrame(tick2);
+      // Lingering point light (fades over 2s)
+      const glow = new THREE.PointLight(0x00ff44, 30, 500);
+      glow.position.copy(pos); _scene.add(glow);
+      let ageG = 0;
+      const tickG = () => { ageG += 1/60; glow.intensity = 30 * Math.max(0, 1 - ageG / 2);
+        if (ageG < 2 && _scene) requestAnimationFrame(tickG); else _scene?.remove(glow); };
+      requestAnimationFrame(tickG);
+    }, 1000);
+    // Sound (if available)
+    if (typeof SoundManager !== 'undefined') SoundManager.zylonExplosion();
+  }
+
   function _updateExplosions(dt) {
     for (let i = _explosions.length - 1; i >= 0; i--) {
       const exp = _explosions[i];
@@ -1875,10 +2002,30 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     };
 
     let anyAlive = false;
+    // ── Item #2: Determine which spawner clans are currently torpedo-targeted ───
+    // A torpedo is considered targeting the spawner if its bestTarget IS the spawner.
+    // We propagate _torpedoTracked=true to spawner each frame (set in torpedo loop above).
+    // Now set _hyperAggressive on all TIE/Bird defenders of a targeted spawner's clan.
+    const _attackedSpawnerClans = new Set();
+    if (_spawnerShip && !_spawnerShip.dead && _spawnerShip._torpedoTracked) {
+      _attackedSpawnerClans.add(_spawnerShip._clanId);
+    }
+    // Also check any active torpedoes already tracking the spawner (belt-and-suspenders)
+    for (const z of _zylons) {
+      if (!z.dead && z.type === 'spawner' && z._torpedoTracked) {
+        _attackedSpawnerClans.add(z._clanId);
+      }
+    }
+
     for (let i = _zylons.length - 1; i >= 0; i--) {
       const z = _zylons[i];
       if (z.dead) { _zylons.splice(i, 1); continue; }
       anyAlive = true;
+
+      // Set hyper-aggressive flag for TIE/Bird whose spawner clan is under attack
+      if ((z.type === 'seeker_tie' || z.type === 'seeker_bird') && z._hyperAggressive !== undefined) {
+        z._hyperAggressive = _attackedSpawnerClans.has(z._clanId);
+      }
 
       let ctx = baseContext;
       if (z.type === 'seeker_tie' || z.type === 'seeker_bird') {
@@ -1895,8 +2042,9 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
                 playerFwd, dangerFront, dangerRear };
       } else if (z.type === 'spawner') {
         ctx = { ...baseContext, chaseBeacon: z._chaseBeaconShip ?? null };
-      } else if (z.type === 'warrior' && z._guardMode === 'spawner') {
-        // Spawner defenders need the Spawner position to compute their guard post
+      } else if (z.type === 'warrior') {
+        // All warriors need spawnerPos — they may switch between starbase attack
+        // and spawner guard dynamically based on live starbase shield state.
         const sPos = (_spawnerShip && !_spawnerShip.dead)
           ? _spawnerShip.mesh.position.clone() : null;
         ctx = { ...baseContext, spawnerPos: sPos };
@@ -1924,6 +2072,14 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
           _targets = Math.max(0, _targets - 1);
           if (typeof SoundManager !== 'undefined') SoundManager.zylonExplosion();
           if (z.type === 'spawner' && _spawnerGalaxyRef) {
+            // Set haunt pos for all active defenders (ghost_guard transition)
+            const deathPos = z.position.clone();
+            for (const d of _activeDefenders) {
+              if (!d.ship.dead && typeof d.ship.setHauntPos === 'function') {
+                d.ship.setHauntPos(deathPos);
+              }
+            }
+            _spawnSpawnerExplosion(deathPos);
             _spawnerGalaxyRef.destroy();
             _spawnerShip = null;
           }
@@ -2068,6 +2224,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
         } else {
           // Activate as sector defender
           _zylons.push(b.ship);
+          _targets++;  // keep kill counter in sync with actual live ships
           // Track for death polling — fires onDefenderKilled when dead flag is set
           _activeDefenders.push({ ship: b.ship, defType: b.defType, galaxyRef: b.galaxyRef });
         }
@@ -2426,7 +2583,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     const DH = 130;
     const DY = _overlayCanvas.height - DH;
     const fontSize = Math.max(16, Math.floor(W / 38));
-    const stripY   = Math.round(DY * 0.30);   // 30% from top of cockpit viewport
+    const stripY   = fontSize + 14;   // near top of screen (strip top ≈ 6px from edge)
 
     ctx.save();
     // Dark strip background
@@ -2637,6 +2794,13 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   }
 
   function _updateTorpedoes(dt) {
+    // ── Pre-pass: clear all _torpedoTracked flags once per frame ──────────────
+    // Done here (not inside the per-torpedo loop) so multiple armed torpedoes
+    // don’t overwrite each other’s target flags within a single frame.
+    for (const z of _zylons) {
+      if (z._torpedoTracked !== undefined) z._torpedoTracked = false;
+    }
+
     for (let i = _torpedoes.length - 1; i >= 0; i--) {
       const t = _torpedoes[i];
       t.life -= dt;
@@ -2687,6 +2851,16 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
             const angle = Math.acos(Math.max(-1, Math.min(1, toZ.normalize().dot(torpDir))));
             if (angle <= coneHalfRad && dist < bestDist) { bestDist = dist; bestTarget = z; }
           }
+
+          // ── Item #1: Flag torpedo target so it can flee ─────────────────────
+          // (Clearing was done in the pre-pass above, once per frame.)
+          // Flag the current torpedo's target so it can activate flee behaviour.
+          // Include all seeker subtypes — TIE/Bird at the perimeter of a seeker group
+          // can be homed upon directly.
+          if (bestTarget && bestTarget._torpedoTracked !== undefined) {
+            bestTarget._torpedoTracked = true;
+          }
+
           if (bestTarget) {
             const toTarget   = bestTarget.position.clone().sub(t.pos);
             const desiredDir = toTarget.normalize();
@@ -2896,8 +3070,17 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
                 z.destroy();
                 _kills++;
                 _targets = Math.max(0, _targets - 1);
-                // If this was the spawner, trigger clan kill cascade
+                // If this was the spawner, trigger clan kill cascade + multi-stage explosion
                 if (z.type === 'spawner' && _spawnerGalaxyRef) {
+                  // ── Item #3: Give all active defenders the spawner's death position ─
+                  const deathPos = z.position.clone();
+                  for (const d of _activeDefenders) {
+                    if (!d.ship.dead && typeof d.ship.setHauntPos === 'function') {
+                      d.ship.setHauntPos(deathPos);
+                    }
+                  }
+                  // ── Item #4: Multi-stage spawner explosion ────────────────────────
+                  _spawnSpawnerExplosion(deathPos);
                   _spawnerGalaxyRef.destroy();
                   _spawnerShip = null;
                 }
@@ -3924,15 +4107,20 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       oc.fillText(`DOCKED — REFUELING ${pct}%`, W/2, by + 14);
     }
 
-    // ── Subspace message flash ──
+    // ── Subspace message flash ── (Item #6: below ticker band, semi-transparent)
     if (_msgTimer > 0) {
       _msgTimer -= (1/60); // approx per-frame decay (60fps)
       const fade = Math.min(1, _msgTimer);
-      const panW = Math.min(560, W * 0.58);
+      const panW = Math.min(600, W * 0.62);
       const panX = (W - panW) / 2;
       const panH = 62;
-      const panY = DY - panH - 6;
-      oc.fillStyle = `rgba(0,6,22,${0.88 * fade})`;
+      // Place the panel below the ticker strip.
+      // Ticker draws at DY*0.30 - fontSize - 8 (top) to DY*0.30 + 10 (bottom).
+      // Compute the same ticker bottom edge and add a small margin.
+      const fontSize     = Math.max(16, Math.floor(W / 38));
+      const tickerBottom = fontSize + 14 + 10;   // matches _drawTicker stripY + band bottom margin
+      const panY = tickerBottom + 6;   // 6px below the ticker band
+      oc.fillStyle = `rgba(0,6,22,${0.55 * fade})`;  // semi-transparent
       oc.fillRect(panX, panY, panW, panH);
       oc.strokeStyle = `rgba(0,180,255,${0.5 * fade})`;
       oc.lineWidth = 1;
@@ -4238,20 +4426,37 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       _lbl(`E${i+1}`, bx + bw/2, eNameY, 'center', lbC, 12);
     });
 
-    // ── ZONE 4: SHIELDS ──
-    _lbl('SHIELDS', Z4X + Z4W/2, DY + 15, 'center', lbC, 16);
+    // ── ZONE 4: SHIELDS + HULL side-by-side (Item #7) ──
+    // Split Zone 4 vertically: left half = Hull (red/green), right half = Shields (blue)
+    const z4Half  = Math.floor(Z4W / 2);
+    const shBH    = barH - 16;          // bar pixel height
+    const shBY    = barTop + 6;         // top
 
+    // ─ HULL bar (left half) ─
+    const hullMax    = GameConfig.player.hullHP ?? 600;
+    const hullFrac   = Math.max(0, Math.min(1, (_glitch() ? Math.random()*hullMax : _hullHP) / hullMax));
+    const hullBX     = Z4X + 4;
+    const hullBW     = z4Half - 8;
+    const hullRedH   = Math.round((1 - hullFrac) * shBH);    // damaged (top)
+    const hullGrnH   = Math.round(hullFrac * shBH);           // intact (bottom)
+    _lbl('HULL', Z4X + z4Half / 2, DY + 14, 'center', lbC, 11);
+    oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(hullBX, shBY, hullBW, shBH);
+    if (hullGrnH > 0) { oc.fillStyle = '#00ff66'; oc.fillRect(hullBX, shBY + shBH - hullGrnH, hullBW, hullGrnH); }
+    if (hullRedH > 0) { oc.fillStyle = '#cc1100'; oc.fillRect(hullBX, shBY, hullBW, hullRedH); }
+
+    // Vertical divider between Hull and Shields
+    oc.strokeStyle = 'rgba(0,80,130,0.5)'; oc.lineWidth = 1;
+    oc.beginPath(); oc.moveTo(Z4X + z4Half, DY + 4); oc.lineTo(Z4X + z4Half, DY + DH - 4); oc.stroke();
+
+    // ─ SHIELDS bar (right half) ─
     const shCapFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCapacity) / 400));
     const shChgFrac = Math.max(0, Math.min(1, (_glitch() ? Math.random()*400 : _shieldCharge)    / 400));
-
-    const shBH    = barH - 16;          // bar pixel height
-    const shBY    = barTop + 6;          // top — shifted down so bottom aligns with engine bars
-    const shBX    = Z4X + 6;            // x position
-    const shBW    = Z4W - 12;           // full-zone single bar
-    const shRedH  = Math.round((1 - shCapFrac) * shBH);   // damaged cap (top)
-    const shChgH  = Math.round(shChgFrac * shBH);          // current charge (bottom)
-    const shAvailH = shBH - shRedH;                        // rechargeable zone
-
+    const shBX      = Z4X + z4Half + 4;
+    const shBW      = Z4W - z4Half - 8;
+    const shRedH    = Math.round((1 - shCapFrac) * shBH);   // damaged cap (top)
+    const shChgH    = Math.round(shChgFrac * shBH);          // current charge (bottom)
+    const shAvailH  = shBH - shRedH;                         // rechargeable zone
+    _lbl('SHLD', Z4X + z4Half + z4Half / 2, DY + 14, 'center', lbC, 11);
     // 1: dark background
     oc.fillStyle = 'rgba(0,0,0,0.5)'; oc.fillRect(shBX, shBY, shBW, shBH);
     // 2: dull blue — uncharged but rechargeable capacity
@@ -4384,8 +4589,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _targets++;
 
     // Wire production and kill callbacks
-    galaxySpawner._onUnitBorn     = (type) => { if (type !== 'seeker') _triggerDefenderBirth(spShip, type, galaxySpawner); };
-    galaxySpawner._onSpawnerKilled = () => _cascadeSpawnerKill(galaxySpawner.clanId);
+    galaxySpawner._onUnitBorn = (type) => { if (type !== 'seeker') _triggerDefenderBirth(spShip, type, galaxySpawner); };
 
     _queueTicker('ALERT \u2014 ZYLON SPAWNER HAS EVOLVED IN SECTOR', 'spawner_evolved', 0);
   }
@@ -4402,12 +4606,11 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     const isWarpArrival  = (typeof arrivalVelocity === 'number' && arrivalVelocity >= 999);
     _warpDebursting  = isWarpArrival;
     _warpDecelerating = false;
-    // Preserve _warpPreSpeed and _warpPeakSpeed on warp arrival (recorded in outbound sector)
     if (!isWarpArrival) { _warpPreSpeed = 0; _warpPeakSpeed = 0; }
-    _planetPos    = null;  // cleared here, set by _buildPlanet if sector is habitable
+    _planetPos    = null;
     _planetRadius = 0;
     _warpMult        = 1.0;
-    _cameraQuat.identity(); // reset ship orientation to forward-facing
+    _cameraQuat.identity();
     _mnx         = 0; _mny   = 0;
     _nearSB      = false;
     _entryTimer  = 3.5;
@@ -4418,7 +4621,6 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     if (_plugMesh) _plugMesh.visible = false;
     _hitFlash    = 0;
     _asteroids   = [];
-    // Alert ticker — clear on sector entry (damage announced fresh each sector)
     _tickerQueue  = [];
     _tickerActive = null;
     _alertCd      = {};
@@ -4427,10 +4629,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _needHuntMsg   = false;
     _lossTriggered = false;
     _strandedTimer = 0;
-    _hullRepair    = null;   // hull persists across sectors — only clearing the dock plan
-    // NOTE: _hullHP intentionally NOT reset — hull damage persists until repaired at dock
-    // NOTE: _energy persists across warps — only refilled on dock
-    // NOTE: _kills suspended until Zylons are added
+    _hullRepair    = null;
     _targets     = 0;
     _shieldsOn   = true;
     _computerOn  = true;
@@ -4445,7 +4644,6 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _spawnerShip      = null;
     _spawnerGalaxyRef = null;
     _birthQueue       = [];
-
     _torpedoes   = [];
     _cargoShips     = [];
     _allSupplyShips  = sector?.allSupplyShips || [];
@@ -4455,44 +4653,25 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _sbShieldDmgCooldown = 0;
     _shieldImpacts      = [];
     _explosions         = [];
-    if (!_cannon)   _resetCannons();     // first entry only — damage persists across warps
+    if (!_cannon)   _resetCannons();
     if (!_systems)  _resetSystems();
     if (!_engines)  _resetEngines();
     if (!_computer) _resetComputer();
-    // _warpDriveHP starts at 100 at declaration and persists; reset only on dock
     _sectorType  = sector?.type        || 'void';
     _sectorQ     = sector?.q            ?? 0;
     _sectorR     = sector?.r            ?? 0;
     _hasStarbase = !!sector?.hasStarbase;
     _currentStarbase = sector?.starbase || null;
-    _sectorName  = sector?.name        || `SECTOR ${sector?.q ?? '?'},${sector?.r ?? '?'}`;
-
-    // ── Spawn Zylon enemies ──────────────────────────────────────────────────
-    // Each galaxy ZylonSeeker represents a PAIR — spawn one tie-fighter and one
-    // bird silhouette per seeker count so the player always sees both models.
-    // Warriors are separate galaxy objects; spawn one saucer each.
-    const seekerCount  = sector?.seekerCount  ?? 0;
-    const warriorCount = sector?.warriorCount ?? 0;
-    const totalZylons  = seekerCount * 2 + warriorCount;
-    _targets = totalZylons;
-    if (totalZylons > 0 && _energy > 0 && (!_computer || _computer.scanner > 0)) {
-      _redAlert      = true;
-      _redAlertTimer = 0;
-      if (typeof SoundManager !== 'undefined') SoundManager.redAlert();
-      _queueTicker(
-        `RED ALERT — ${totalZylons} ZYLON FIGHTER${totalZylons > 1 ? 'S' : ''} DETECTED IN SECTOR`,
-        'red_alert_entry', 0);
-    }
+    _sectorName  = sector?.name        || ('SECTOR ' + (sector?.q ?? '?') + ',' + (sector?.r ?? '?'));
 
     _initThree();
     _buildScene();
     _spawnCargoShips(sector?.supplyShips || []);
 
-    // Entry angle — deterministic per sector
     const _zEntryAngle = ((_sectorQ * 3 + _sectorR * 7) % 12) * (Math.PI * 2 / 12);
     const ORBIT_DIST   = GameConfig.zylon.beaconPlacementUnits ?? 750;
+    const seekerCount  = sector?.seekerCount ?? 0;
 
-    // ── Spawn solo Seeker icosahedrons ───────────────────────────────────────
     for (let i = 0; i < seekerCount; i++) {
       const seekerRef = seekerGalaxyRefs[i] ?? null;
       if (!seekerRef?.alive) continue;
@@ -4503,7 +4682,6 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       _zylons.push(ship);
     }
 
-    // ── Spawn Spawner + fleet ────────────────────────────────────────────────
     _spawnerGalaxyRef = spawnerGalaxyRef;
     if (spawnerGalaxyRef?.alive) {
       const spawnPos = new THREE.Vector3(
@@ -4513,65 +4691,71 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       _spawnerShip = spShip;
       _zylons.push(spShip);
 
-      // Spawn TIE escorts
-      for (let i = 0; i < (spawnerGalaxyRef.fleet.tie ?? 0); i++) {
-        const a   = Math.random() * Math.PI * 2;
+      const tieCount  = spawnerGalaxyRef.fleet.tie     ?? 0;
+      const birdCount = spawnerGalaxyRef.fleet.bird    ?? 0;
+      const warCount  = spawnerGalaxyRef.fleet.warrior ?? 0;
+      const cfg_z     = GameConfig.zylon;
+      const orbitR    = (cfg_z.warriorOrbitRadiusMin + cfg_z.warriorOrbitRadiusMax) / 2;
+
+      // TIEs — tight guardian cluster directly beside the spawner
+      for (let i = 0; i < tieCount; i++) {
+        const a   = (i / Math.max(1, tieCount)) * Math.PI * 2;
         const pos = spawnPos.clone().addScaledVector(
-          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 80 + Math.random() * 120);
+          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 35 + i * 15);
         const ship = new ZylonShip(_scene, pos, 'seeker_tie', spawnerGalaxyRef.clanId);
         ship.setGalaxyRef(spawnerGalaxyRef);
         _zylons.push(ship);
         _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'tie' });
       }
-      // Spawn Bird escorts
-      for (let i = 0; i < (spawnerGalaxyRef.fleet.bird ?? 0); i++) {
-        const a   = Math.random() * Math.PI * 2;
+
+      // Birds — tight cluster on opposite side of spawner from TIEs
+      for (let i = 0; i < birdCount; i++) {
+        const a   = Math.PI + (i / Math.max(1, birdCount)) * Math.PI * 2;
         const pos = spawnPos.clone().addScaledVector(
-          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 80 + Math.random() * 120);
+          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 35 + i * 15);
         const ship = new ZylonShip(_scene, pos, 'seeker_bird', spawnerGalaxyRef.clanId);
         ship.setGalaxyRef(spawnerGalaxyRef);
         _zylons.push(ship);
         _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'bird' });
       }
-      // Spawn Warrior guards
-      for (let i = 0; i < (spawnerGalaxyRef.fleet.warrior ?? 0); i++) {
-        const a   = Math.random() * Math.PI * 2;
-        const pos = spawnPos.clone().addScaledVector(
-          new THREE.Vector3(Math.cos(a), 0, Math.sin(a)), 150 + Math.random() * 200);
+
+      // Warriors — evenly distributed around the starbase at their orbit radius.
+      // SB_POS is (0,0,0) so the orbit is simply cos/sin * radius from world origin.
+      for (let i = 0; i < warCount; i++) {
+        const a   = (i / Math.max(1, warCount)) * Math.PI * 2;
+        const pos = new THREE.Vector3(Math.cos(a) * orbitR, 0, Math.sin(a) * orbitR);
         const ship = new ZylonShip(_scene, pos, 'warrior', spawnerGalaxyRef.clanId);
         ship.setGalaxyRef(spawnerGalaxyRef);
-        ship._guardMode  = 'spawner';
-        ship._guardIndex = i;
+        ship._guardMode   = 'spawner';
+        ship._guardIndex  = i;
+        ship._orbitAngle  = a;   // seed orbit phase so AI continues from correct position
         _zylons.push(ship);
         _activeDefenders.push({ ship, galaxyRef: spawnerGalaxyRef, defType: 'warrior' });
       }
 
-      // Wire: new unit born during player visit → spawn in sector
       spawnerGalaxyRef._onUnitBorn = (type) => {
         if (type !== 'seeker') _triggerDefenderBirth(spShip, type, spawnerGalaxyRef);
       };
-      // Wire: spawner killed → cascade-kill all fleet ships
-      spawnerGalaxyRef._onSpawnerKilled = () => _cascadeSpawnerKill(spawnerGalaxyRef.clanId);
     }
 
+    const totalZylons = _zylons.length;
+    _targets = totalZylons;
+    if (totalZylons > 0 && _energy > 0 && (!_computer || _computer.scanner > 0)) {
+      _redAlert      = true;
+      _redAlertTimer = 0;
+      if (typeof SoundManager !== 'undefined') SoundManager.redAlert();
+      _queueTicker(
+        'RED ALERT -- ' + totalZylons + ' ZYLON FIGHTER' + (totalZylons > 1 ? 'S' : '') + ' DETECTED IN SECTOR',
+        'red_alert_entry', 0);
+    }
 
-    // Arrival position: object {x,z} from warp accuracy; null/0 = near centre
     const off = arrivalOffset && typeof arrivalOffset === 'object' ? arrivalOffset : { x: 0, z: 0 };
-    // Starbase is at world origin (0,0,0). Player arrives 500 units behind it (+Z)
-    // so they always enter the sector facing toward the starbase.
-    // Non-starbase sectors keep the player at the sector centre (Z = 0).
-    // Warp-deburst arrivals at starbase sectors add 100u of Y so the deburst
-    // flight path clears the 82u shield radius before the player descends to dock.
     const PLAYER_SPAWN_Z = _hasStarbase ? 500 : 0;
     const arrivalY       = (_hasStarbase && _warpDebursting) ? 100 : 0;
     _camera.position.set(off.x ?? 0, arrivalY, PLAYER_SPAWN_Z + (off.z ?? 0));
-    // When arriving from a warp burst, pre-offset so the deburst travel cancels out
-    // and the player lands at the intended arrival position.
-    // Deburst travels (99999 + WARP_VELOCITY) / 2 ≈ 50049 units in -Z (forward).
-    // Pull back by that full distance so the ship ends up back at the intended spot.
     if (_warpDebursting) {
-      const deburstTravel = (99999 + WARP_VELOCITY) * 0.5; // ~50049 units
-      _camera.position.z += deburstTravel; // offset forward so deburst brings you back
+      const deburstTravel = (99999 + WARP_VELOCITY) * 0.5;
+      _camera.position.z += deburstTravel;
     }
     _camera.rotation.set(0, 0, 0, 'YXZ');
 
@@ -4639,8 +4823,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     // Disconnect live sector callbacks. Sync actual surviving fleet counts
     // back to the galaxy Spawner so it accurately tracks replacements needed.
     if (_spawnerGalaxyRef?.alive) {
-      _spawnerGalaxyRef._onUnitBorn      = null;
-      _spawnerGalaxyRef._onSpawnerKilled = null;
+      _spawnerGalaxyRef._onUnitBorn = null;
       _spawnerGalaxyRef.fleet.tie     = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'tie').length;
       _spawnerGalaxyRef.fleet.bird    = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'bird').length;
       _spawnerGalaxyRef.fleet.warrior = _activeDefenders.filter(d => !d.ship.dead && d.defType === 'warrior').length;
@@ -4821,8 +5004,30 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     beacon?.addMergeLayer();
   }
 
+  /**
+   * Called by main.js when GalaxyMap reports a seeker has moved out of the player's sector.
+   * Removes the matching 3D beacon ship with a brief warp-out flash.
+   */
+  function seekerWarpedOut(galaxyRef) {
+    if (!_scene || !_zylons) return;
+    const idx = _zylons.findIndex(z => !z.dead && z.type === 'seeker_beacon' && z._galaxyRef === galaxyRef);
+    if (idx === -1) return;
+    const ship = _zylons[idx];
+
+    // Amber flash at departure point
+    const flash = new THREE.PointLight(0xffcc44, 18, 350);
+    flash.position.copy(ship.mesh.position);
+    _scene.add(flash);
+    setTimeout(() => { if (_scene) _scene.remove(flash); }, 400);
+
+    ship.destroy();
+    _zylons.splice(idx, 1);
+    _targets = Math.max(0, _targets - 1);
+    _queueTicker('ZYLON SEEKER WARPED OUT', 'seeker_warp_out', 10);
+  }
+
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, addMergeLayerToBeacon, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
-           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifySpawnerEvolved,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifySpawnerEvolved, seekerWarpedOut,
             get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
@@ -4838,6 +5043,10 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
            get onLoss()        { return _onLoss;        },
            set onLoss(fn)      { _onLoss = fn;          },
            set onRefuel(fn)    { _onRefuel = fn;        },
+           // Item #5: victory-pending so main.js can arm the deferred win
+           setVictoryPending() { _victoryPending = true; },
+           set onVictory(fn)   { _onVictory = fn;       },
            get atDockPosition(){ return isAtDockingPosition(); },
-           get currentStarbase(){ return _currentStarbase; } };
+           get currentStarbase(){ return _currentStarbase; },
+           set onStarbaseAction(fn) { _onStarbaseAction = fn; } };
 })();

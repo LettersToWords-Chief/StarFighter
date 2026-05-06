@@ -313,8 +313,8 @@ canvas {
 }
 
 #dr-panel {
-  width: 480px;
-  max-height: 80vh;
+  width: 860px;
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
   background: rgba(2, 10, 28, 0.96);
@@ -353,7 +353,7 @@ canvas {
 
 #dr-content {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: auto;      /* fallback if panel somehow overflows */
   padding: 12px 18px;
 }
 
@@ -384,7 +384,19 @@ canvas {
   margin: 10px 0 4px 0;
 }
 
-/* System rows */
+/* System rows — two-column layout inside the panel */
+#dr-rows {
+  columns: 2;
+  column-gap: 24px;
+}
+
+/* Keep each group header + its rows together in one column */
+.dr-group-block {
+  break-inside: avoid;
+  display: block;
+  margin-bottom: 4px;
+}
+
 .dr-row {
   display: grid;
   grid-template-columns: 1fr 110px 28px 28px;
@@ -392,6 +404,7 @@ canvas {
   gap: 8px;
   padding: 4px 0;
   border-bottom: 1px solid rgba(0,40,80,0.35);
+  break-inside: avoid;
 }
 .dr-row-name {
   font-size: 11px;
@@ -432,6 +445,69 @@ canvas {
 }
 .dr-check:disabled { opacity: 0.3; cursor: default; }
 
+/* ── Starbase Controls panel ── */
+#dr-sb-controls {
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: rgba(0, 40, 80, 0.45);
+  border: 1px solid rgba(0, 180, 255, 0.22);
+  border-radius: 6px;
+}
+#dr-sb-controls:empty { display: none; }
+
+.dr-sb-label {
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: rgba(0, 180, 255, 0.55);
+  margin-bottom: 8px;
+}
+
+.dr-sb-btns {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sb-ctrl-btn {
+  background: rgba(0, 60, 120, 0.5);
+  border: 1px solid rgba(0, 180, 255, 0.4);
+  border-radius: 4px;
+  padding: 7px 18px;
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--color-primary);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+.sb-ctrl-btn:hover:not(:disabled) {
+  background: rgba(0, 100, 200, 0.4);
+  border-color: var(--color-primary);
+}
+.sb-ctrl-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.sb-ctrl-btn.sb-action {
+  background: rgba(0, 100, 50, 0.5);
+  border-color: rgba(0, 255, 150, 0.4);
+  color: var(--color-secondary);
+}
+.sb-ctrl-btn.sb-action:hover:not(:disabled) {
+  background: rgba(0, 150, 80, 0.4);
+  border-color: var(--color-secondary);
+}
+.sb-ctrl-btn.sb-scanning {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+  animation: sb-scan-pulse 0.8s ease-in-out infinite;
+}
+@keyframes sb-scan-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%       { opacity: 1.0; }
+}
+
 #dr-footer {
   display: flex;
   align-items: center;
@@ -458,6 +534,84 @@ canvas {
   transition: background 0.2s;
 }
 #dr-close:hover { background: rgba(0,100,200,0.4); }
+
+/* ═══════════════════════════════════════════════════════
+   PRE-INTRO SPLASH (shown before crawl; BEGIN unlocks audio)
+   ═══════════════════════════════════════════════════════ */
+#pre-intro {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;    /* sits above intro-overlay */
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 50% 35%,
+    rgba(0, 18, 50, 0.99) 0%,
+    rgba(0, 4, 18, 1.00) 70%);
+  font-family: 'Orbitron', monospace;
+  transition: opacity 0.6s ease;
+}
+#pre-intro.pi-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#pi-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 50%,
+    transparent 30%, rgba(0, 60, 140, 0.22) 100%);
+  pointer-events: none;
+}
+
+#pi-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 48px;
+}
+
+#pi-subtitle {
+  font-size: 10px;
+  letter-spacing: 8px;
+  color: rgba(0, 180, 255, 0.55);
+  text-transform: uppercase;
+}
+
+#pi-title {
+  margin: 0;
+  font-size: clamp(48px, 8vw, 96px);
+  font-weight: 900;
+  letter-spacing: 8px;
+  color: #fff;
+  text-shadow:
+    0 0 40px rgba(0, 180, 255, 1.0),
+    0 0 100px rgba(0, 120, 255, 0.6);
+  animation: intro-glow 3s ease-in-out infinite alternate;
+}
+
+#pi-begin {
+  padding: 20px 80px;
+  background: transparent;
+  border: 1px solid rgba(0, 180, 255, 0.65);
+  color: var(--color-primary);
+  font-family: 'Orbitron', monospace;
+  font-size: 24px;
+  letter-spacing: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  animation: intro-pulse 2s ease-in-out infinite;
+}
+#pi-begin:hover {
+  background: rgba(0, 180, 255, 0.12);
+  border-color: #00d4ff;
+  color: #fff;
+  box-shadow: 0 0 40px rgba(0, 180, 255, 0.55), 0 0 80px rgba(0, 180, 255, 0.2);
+  letter-spacing: 8px;
+}
 
 /* ═══════════════════════════════════════════════════════
    INTRO / MISSION BRIEFING OVERLAY

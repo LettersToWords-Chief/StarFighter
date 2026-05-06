@@ -136,6 +136,21 @@
 
   // ---- Init ----
   function init() {
+    // Pre-intro BEGIN button — first user gesture; starts crawl + audio together
+    const piBtn    = document.getElementById('pi-begin');
+    const piEl     = document.getElementById('pre-intro');
+    const crawlWrap = document.getElementById('intro-crawl-wrap');
+    if (piBtn && piEl) {
+      piBtn.addEventListener('click', () => {
+        // IntroCrawl.start() calls IntroCrawlMusic.start() internally
+        if (crawlWrap && typeof IntroCrawl !== 'undefined') {
+          IntroCrawl.start(crawlWrap, _startupAlertText);
+        }
+        piEl.classList.add('pi-fading');
+        setTimeout(() => { piEl.remove(); }, 650);
+      }, { once: true });
+    }
+
     const canvas = document.getElementById('galaxy-canvas');
     galaxyMap = new GalaxyMap(canvas, { difficulty: currentDifficulty });
     window.GalaxyRef = galaxyMap;   // exposes live Zylon count to SectorView fog-intelligence
@@ -147,11 +162,7 @@
 
     let _startupAlertText = '';
 
-    // Start Three.js glass-sheet crawl (defer so flexbox layout has real dimensions)
-    const crawlWrap = document.getElementById('intro-crawl-wrap');
-    if (crawlWrap && typeof IntroCrawl !== 'undefined') {
-      setTimeout(() => IntroCrawl.start(crawlWrap, _startupAlertText), 100);
-    }
+    // crawlWrap declared above (before pi-begin handler) so the closure captures it
 
     // When a Seeker steps into the player's current sector, spawn its icosahedron.
     // The Seeker travels alone — no TIE/Bird escort.
@@ -160,6 +171,13 @@
       const pos = galaxyMap.playerPos;
       if (seeker.q !== pos.q || seeker.r !== pos.r) return;
       SectorView.spawnZylons(1, 'seeker_beacon', seeker);  // solo icosahedron
+    };
+
+    // When a Seeker warps OUT of the player's current sector, remove its 3D ship.
+    // Seekers don't care about the player's presence — they follow their own schedule.
+    galaxyMap.onSeekerDeparted = (seeker) => {
+      if (!_sectorLive) return;
+      SectorView.seekerWarpedOut(seeker);
     };
 
     // When a Seeker evolves into a Spawner in the player's current sector,
@@ -171,7 +189,22 @@
       SectorView.notifySpawnerEvolved(spawner);
     };
 
-    galaxyMap.onVictory = () => _triggerWin();
+    // Victory: all Spawners destroyed — don't trigger the win screen immediately.
+    // Instead, arm victory-pending and send a subspace message directing the player
+    // to dock at the Capital. The win screen fires when they dock there.
+    galaxyMap.onVictory = () => {
+      if (typeof SectorView !== 'undefined') {
+        SectorView.setVictoryPending();
+        // Wire the actual win screen to fire on Capital dock
+        SectorView.onVictory = () => _triggerWin();
+      } else {
+        _triggerWin(); // fallback if SectorView not running
+      }
+      const clk = SubspaceComm.clockStr();
+      SubspaceComm.send(
+        'CENTRAL COMMAND', clk,
+        'ALL ZYLON SPAWNERS DESTROYED — RETURN TO CENTRAL COMMAND AND DOCK FOR DEBRIEFING');
+    };
 
     // Loss condition callbacks
     SectorView.onLoss       = (reason) => _triggerLoss(reason);
@@ -179,6 +212,15 @@
     // Without this, _energy (the E-bar) refills but playerFuel (the warp check) stays depleted.
     SectorView.onRefuel     = (fuel)   => { playerFuel = fuel; updateHUD(); };
     galaxyMap.onCapitalLost = ()       => _triggerLoss('CAPITAL_LOST');
+
+    // Starbase Controls callbacks — wired from inside the damage report panel
+    SectorView.onStarbaseAction = (action) => {
+      if (action === 'powerScan') {
+        const pos = galaxyMap.playerPos;
+        const sb  = galaxyMap.starbases.find(s => s.q === pos.q && s.r === pos.r);
+        if (sb) galaxyMap.initiatePowerScan(sb);
+      }
+    };
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
       if (playerFuel < fuelCost) { showAlert('INSUFFICIENT FUEL'); return; }
@@ -303,8 +345,14 @@
     galaxyMap.frozen = false;
     _stardateInterval = setInterval(() => { _stardate++; }, 1000);
 
-    // Enter the cockpit
-    _enterSector({ q: 0, r: 0 });
+    // Enter the cockpit — start in a random sector adjacent to the Capital (0,0)
+    // so the player must warp to find their first engagement (Item #8).
+    const neighbors = HexMath.hexNeighbors(0, 0).filter(h => galaxyMap.hexes.has(HexMath.key(h.q, h.r)));
+    const startHex  = neighbors.length > 0
+      ? neighbors[Math.floor(Math.random() * neighbors.length)]
+      : { q: 0, r: 0 };
+    galaxyMap.teleportPlayer(startHex);
+    _enterSector(startHex);
   }
 
   // ---- Enter a sector without the warp tunnel ----
@@ -497,7 +545,8 @@
     _gameWon = true;
     if (_sectorLive) SectorView.pause();
     if (galaxyMap)   galaxyMap.frozen = true;
-    if (typeof SoundManager !== 'undefined') SoundManager.stopRedAlert();
+    if (typeof SoundManager    !== 'undefined') SoundManager.stopAll();
+    if (typeof IntroCrawlMusic !== 'undefined') IntroCrawlMusic.start();
 
     const kills       = SectorView.kills     || 0;
     const docks       = SectorView.dockCount || 0;
@@ -567,7 +616,8 @@
     // Halt both simulation loops so nothing continues behind the postmortem screen
     if (_sectorLive) SectorView.pause();
     if (galaxyMap) galaxyMap.frozen = true;
-    if (typeof SoundManager !== 'undefined') SoundManager.stopRedAlert();
+    if (typeof SoundManager    !== 'undefined') SoundManager.stopAll();
+    if (typeof IntroCrawlMusic !== 'undefined') IntroCrawlMusic.start();
     const tc = Math.floor(SectorView.galacticClock || 0);
     const hh = String(Math.floor(tc / 3600)).padStart(2,'0');
     const mm = String(Math.floor((tc % 3600) / 60)).padStart(2,'0');

@@ -58,6 +58,7 @@ class ZylonShip {
       this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
       this._bEvasion     = 0;
       this._bHitDelay    = 0;
+      this._torpedoTracked = false;  // true this frame if a homing torpedo has locked onto this ship
       // Random 3D orbital plane
       const _byaw   = Math.random() * Math.PI * 2;
       const _bpitch = (Math.random() - 0.5) * Math.PI * 0.7;
@@ -80,8 +81,9 @@ class ZylonShip {
       // Orbit state (identical setup to beacon)
       this._bOrbitAngle  = Math.atan2(startPos.z, startPos.x);
       this._bOrbitDir    = Math.random() < 0.5 ? 1 : -1;
-      this._bEvasion     = 0;
-      this._bHitDelay    = 0;
+      this._bEvasion       = 0;
+      this._bHitDelay      = 0;
+      this._torpedoTracked = false;  // set by SectorView when a homing torpedo locks on
       const _syaw   = Math.random() * Math.PI * 2;
       const _spitch = (Math.random() - 0.5) * Math.PI * 0.7;
       const _snx = Math.cos(_spitch) * Math.sin(_syaw);
@@ -107,6 +109,10 @@ class ZylonShip {
       this._hp        = cfg.seekerHP ?? 400;
       this._sphase    = 'guard';  // 'guard' | 'attack' | 'return' | 'patrol'
       this._sguardDir = Math.random() < 0.5 ? 1 : -1;  // orbit direction
+
+      // ── Torpedo-flee / hyper-aggressive flags (set each frame by SectorView) ──
+      this._torpedoTracked  = false;  // true this frame if a homing torpedo has this ship as target
+      this._hyperAggressive = false;  // true when the Spawner this ship guards is being targeted
 
       // ── Simple dogfight AI state ─────────────────────────────────────────
       // Independent front / rear cannon cooldowns
@@ -616,12 +622,12 @@ class ZylonShip {
       return null; // hold position during the stun
     }
 
-    // Proximity-based orbit speed (evasion overrides)
+    // Proximity-based orbit speed; torpedo lock or post-hit evasion both trigger full flee
     const dToPlayer = playerPos.distanceTo(pos);
     let orbitSpeed;
-    if (this._bEvasion > 0) {
-      this._bEvasion -= dt;
-      orbitSpeed = 100; // BEACON_SPEED — full evasion orbit
+    if (this._torpedoTracked || this._bEvasion > 0) {
+      if (this._bEvasion > 0) this._bEvasion -= dt;
+      orbitSpeed = 100; // flee at full speed
     } else if (dToPlayer < 50)  { orbitSpeed = cfg.beaconSpeedTier4 ?? 65; }
     else if   (dToPlayer < 100) { orbitSpeed = cfg.beaconSpeedTier3 ?? 55; }
     else if   (dToPlayer < 150) { orbitSpeed = cfg.beaconSpeedTier2 ?? 45; }
@@ -712,8 +718,9 @@ class ZylonShip {
     const ORBIT_R   = cfg.beaconPlacementUnits ?? 750;
     const dToPlayer = playerPos.distanceTo(pos);
     let orbitSpeed;
-    if (this._bEvasion > 0) {
-      this._bEvasion -= dt; orbitSpeed = 100;
+    if (this._torpedoTracked || this._bEvasion > 0) {
+      if (this._bEvasion > 0) this._bEvasion -= dt;
+      orbitSpeed = 100; // Torpedo lock or hit-evasion: flee at full speed
     } else if (dToPlayer < 50)  { orbitSpeed = cfg.beaconSpeedTier4 ?? 65; }
     else if   (dToPlayer < 100) { orbitSpeed = cfg.beaconSpeedTier3 ?? 55; }
     else if   (dToPlayer < 150) { orbitSpeed = cfg.beaconSpeedTier2 ?? 45; }
@@ -924,6 +931,46 @@ class ZylonShip {
     const G_OUT  = cfg.seekerGuardOuter  ?? 150;
     const ENG_R  = cfg.seekerEngageRadius ?? 200;  // autonomous fallback (beacon dead)
     const TURN_R = (cfg.seekerTurnRate ?? 120) * Math.PI / 180 * dt;
+
+    // ── TORPEDO FLEE: a homing torpedo is locked on us — flee at 100 u/s ──────
+    if (this._torpedoTracked) {
+      const toPlayer = playerPos.clone().sub(pos);
+      const fleeDir  = toPlayer.lengthSq() > 0.01 ? toPlayer.clone().normalize().negate()
+                                                   : new THREE.Vector3(1, 0, 0);
+      this._steer(fleeDir, 100, TURN_R * 2);
+      this._vel.normalize().multiplyScalar(100);
+      pos.addScaledVector(this._vel, dt);
+      const fwdFlee = pos.clone().add(this._vel.clone().normalize());
+      if (pos.distanceTo(fwdFlee) > 0.01) this.mesh.lookAt(fwdFlee);
+      return null; // no firing while fleeing
+    }
+
+    // ── HYPER-AGGRESSIVE: spawner under torpedo attack — fly straight at player ──
+    if (this._hyperAggressive) {
+      // Force into attack phase
+      if (this._sphase !== 'attack') {
+        this._sphase  = 'attack';
+        this._phase   = 'pursue';
+        this._circleTimer = 0;
+      }
+      const toPlayer  = playerPos.clone().sub(pos);
+      const dist      = toPlayer.length();
+      const dirToP    = dist > 0.01 ? toPlayer.clone().normalize() : new THREE.Vector3(0, 0, -1);
+      this._steer(dirToP, ATTACK_SPEED, TURN_R);
+      this._vel.normalize().multiplyScalar(ATTACK_SPEED);
+      pos.addScaledVector(this._vel, dt);
+      const fwdHA = pos.clone().add(this._vel.clone().normalize());
+      if (pos.distanceTo(fwdHA) > 0.01) this.mesh.lookAt(fwdHA);
+      // Fire at maximum rate (both cannons, minimum cooldown)
+      const minCool = cfg.dogfightFrontCoolMin ?? 2.0;
+      this._frontCooldown -= dt;
+      if (this._frontCooldown <= 0 && dist < (cfg.dogfightFrontFireR ?? 500) && dirToP.dot(this._vel.clone().normalize()) > 0.90) {
+        this._frontCooldown = minCool;
+        return { pos: pos.clone().addScaledVector(dirToP, 5),
+                 vel: dirToP.clone().multiplyScalar(cfg.zylonTorpedoSpeed ?? 160), isZylon: true };
+      }
+      return null;
+    }
 
     // Initialise drift velocity on first frame
     if (this._vel.lengthSq() < 0.001) {
@@ -1275,10 +1322,16 @@ class ZylonShip {
    * Returns { pos, vel, isWarriorCannon: true } when a shot is fired, else null.
    */
   _updateWarrior(dt, playerPos, context) {
-    // Spawner defenders use the shield-guard mode instead of starbase orbit
-    if (this._guardMode === 'spawner') {
+    // Ghost guard: spawner died — warrior haunts the death site.
+    if (this._guardMode === 'ghost_guard' && this._hauntPos) {
+      return this._updateGhostGuard(dt, playerPos);
+    }
+    // Simple rule: active starbase with shields → attack it.
+    // No live starbase (or shields gone) → guard the Spawner.
+    if (!context?.starbase || (context.starbase.shieldCharge ?? 0) <= 0) {
       return this._updateWarriorSpawnerGuard(dt, playerPos, context?.spawnerPos ?? null);
     }
+    // Starbase shields are up — use APPROACH / ORBIT attack mode below.
 
     const cfg = GameConfig.zylon;
     const pos = this.mesh.position;
@@ -1366,8 +1419,14 @@ class ZylonShip {
     const TURN_R  = 60 * Math.PI / 180 * dt;  // max turn per frame (radians)
 
     if (!spawnerPos) {
-      this._guardMode = null;
-      this._wphase    = 'orbit';
+      // Spawner just died — record the last known spawner position as the haunt,
+      // then transition to ghost_guard. The haunt position was set by SectorView
+      // when the spawner died (via setHauntPos), but fall back to current position.
+      if (!this._hauntPos) {
+        // No haunt set yet — use current position as the fallback haunt
+        this._hauntPos = this.mesh.position.clone();
+      }
+      this._guardMode = 'ghost_guard';
       return null;
     }
 
@@ -1462,6 +1521,60 @@ class ZylonShip {
     return null;
   }
 
+  /**
+   * Ghost guard: warrior orbits/patrols the point where its spawner died.
+   * Engages the player if they come within 500u; returns to haunt when they leave.
+   */
+  _updateGhostGuard(dt, playerPos) {
+    const cfg          = GameConfig.zylon;
+    const SPEED        = 50;
+    const TURN_R       = 60 * Math.PI / 180 * dt;
+    const ENGAGE_R     = 500;
+    const pos          = this.mesh.position;
+    const distToPlayer = pos.distanceTo(playerPos);
+
+    // Shield regen always
+    if (this._generatorAlive) {
+      this._shieldCharge = Math.min(
+        this._shieldMax, this._shieldCharge + (cfg.warriorShieldRegenPerSec ?? 5) * dt);
+    }
+    this._cannonCd -= dt;
+
+    if (distToPlayer < ENGAGE_R) {
+      // ── Engage ──
+      const dirToP = playerPos.clone().sub(pos).normalize();
+      this._steer(dirToP, SPEED, TURN_R);
+      pos.addScaledVector(this._vel.clone().normalize(), SPEED * dt);
+      const la = pos.clone().add(this._vel.clone().normalize());
+      this.mesh.lookAt(la.x, la.y, la.z);
+      if (this._cannonCd <= 0) {
+        this._cannonCd = cfg.warriorFireIntervalSec ?? 5;
+        const vel = playerPos.clone().sub(pos).normalize()
+                      .multiplyScalar(cfg.warriorCannonSpeed ?? 200);
+        return { pos: pos.clone(), vel, isWarriorCannon: true };
+      }
+      return null;
+    }
+
+    // ── Haunt ── navigate to/orbit the death point
+    if (this._vel.lengthSq() < 0.01) this._vel.set(SPEED, 0, 0);
+    const toHaunt = this._hauntPos.clone().sub(pos);
+    if (toHaunt.length() > 30) {
+      this._steer(toHaunt.normalize(), SPEED, TURN_R);
+    } else {
+      // Orbit the death point: steer tangentially
+      const toCenter = this._hauntPos.clone().sub(pos);
+      const up       = new THREE.Vector3(0, 1, 0);
+      const tangent  = new THREE.Vector3().crossVectors(up, toCenter).normalize();
+      if (tangent.lengthSq() > 0.01) this._steer(tangent, SPEED, TURN_R * 0.5);
+    }
+    this._vel.normalize().multiplyScalar(SPEED);
+    pos.addScaledVector(this._vel, dt);
+    const la2 = pos.clone().add(this._vel.clone().normalize());
+    this.mesh.lookAt(la2.x, la2.y, la2.z);
+    return null;
+  }
+
   // ─────────────────────────────────── cleanup ───────────────────────────────
 
   /** Link this 3D ship to its galaxy-level unit (ZylonWarrior or ZylonSeeker). */
@@ -1503,5 +1616,13 @@ class ZylonShip {
   /** Shield charge 0–300 (warriors only, else 0) */
   get shieldCharge() {
     return this._type === 'warrior' ? this._shieldCharge : 0;
+  }
+
+  /**
+   * Set the haunt position for ghost_guard mode (called by SectorView when the spawner dies).
+   * @param {THREE.Vector3} pos  — the world position where the spawner died
+   */
+  setHauntPos(pos) {
+    this._hauntPos = pos.clone();
   }
 }

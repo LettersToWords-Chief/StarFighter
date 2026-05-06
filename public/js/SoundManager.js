@@ -405,5 +405,25 @@ const SoundManager = (() => {
       const ctx = _getCtx();
       _master.gain.setValueAtTime(Math.max(0, Math.min(1, v)), ctx.currentTime);
     },
+
+    // STOP ALL — called at game end (win or loss).
+    // Fades master gain to silence, then stops looping engine nodes.
+    stopAll() {
+      _stopRedAlert();
+      if (!_ctx) return;
+      const now = _ctx.currentTime;
+      // Fade master to zero over 0.4s so nothing clicks
+      _master.gain.cancelScheduledValues(now);
+      _master.gain.setValueAtTime(_master.gain.value, now);
+      _master.gain.linearRampToValueAtTime(0, now + 0.4);
+      // Stop looping engine nodes after the fade
+      setTimeout(() => {
+        try { _engNoiseSrc?.stop(); } catch(e) {}
+        try { _engSubOsc?.stop();   } catch(e) {}
+        _engNoiseSrc = _engSubOsc = _engNoiseGain = _engWallFilter = _engSubGain = null;
+        _engRunning  = false;
+        _engNorm     = 0;
+      }, 500);
+    },
   };
 })();

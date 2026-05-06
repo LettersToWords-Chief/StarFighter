@@ -44,12 +44,13 @@ class ZylonSpawner {
 
     // ── Seeker production counter ───────────────────────────────────────
     this.seekersMade = 0;
-    this._maxSeekers = GameConfig.zylon.maxSeekersPerSpawner ?? 6;
+    // _maxSeekers is now a getter — scales down with generation
 
     // ── Production ──────────────────────────────────────────────────────
     this.childCount     = 0;    // total children ever produced
     this._produceTimer  = 0;    // accumulates dt toward next child
     this._fleeTimer     = 0;    // > 0 while fleeing (production paused)
+    this.generation     = 1;    // set by GalaxyMap when seeker evolves
 
     // ── Off-screen bombardment ──────────────────────────────────────────
     this._bombardTimer = 0;
@@ -76,6 +77,14 @@ class ZylonSpawner {
   // ─────────────────────────────────────────────
   // FLEET TARGETS
   // ─────────────────────────────────────────────
+
+  get _maxSeekers() {
+    const g = this.generation ?? 1;
+    if (g <= 1) return 6;   // gen 1: initial wave, 6 seekers (matches fast-forward seed)
+    if (g === 2) return 4;  // gen 2: 4 seekers
+    if (g === 3) return 2;  // gen 3: 2 seekers
+    return 1;               // gen 4+: 1 seeker — natural decay
+  }
 
   get _targets() {
     if (this.seekersMade < this._maxSeekers) {
@@ -165,7 +174,8 @@ class ZylonSpawner {
 
   _birthSeeker(galaxy) {
     const dir    = this._pickSeekerDirection(galaxy);
-    const seeker = new ZylonSeeker({ q: this.q, r: this.r, facing: dir, spawner: this, galaxy });
+    const seeker = new ZylonSeeker({ q: this.q, r: this.r, facing: dir, spawner: this, galaxy,
+                                     generation: this.generation });
     this._seekers.push(seeker);
     galaxy.zylonSeekers.push(seeker);
     this.seekersMade++;

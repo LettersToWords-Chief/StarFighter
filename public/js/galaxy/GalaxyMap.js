@@ -775,6 +775,12 @@ class GalaxyMap {
 
   /** Called by ZylonSeeker._moveTo when it steps into a new sector. */
   _onSeekerArrived(seeker) {
+    const pp = this.playerPos;
+    // Detect departure: seeker just left the player's current sector
+    if (pp && seeker.prevQ === pp.q && seeker.prevR === pp.r &&
+        (seeker.q !== pp.q || seeker.r !== pp.r)) {
+      if (this.onSeekerDeparted) this.onSeekerDeparted(seeker);
+    }
     if (this.onSeekerArrived) this.onSeekerArrived(seeker);
   }
 
@@ -784,7 +790,39 @@ class GalaxyMap {
    */
   _onSeekerEvolved(seeker) {
     seeker.alive = false; // remove from zylonSeekers on next filter pass
+
+    const cfg = GameConfig.zylon;
+    const cap = cfg.maxSpawnersPerSector ?? 2;
+
+    // Count live Spawners already occupying this sector
+    const sectorSpawners = this.zylonSpawners.filter(
+      sp => sp.alive && sp.q === seeker.q && sp.r === seeker.r
+    );
+
+    if (sectorSpawners.length >= cap) {
+      // Cap reached: donate HP to existing Spawners instead of evolving a new one.
+      // The Seeker's journey still has game impact — it just reinforces rather than proliferates.
+      const donation = cfg.spawnerHPDonation ?? 50;
+      for (const sp of sectorSpawners) {
+        const shieldMax = cfg.beaconShieldMax ?? 300;
+        const hullMax   = cfg.beaconHullHP   ?? 300;
+        sp._shieldCharge = Math.min(shieldMax, (sp._shieldCharge ?? 0) + donation);
+        sp._hp           = Math.min(hullMax,   (sp._hp          ?? 0) + donation);
+      }
+      if (GameConfig.debug?.spawner) {
+        console.log(
+          `[GalaxyMap] Seeker settled at ${seeker.q},${seeker.r} — sector cap (${cap}) reached; ` +
+          `donated +${donation}HP to ${sectorSpawners.length} spawner(s).`
+        );
+      }
+      // Remove the beacon from SectorView (if player is in sector) — seeker was consumed
+      this.onSeekerDeparted?.(seeker);
+      return; // no new Spawner; no onSpawnerEvolved callback
+    }
+
+    // Under cap: evolve normally into a new Spawner
     const spawner = new ZylonSpawner({ q: seeker.q, r: seeker.r, galaxy: this });
+    spawner.generation = (seeker.generation ?? 1) + 1;  // generation chain: seeker gen → spawner gen+1
     this.zylonSpawners.push(spawner);
     // Fire Red Alert the first time a Seeker settles at a starbase sector
     const sb = this.starbases.find(s => s.q === seeker.q && s.r === seeker.r);

@@ -28,7 +28,7 @@ class ZylonSeeker {
    * @param {ZylonSpawner} opts.spawner — parent spawner
    * @param {GalaxyMap}    opts.galaxy  — reference for hex lookups
    */
-  constructor({ q, r, facing, spawner, galaxy }) {
+  constructor({ q, r, facing, spawner, galaxy, generation = 1 }) {
     this.q       = q;
     this.r       = r;
     this.facing  = facing;
@@ -42,6 +42,7 @@ class ZylonSeeker {
 
     this.state = 'SEARCHING';
     this.alive = true;
+    this.generation = generation;  // inherited from parent spawner — controls decay chain
 
     // First warp fires after birthDelay seconds; subsequent every moveInterval
     const cfg         = GameConfig.zylon;
@@ -175,6 +176,8 @@ class ZylonSeeker {
   }
 
   _moveTo(q, r, galaxy) {
+    this.prevQ     = this.q;  // remember where we came from (for departure detection)
+    this.prevR     = this.r;
     this.q         = q;
     this.r         = r;
     this.sectorPos = null;
