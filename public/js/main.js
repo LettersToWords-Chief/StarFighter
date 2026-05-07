@@ -12,7 +12,6 @@
 
   // ---- State ----
   let galaxyMap   = null;
-  let playerFuel  = GameConfig.player.maxFuel;
   let _mapOpen    = false;  // map overlay hidden at startup
   let _sectorLive = false;
   let _warping    = false;  // true during warp transition — suppresses onExit map open
@@ -108,7 +107,7 @@
     _cancelWarpReadyMode();
     const from = galaxyMap.playerPos;
     const fc   = HexMath.fuelCost(from, t);
-    if (playerFuel < fc) { showAlert('INSUFFICIENT FUEL'); return false; }
+    if (SectorView.energy < fc) { showAlert('INSUFFICIENT ENERGY'); return false; }
     _warpReady       = true;
     _warpReadyTarget = t;
     // Compute 3D direction from player hex to destination hex (XZ plane)
@@ -208,9 +207,7 @@
 
     // Loss condition callbacks
     SectorView.onLoss       = (reason) => _triggerLoss(reason);
-    // Keep playerFuel in sync whenever docking restores energy in SectorView.
-    // Without this, _energy (the E-bar) refills but playerFuel (the warp check) stays depleted.
-    SectorView.onRefuel     = (fuel)   => { playerFuel = fuel; updateHUD(); };
+    SectorView.onRefuel     = ()       => { updateHUD(); };  // energy restored — refresh display
     galaxyMap.onCapitalLost = ()       => _triggerLoss('CAPITAL_LOST');
 
     // Starbase Controls callbacks — wired from inside the damage report panel
@@ -223,7 +220,7 @@
     };
 
     galaxyMap.onWarpSelected = ({ from, to, fuelCost }) => {
-      if (playerFuel < fuelCost) { showAlert('INSUFFICIENT FUEL'); return; }
+      if (SectorView.energy < fuelCost) { showAlert('INSUFFICIENT ENERGY'); return; }
       // Fuel is NOT deducted yet — deduction happens during hyperspace (3 beeps at burst end)
       _beginWarp(from, to, fuelCost);
     };
@@ -310,6 +307,13 @@
 
     // Wire the BEGIN MISSION button — this click is the user gesture for AudioContext
     document.getElementById('intro-begin').addEventListener('click', _beginGame, { once: true });
+
+    // Wire the TUTORIAL button — same flow as BEGIN MISSION, then activates tutorial overlay
+    document.getElementById('tut-btn')?.addEventListener('click', () => {
+      _beginGame();
+      // Small delay so SectorView has finished entering before we start the tutorial
+      setTimeout(() => { if (typeof Tutorial !== 'undefined') Tutorial.start(); }, 600);
+    }, { once: true });
   }
 
   // ---- Begin the game (called by the intro BEGIN MISSION button click) ----
@@ -378,9 +382,7 @@
     };
 
     _sectorLive = true;
-    _sectorsVisited++;
-    SectorView.setFuel(playerFuel);
-    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
+    _sectorsVisited++;    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const seekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === pos.q && s.r === pos.r) ?? [];
     const spawner  = galaxyMap.zylonSpawners?.find(sp => sp.alive && sp.q === pos.q && sp.r === pos.r) ?? null;
     SectorView.enter({
@@ -453,12 +455,9 @@
             };
           }
 
-          // Three beeps during hyperspace — deduct 1/3 of fuel cost with each
           const share = Math.ceil(fuelCost / 3);
           const deductShare = () => {
-            playerFuel = Math.max(0, playerFuel - share);
-            SectorView.drainEnergy(share); // _energy persists across exit/enter
-            SectorView.setFuel(playerFuel);
+            SectorView.drainEnergy(share); // energy persists across sector exit/enter
             updateHUD();
           };
           if (typeof SoundManager !== 'undefined') SoundManager.warpTransit();
@@ -505,9 +504,7 @@
     };
 
     _sectorLive = true;
-    _sectorsVisited++;
-    SectorView.setFuel(playerFuel);
-    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
+    _sectorsVisited++;    // Link each 3D ship to its galaxy-level unit so kills propagate to the map
     const arrSeekers  = galaxyMap.zylonSeekers?.filter(s => s.alive && s.q === destination.q && s.r === destination.r) ?? [];
     const arrSpawner  = galaxyMap.zylonSpawners?.find(sp => sp.alive && sp.q === destination.q && sp.r === destination.r) ?? null;
     SectorView.enter({

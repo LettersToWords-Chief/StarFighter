@@ -199,7 +199,6 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   // ---- Loss conditions ----
   let _onLoss        = null;   // callback(reason) set by main.js
   let _lossTriggered = false;  // guards against double-fire
-  let _playerFuel    = 0;      // mirror of main.js playerFuel — used for stranded check
   let _strandedTimer = 0;      // seconds at zero energy with no dock + no fuel
   let _hullHP        = GameConfig.player.hullHP ?? 600;  // structural integrity; 0 = destroyed
   let _hullRepair    = null;   // { partsNeeded, partsAllocated } computed in _buildRepairPlan
@@ -1065,9 +1064,8 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     } else {
       _energy = cfg.maxFuel;
     }
-    // Notify main.js so playerFuel stays in sync with _energy after refuelling
+    // Notify main.js that energy has been restored (HUD update)
     _onRefuel?.(_energy);
-    _playerFuel = _energy;  // keep internal copy consistent too
 
     // ── 2. TORPEDOES ──
     if (sb) {
@@ -1660,18 +1658,25 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     if (_targetLocked && (_energy <= 0 || (_computer && _computer.targeting <= 50 && Math.random() < 0.002))) {
       _targetLocked = false;
     }
-    // Energy stranded: zero energy + no fuel + no dockable starbase = adrift
-    if (!_lossTriggered && _energy <= 0 && _playerFuel <= 0
-        && (!_hasStarbase || _currentStarbase?.state !== 'active')) {
-      _strandedTimer += dt;
-      if (_strandedTimer >= 1.0) {
-        _queueTicker(
-          '\u26a0 ZERO ENERGY \u2014 ALL POWER LOST \u2014 SHIP ADRIFT \u2014 NO WAY HOME',
-          'stranded_warn', 0);
-      }
-      if (_strandedTimer >= 5.0) {
-        _lossTriggered = true;
-        _onLoss?.('ENERGY_STRANDED');
+    // Energy dead: all ship systems fail. Die after 5 seconds.
+    // Grace exception: if the docking drone is mid-return with fuel, don't die yet.
+    if (!_lossTriggered && _energy <= 0) {
+      const droneDelivering = (_dockState === 'connected' || _dockState === 'returning');
+      if (!droneDelivering) {
+        _strandedTimer += dt;
+        if (_strandedTimer >= 1.0) {
+          _queueTicker(
+            '\u26a0 ZERO ENERGY \u2014 ALL POWER LOST \u2014 SHIP ADRIFT',
+            'stranded_warn', 0);
+        }
+        if (_strandedTimer >= 5.0) {
+          if (!_tutorialMode) {
+            _lossTriggered = true;
+            _onLoss?.('ENERGY_STRANDED');
+          }
+        }
+      } else {
+        _strandedTimer = 0; // drone is coming back with fuel — reset grace timer
       }
     } else {
       _strandedTimer = 0;
@@ -1969,8 +1974,9 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
       if (_energy > 0 && drainVel > 0)
         _energy = Math.max(0, _energy - (drainVel * drainVel / 4096) * ENERGY_ENGINE_FACTOR * dt);
     }
-    // Shield recharge — costs energy equal to the charge restored
-    if (_shieldsOn && _shieldCapacity > 0) {
+    // Shield recharge — costs energy equal to the charge restored.
+    // Shields cannot recharge without power.
+    if (_shieldsOn && _shieldCapacity > 0 && _energy > 0) {
       const prevCharge = _shieldCharge;
       _shieldCharge = Math.min(_shieldCapacity, _shieldCharge + _shieldRechargeRate * dt);
       _energy = Math.max(0, _energy - (_shieldCharge - prevCharge));
@@ -2551,7 +2557,10 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   /** Push a message to the ticker queue.
    *  category (string): repeated calls with same category are suppressed until cooldown expires.
    *  cooldown (s): 0 = always show, >0 = ignore duplicates until this many seconds pass.      */
+  let _tutorialMode  = false;  // when true: suppress game alerts + loss conditions
+
   function _queueTicker(msg, category = null, cooldown = 45) {
+    if (_tutorialMode) return; // game messages suppressed during tutorial
     if (category) {
       const now = performance.now() / 1000;
       if (_alertCd[category] && now < _alertCd[category]) return;
@@ -2728,7 +2737,6 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   }
 
   /** Called by main.js to keep the stranded-energy check aware of warp fuel. */
-  function setFuel(n) { _playerFuel = n; }
 
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -5027,7 +5035,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   }
 
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, addMergeLayerToBeacon, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
-           enterWarpMode, cancelWarpMode, updateWarpModeTimer, setFuel, notifySpawnerEvolved, seekerWarpedOut,
+           enterWarpMode, cancelWarpMode, updateWarpModeTimer, notifySpawnerEvolved, seekerWarpedOut,
             get galacticClock() { return _galacticClock;  },
            get systems()       { return _systems;       },
            get engines()       { return _engines;       },
@@ -5048,5 +5056,11 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
            set onVictory(fn)   { _onVictory = fn;       },
            get atDockPosition(){ return isAtDockingPosition(); },
            get currentStarbase(){ return _currentStarbase; },
-           set onStarbaseAction(fn) { _onStarbaseAction = fn; } };
+           set onStarbaseAction(fn) { _onStarbaseAction = fn; },
+           set tutorialMode(v) {
+             _tutorialMode = !!v;
+             if (v) { _lossTriggered = false; _strandedTimer = 0; }
+           },
+           tutorialTicker(msg) { _tickerQueue.push(msg); },
+           };
 })();
