@@ -312,7 +312,35 @@
     document.getElementById('tut-btn')?.addEventListener('click', () => {
       _beginGame();
       // Small delay so SectorView has finished entering before we start the tutorial
-      setTimeout(() => { if (typeof Tutorial !== 'undefined') Tutorial.start(); }, 600);
+      setTimeout(() => {
+        if (typeof Tutorial === 'undefined') return;
+        Tutorial.start({
+          onStart() {
+            // Freeze galaxy simulation — no Zylon movement, no supply events, no messages
+            if (galaxyMap) galaxyMap.frozen = true;
+            // Suppress SectorView game alerts and loss conditions
+            SectorView.tutorialMode = true;
+          },
+          onExit() {
+            // Reload the page — returns player cleanly to the intro crawl
+            window.location.reload();
+          },
+          onSlideChange(idx) {
+            // Slide 8 (index 8) — SUBSPACE MESSAGES: inject a demo ticker message
+            if (idx === 8) {
+              setTimeout(() => {
+                SectorView.tutorialTicker('CENTRAL COMMAND \u2014 ZYLON SEEKER DETECTED \u2014 SECTOR 2,3');
+              }, 400);
+            }
+            // Slide 9 (index 9) — URGENT ALERTS: inject a demo scrolling banner
+            if (idx === 9) {
+              setTimeout(() => {
+                SectorView.tutorialTicker('\u26a0 SIRIUS BASE \u2014 SHIELDS FAILING \u2014 ENEMY FIRE');
+              }, 400);
+            }
+          },
+        });
+      }, 600);
     }, { once: true });
   }
 
