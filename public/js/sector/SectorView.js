@@ -56,6 +56,7 @@ const SectorView = (() => {
   let _speed = 0;
   let _currentVelocity = 0;  // actual live velocity (u/s), ramps toward target
   let _cameraQuat = new THREE.Quaternion();
+  let _spinState   = null;   // tutorial cinematic: { degsPerSec, totalDeg, spun, onComplete }
   let _mnx = 0, _mny = 0;
   let _mouseScale = 540;   // canvas px per normalized unit — updated each mouse move
   let _warpCharging = false;
@@ -224,7 +225,8 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   let _lockRingFront  = null;   // green corner-bracket billboard — front target lock
   let _lockRingAft    = null;   // amber corner-bracket billboard — aft target lock
   let _lrsOn        = false;
-  let _inputBound   = false;
+  let _inputBound    = false;
+  let _lookOnlyBound = false;  // tutorial: only mouse-look active (no fire, no keys, no wheel)
   let _redAlert     = false;
 
   // ---- Zylon ships ----
@@ -238,6 +240,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   // Victory-pending state (Item #5): set when all spawners are destroyed; win triggers on Capital dock
   let _victoryPending     = false;   // true when all spawners destroyed but player hasn't docked at Capital
   let _onVictory          = null;    // callback() — set by main.js to fire the actual win screen
+  let _tutDisplayEnemy    = null;    // { ships:[{mesh,tumble}], zylonShips:[ZylonShip] } — tutorial showcase
 
   // ---- Asteroids ----
   let _asteroids    = [];
@@ -380,6 +383,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
   }
 
   function _bind() {
+    _unbindLookOnly();          // clear look-only before full bind
     if (_inputBound) return;
     _inputBound = true;
     window.addEventListener('mousemove', _onMM);
@@ -402,6 +406,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     }
   }
   function _unbind() {
+    _unbindLookOnly();          // also clear look-only when fully unbinding
     if (!_inputBound) return;
     _inputBound = false;
     window.removeEventListener('mousemove', _onMM);
@@ -419,6 +424,36 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     }
     if (_canvas) {
       _canvas.removeEventListener('contextmenu', _onCM);
+    }
+  }
+
+  // ---- Look-only mode (STEERING tutorial slide): mouse movement only ----
+  function _bindLookOnly() {
+    if (_lookOnlyBound || _inputBound) return;  // full bind already covers it
+    _lookOnlyBound = true;
+    window.addEventListener('mousemove', _onMM);
+    window.addEventListener('resize',    _onResize);
+    window.addEventListener('focus',     _onWinFocus);
+    window.addEventListener('blur',      _onWinBlur);
+    window.addEventListener('contextmenu', _onCM);
+    _combatViewEl = document.getElementById('combat-view');
+    if (_combatViewEl) {
+      _mouseInView = _combatViewEl.matches?.(':hover') ?? true;
+      _combatViewEl.addEventListener('mouseenter', _onMouseEnter);
+      _combatViewEl.addEventListener('mouseleave', _onMouseLeave);
+    }
+  }
+  function _unbindLookOnly() {
+    if (!_lookOnlyBound) return;
+    _lookOnlyBound = false;
+    window.removeEventListener('mousemove',   _onMM);
+    window.removeEventListener('resize',      _onResize);
+    window.removeEventListener('focus',       _onWinFocus);
+    window.removeEventListener('blur',        _onWinBlur);
+    window.removeEventListener('contextmenu', _onCM);
+    if (_combatViewEl) {
+      _combatViewEl.removeEventListener('mouseenter', _onMouseEnter);
+      _combatViewEl.removeEventListener('mouseleave', _onMouseLeave);
     }
   }
 
@@ -483,6 +518,7 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
 
   function _buildScene() {
     _scene = new THREE.Scene();
+    _scene.add(_camera);   // camera must be in scene for camera-parented objects to render
     _scene.add(new THREE.AmbientLight(0x111122, 1.2));
     _buildStars();
     _buildDust();
@@ -1594,6 +1630,30 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     const dt = Math.min((now - _lastTime) / 1000, 0.05);
     _lastTime = now;
     _gamepad();
+    // Tutorial cinematic: smooth yaw spin (36°/s leftward for 10s = full 360° rotation)
+    if (_spinState) {
+      const step = _spinState.degsPerSec * dt;
+      _spinState.spun += step;
+      const q = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0), step * Math.PI / 180);  // positive Y = leftward
+      _cameraQuat.premultiply(q).normalize();
+      if (_spinState.spun >= _spinState.totalDeg) {
+        const cb = _spinState.onComplete;
+        _spinState = null;
+        cb?.();
+      }
+    }
+    // Tutorial enemy showcase — tumble the display ship(s) each frame
+    if (_tutDisplayEnemy) {
+      for (const { mesh, tumble } of _tutDisplayEnemy.ships) {
+        mesh.rotation.y += tumble.y * dt;
+        mesh.rotation.x += tumble.x * dt;
+        mesh.rotation.z += tumble.z * dt;
+      }
+      for (const ship of _tutDisplayEnemy.zylonShips) {
+        if (ship._type === 'spawner') ship._updateSpawnerSpin(dt);
+      }
+    }
     _updateFlight(dt);
     _updateSB(dt);
     _updateDust();
@@ -5034,6 +5094,49 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
     _queueTicker('ZYLON SEEKER WARPED OUT', 'seeker_warp_out', 10);
   }
 
+  // ---- Tutorial enemy showcase ----
+  // Ships are parented to _camera so they always appear 25u ahead of the view,
+  // regardless of where the player is in the galaxy or which way they're facing.
+  function showTutorialEnemy(type) {
+    clearTutorialEnemy();
+    if (!_scene || !_camera) return;
+    const TUMBLE = {
+      spawner:       { y: 0.40, x: 0.20, z: 0.15 },
+      seeker_beacon: { y: 0.30, x: 0.20, z: 0.15 },
+      seeker_tie:    { y: 0.80, x: 0.40, z: 0.60 },
+      seeker_bird:   { y: 0.60, x: 0.50, z: 0.30 },
+      warrior:       { y: 0.25, x: 0.15, z: 0.20 },
+    };
+    const ships = [], zylonShips = [];
+    if (type === 'birds_and_ties') {
+      // TIE on the left (-5), Bird on the right (+5), both 25u forward in camera space
+      for (const [t, side] of [['seeker_tie', -5], ['seeker_bird', 5]]) {
+        const ship = new ZylonShip(_scene, new THREE.Vector3(), t, 0);
+        _scene.remove(ship.mesh);            // detach from scene
+        ship.mesh.position.set(side, 0, -25); // camera-local coords
+        _camera.add(ship.mesh);              // parent to camera
+        ships.push({ mesh: ship.mesh, tumble: TUMBLE[t] });
+        zylonShips.push(ship);
+      }
+    } else {
+      const ship = new ZylonShip(_scene, new THREE.Vector3(), type, 0);
+      _scene.remove(ship.mesh);
+      ship.mesh.position.set(0, 0, -25);    // camera-local: dead ahead
+      _camera.add(ship.mesh);
+      ships.push({ mesh: ship.mesh, tumble: TUMBLE[type] ?? TUMBLE.seeker_tie });
+      zylonShips.push(ship);
+    }
+    _tutDisplayEnemy = { ships, zylonShips };
+  }
+
+  function clearTutorialEnemy() {
+    if (!_tutDisplayEnemy) return;
+    for (const ship of _tutDisplayEnemy.zylonShips) {
+      if (ship.mesh) { _camera?.remove(ship.mesh); }
+    }
+    _tutDisplayEnemy = null;
+  }
+
   return { enter, pause, resume, hideView, showView, suspendInput, exit, damageSystem, spawnZylons, addMergeLayerToBeacon, beginWarpCharge, beginWarpBurst, drainEnergy, showMessage, getZylonCount, getSectorPos,
            enterWarpMode, cancelWarpMode, updateWarpModeTimer, notifySpawnerEvolved, seekerWarpedOut,
             get galacticClock() { return _galacticClock;  },
@@ -5062,5 +5165,18 @@ let _dockCount = 0;  // total starbase docking events (fuels/repairs)
              if (v) { _lossTriggered = false; _strandedTimer = 0; }
            },
            tutorialTicker(msg) { _tickerQueue.push(msg); },
+           toggleComputer()    { _computerOn = !_computerOn; },
+           toggleAftPip()      { _aftPipOn   = !_aftPipOn;   },
+           setYawOffset(deg)   {
+             const q = new THREE.Quaternion().setFromAxisAngle(
+               new THREE.Vector3(0, 1, 0), deg * Math.PI / 180);
+             _cameraQuat.premultiply(q).normalize();
+           },
+           startTutorialSpin(degsPerSec, totalDeg, onComplete) {
+             _spinState = { degsPerSec, totalDeg, spun: 0, onComplete };
+           },
+           enableLookOnly() { _bindLookOnly(); },
+           showTutorialEnemy,
+           clearTutorialEnemy,
            };
 })();

@@ -25,13 +25,18 @@ const Tutorial = (() => {
     { title: 'VELOCITY',                 highlight: 'zone3',     audio: 4                  },
     { title: 'HULL \u0026 SHIELDS',      highlight: 'zone4',     audio: 5                  },
     { title: 'TRACKING COMPUTER',        highlight: 'scope',     audio: 6,
+      highlight2: 'targets', highlightDeferred: true,
+      pauseAfterMs: 3250,
       keyHint: 'Press C to activate the tracking computer.'                                 },
     { title: 'AFT VIEW',                 highlight: 'aftpip',    audio: 7,
+      highlightDeferred: true,
+      pauseAfterMs: 3100,
       keyHint: 'Press A to turn on the aft view camera.'                                    },
     { title: 'STEERING',                 highlight: 'crosshair', audio: 8                  },
-    { title: 'SUBSPACE MESSAGES',        highlight: 'ticker',    audio: 9                  },
-    { title: 'URGENT ALERTS',            highlight: 'banner',    audio: 10                 },
+    { title: 'SUBSPACE MESSAGES',        highlight: 'submsg',    audio: 9                  },
+    { title: 'URGENT ALERTS',            highlight: 'ticker',    audio: 10, position:'lower'},
     { title: 'GALACTIC MAP',             highlight: 'map',       audio: 11, position:'right',
+      pauseAfterMs: 3100,
       keyHint: 'Press G to open your galactic map.'                                         },
     { title: 'SECTORS \u0026 RESOURCES', highlight: 'map',       audio: 12, position:'right'},
     { title: 'SUPPLY LINES',             highlight: 'map',       audio: 13, position:'right'},
@@ -49,13 +54,20 @@ const Tutorial = (() => {
   ];
 
   // ── State ──────────────────────────────────────────────────────────────────
-  let _idx      = 0;
-  let _panelEl  = null;
-  let _hlEl     = null;
-  let _audioEl  = null;
-  let _rafId    = null;
-  let _active   = false;
-  let _opts     = {};
+  let _idx       = 0;
+  let _panelEl   = null;
+  let _hlEl      = null;
+  let _hl2El     = null;   // secondary highlight box (e.g. targets panel on slide 5)
+  let _hlVisible = true;   // false on highlightDeferred slides until showHighlights() called
+  let _arrowSvg  = null;   // full-screen SVG overlay for the connector arrows
+  let _arrowLine = null;   // primary arrow line
+  let _arrow2Line= null;   // secondary arrow line
+  let _audioEl   = null;
+  let _audioPauseTimer = null;
+  let _rafId     = null;
+  let _active    = false;
+  let _opts      = {};
+  let _tutKeyHandler = null;
 
   // ── Highlight bounds ───────────────────────────────────────────────────────
   // Mirrors the exact geometry from SectorView._drawHUD so boxes align perfectly.
@@ -129,52 +141,130 @@ const Tutorial = (() => {
                  width: sz, height: sz };
       }
 
-      // Subspace ticker strip — the narrow scroll-text band near top of viewport
-      case 'ticker':
-        return { left: r.left, top: r.top + 30, width: W, height: 52 };
+      // Subspace ticker strip — matches _drawTicker geometry exactly
+      // stripTop is always 6px (fontSize+14 - fontSize - 8); height = fontSize+18
+      case 'ticker': {
+        const fs = Math.max(16, Math.floor(W / 38));
+        return { left: r.left - PAD, top: r.top + 6 - PAD,
+                 width: W + PAD * 2, height: (fs + 18) + PAD * 2 };
+      }
 
       // Urgent alert banner — very top strip above the ticker
       case 'banner':
         return { left: r.left, top: r.top, width: W, height: 34 };
+
+      // Right-hand target list — both right columns of the dashboard
+      case 'targets':  return zone(col1X, 2 * colW + colGap);
+
+      // Subspace message panel — centered box just below the ticker strip
+      case 'submsg': {
+        const fs   = Math.max(16, Math.floor(W / 38));
+        const panW = Math.min(600, Math.floor(W * 0.62));
+        const panX = Math.floor((W - panW) / 2);
+        const panY = fs + 30;   // tickerBottom(fs+24) + 6px gap
+        return { left: r.left + panX - PAD, top: r.top + panY - PAD,
+                 width: panW + PAD * 2,     height: 62 + PAD * 2 };
+      }
 
       default: return null;
     }
   }
 
   // ── Highlight DOM update (every rAF) ───────────────────────────────────────
-  function _updateHL() {
-    if (!_hlEl) return;
-    const b = _bounds(SLIDES[_idx].highlight);
-    if (b && b.width > 0) {
-      Object.assign(_hlEl.style, {
+  function _applyHL(el, b, show) {
+    if (!el) return;
+    if (show && b && b.width > 0) {
+      Object.assign(el.style, {
         display: 'block',
-        left:   b.left   + 'px',
-        top:    b.top    + 'px',
-        width:  b.width  + 'px',
-        height: b.height + 'px',
+        left:    b.left   + 'px', top:    b.top    + 'px',
+        width:   b.width  + 'px', height: b.height + 'px',
       });
     } else {
-      _hlEl.style.display = 'none';
+      el.style.display = 'none';
     }
+  }
+
+  function _updateHL() {
+    const slide = SLIDES[_idx];
+    const show  = _hlVisible;
+    _applyHL(_hlEl,  _bounds(slide.highlight),  show);
+    _applyHL(_hl2El, _bounds(slide.highlight2), show);
+  }
+
+  // ── Arrow: returns the point on rect's border toward (tx, ty) ─────────────
+  function _edgePoint(rect, tx, ty) {
+    const cx = rect.left + rect.width  / 2;
+    const cy = rect.top  + rect.height / 2;
+    const dx = tx - cx, dy = ty - cy;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return { x: cx, y: cy };
+    const sx = rect.width / 2, sy = rect.height / 2;
+    const scale = Math.min(sx / Math.abs(dx || 0.001), sy / Math.abs(dy || 0.001));
+    return { x: cx + dx * scale, y: cy + dy * scale };
+  }
+
+  // ── Arrow DOM update (every rAF) ──────────────────────────────────────────
+  function _drawArrow(line, targetBounds) {
+    if (!line || !_panelEl) return;
+    if (!targetBounds || targetBounds.width <= 0 || !_hlVisible) {
+      line.style.display = 'none'; return;
+    }
+    const pr   = _panelEl.getBoundingClientRect();
+    const htcx = targetBounds.left + targetBounds.width  / 2;
+    const htcy = targetBounds.top  + targetBounds.height / 2;
+    const ptcx = pr.left + pr.width  / 2;
+    const ptcy = pr.top  + pr.height / 2;
+    const start = _edgePoint(pr, htcx, htcy);
+    const end   = _edgePoint(targetBounds, ptcx, ptcy);
+    const dx = end.x - start.x, dy = end.y - start.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const gap  = 10;
+    line.setAttribute('x1', start.x);
+    line.setAttribute('y1', start.y);
+    line.setAttribute('x2', end.x - (dx / dist) * gap);
+    line.setAttribute('y2', end.y - (dy / dist) * gap);
+    line.style.display = '';
+  }
+
+  function _updateArrow() {
+    const slide = SLIDES[_idx];
+    _drawArrow(_arrowLine,  _bounds(slide.highlight));
+    _drawArrow(_arrow2Line, _bounds(slide.highlight2));
   }
 
   function _loop() {
     if (!_active) return;
     _updateHL();
+    _updateArrow();
     _rafId = requestAnimationFrame(_loop);
   }
 
   // ── Audio ──────────────────────────────────────────────────────────────────
   function _playAudio(n) {
+    if (_audioPauseTimer) { clearTimeout(_audioPauseTimer); _audioPauseTimer = null; }
     if (_audioEl) { _audioEl.pause(); _audioEl.src = ''; }
     _audioEl = new Audio(`/audio/tutorial/tut_01 (${n}).mp3`);
     _audioEl.volume = 0.9;
     _audioEl.play().catch(() => {});
+    // If this slide defines pauseAfterMs, pause at that point and wait for resumeAudio()
+    const ms = SLIDES[_idx]?.pauseAfterMs;
+    if (ms) {
+      _audioPauseTimer = setTimeout(() => {
+        _audioPauseTimer = null;
+        if (_audioEl && !_audioEl.paused) _audioEl.pause();
+      }, ms);
+    }
+  }
+
+  function resumeAudio() {
+    // Cancel the pending pause timer so it can't fire again mid-playback
+    if (_audioPauseTimer) { clearTimeout(_audioPauseTimer); _audioPauseTimer = null; }
+    if (_audioEl?.paused) _audioEl.play().catch(() => {});
   }
 
   // ── Panel position ─────────────────────────────────────────────────────────
   function _positionPanel(slide) {
     if (!_panelEl) return;
+    // Horizontal
     if (slide.position === 'right') {
       _panelEl.style.left  = 'auto';
       _panelEl.style.right = '18px';
@@ -182,6 +272,8 @@ const Tutorial = (() => {
       _panelEl.style.left  = '18px';
       _panelEl.style.right = 'auto';
     }
+    // Vertical: 'lower' drops panel below the scrolling ticker strip
+    _panelEl.style.top = slide.position === 'lower' ? '80px' : '18px';
   }
 
   // ── Panel render ───────────────────────────────────────────────────────────
@@ -191,10 +283,14 @@ const Tutorial = (() => {
     const total  = SLIDES.length;
     const isLast = !!slide.isLast;
 
+    // Reset highlight visibility: deferred slides hide boxes until showHighlights() fires
+    _hlVisible = !slide.highlightDeferred;
+
     _panelEl.innerHTML = `
       <div class="tut-header">
         <span class="tut-counter">Step ${_idx + 1} of ${total}</span>
         <span class="tut-title">${slide.title}</span>
+        <button class="tut-repeat" id="tut-repeat-btn" title="Replay audio">↺ REPEAT</button>
         <button class="tut-x" id="tut-exit-btn" title="Exit Tutorial">✕</button>
       </div>
       ${slide.keyHint ? `<div class="tut-keyhint">⌨ ${slide.keyHint}</div>` : ''}
@@ -210,6 +306,7 @@ const Tutorial = (() => {
     document.getElementById('tut-prev-btn')?.addEventListener('click', prev);
     document.getElementById('tut-next-btn')?.addEventListener('click', isLast ? exit : next);
     document.getElementById('tut-exit-btn')?.addEventListener('click', exit);
+    document.getElementById('tut-repeat-btn')?.addEventListener('click', () => _playAudio(SLIDES[_idx].audio));
 
     _positionPanel(slide);
 
@@ -223,7 +320,7 @@ const Tutorial = (() => {
       'The most important thing on your ship is energy. Everything runs on energy — your engines, your weapons, your shields, your computer. If you run out of energy, your ship goes dark and you die. The long bar shows how much energy you have left, along with a number. Below that you can see how fast you\'re using your energy. Always keep an eye on your energy. When it gets low, find a starbase and dock.',
       'To destroy the Zylons you fire torpedoes. Your ship can carry up to two hundred at a time. When you dock at a starbase you\'ll be resupplied, as long as the starbase has them in stock. Don\'t waste your shots — supplies are not unlimited. Keeping the supply lines open is critical to making sure there are always torpedoes waiting for you when you need them.',
       'You have three torpedo cannons — two facing forward and one facing backward. Each time you fire, the cannon heats up. They cool down as fuel flows to your engines, so the faster you\'re flying, the cooler they stay. If you overheat a cannon it will take damage and eventually destroy itself. Watch the three indicators: charge, temperature, and health. A damaged cannon still fires, but cools down much more slowly.',
-      'Your ship has four engines. When they\'re all healthy, you can reach a top speed of sixty-four. As your engines take damage, your maximum speed drops — and a slower ship is a more dangerous ship. Speed helps keep your cannons cool and makes you harder to hit. You\'ll need to slow down to line up shots, but don\'t stay slow for long.',
+      'Your ship has four engines. When they\'re all healthy, you can reach a top speed of sixty-four. As your engines take damage, your maximum speed drops — and a slower ship is a more vulnerable ship. Speed helps keep your cannons cool and makes you harder to hit. You\'ll need to slow down to line up shots, but don\'t stay slow for long.',
       'Your shields protect your ship by absorbing hits. After taking damage, they automatically recharge. But recharging uses energy, so a ship under heavy fire drains fast. When your shields are low, the next hit will start damaging your systems — engines, cannons, and computers. When your hull is destroyed, you\'re dead. Fight hard, but don\'t be reckless.',
       'Press C to turn on your tracking computer. This is one of your most important tools. It shows every ship in your sector as a circle on the scope. A filled circle means the ship is in front of you. A hollow circle means it\'s behind you. Blue circles are starbases. Green are cargo ships. Orange are docking drones. Red are Zylons. On the right you\'ll see a list of nearby targets sorted by range, with enemies always listed first. Keep this on at all times.',
       'Press A to turn on your rear camera. This small window shows you what\'s happening behind your ship. Zylons love to attack from behind, and skilled pilots use the rear camera to shoot enemies sneaking up on them. The aft cannon can fire at anything you see in this view.',
@@ -266,9 +363,59 @@ const Tutorial = (() => {
     _hlEl.id = 'tut-highlight';
     document.body.appendChild(_hlEl);
 
+    _hl2El = document.createElement('div');
+    _hl2El.id = 'tut-highlight2';
+    _hl2El.className = 'tut-highlight';   // reuse same CSS as _hlEl
+    document.body.appendChild(_hl2El);
+
+    // SVG connector arrows (full-screen, pointer-events:none, below the panel)
+    const NS = 'http://www.w3.org/2000/svg';
+    _arrowSvg = document.createElementNS(NS, 'svg');
+    _arrowSvg.id = 'tut-arrow-svg';
+    Object.assign(_arrowSvg.style, {
+      position: 'fixed', top: '0', left: '0', width: '100%', height: '100%',
+      pointerEvents: 'none', zIndex: '7490', overflow: 'visible',
+    });
+    const defs   = document.createElementNS(NS, 'defs');
+    const marker = document.createElementNS(NS, 'marker');
+    marker.setAttribute('id', 'tut-arrowhead');
+    marker.setAttribute('markerWidth',  '10');
+    marker.setAttribute('markerHeight', '7');
+    marker.setAttribute('refX', '10');
+    marker.setAttribute('refY', '3.5');
+    marker.setAttribute('orient', 'auto');
+    const tip = document.createElementNS(NS, 'polygon');
+    tip.setAttribute('points', '0 0, 10 3.5, 0 7');
+    tip.setAttribute('fill', 'rgba(0,229,255,0.80)');
+    marker.appendChild(tip);
+    defs.appendChild(marker);
+    _arrowSvg.appendChild(defs);
+    function _makeLine() {
+      const l = document.createElementNS(NS, 'line');
+      l.setAttribute('stroke',           'rgba(0,229,255,0.50)');
+      l.setAttribute('stroke-width',     '1.5');
+      l.setAttribute('stroke-dasharray', '7,4');
+      l.setAttribute('marker-end',       'url(#tut-arrowhead)');
+      _arrowSvg.appendChild(l);
+      return l;
+    }
+    _arrowLine  = _makeLine();
+    _arrow2Line = _makeLine();
+    document.body.appendChild(_arrowSvg);
+
     _panelEl = document.createElement('div');
     _panelEl.id = 'tut-panel';
     document.body.appendChild(_panelEl);
+
+    // Keydown forwarder — active on slides 0-6 (before full input is re-enabled at slide 7)
+    // Lets opts.onKeyDown handle selective key permissions per slide.
+    _tutKeyHandler = (e) => {
+      // Forward keys for slides 0-6 (input suspended), AND for any later slide
+      // that declares pauseAfterMs (waiting for a specific keypress to resume audio).
+      if (!_active || (_idx >= 7 && !SLIDES[_idx]?.pauseAfterMs)) return;
+      _opts.onKeyDown?.(e.code, _idx);
+    };
+    document.addEventListener('keydown', _tutKeyHandler);
 
     _opts.onStart?.();
     _render();
@@ -280,11 +427,17 @@ const Tutorial = (() => {
     _active = false;
     if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
     if (_audioEl) { _audioEl.pause(); _audioEl = null; }
-    _hlEl?.remove();    _hlEl    = null;
-    _panelEl?.remove(); _panelEl = null;
+    if (_audioPauseTimer) { clearTimeout(_audioPauseTimer); _audioPauseTimer = null; }
+    if (_tutKeyHandler) { document.removeEventListener('keydown', _tutKeyHandler); _tutKeyHandler = null; }
+    _hlEl?.remove();     _hlEl     = null;
+    _hl2El?.remove();    _hl2El    = null;
+    _arrowSvg?.remove(); _arrowSvg = null; _arrowLine = null; _arrow2Line = null;
+    _panelEl?.remove();  _panelEl  = null;
     _opts.onExit?.();
     _opts = {};
   }
 
-  return { start, exit, get isActive() { return _active; } };
+  function showHighlights() { _hlVisible = true; }
+
+  return { start, exit, resumeAudio, showHighlights, get isActive() { return _active; } };
 })();

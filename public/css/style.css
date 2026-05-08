@@ -998,7 +998,7 @@ canvas {
    ============================================================ */
 
 /* Glowing highlight box — positioned by Tutorial.js rAF loop */
-#tut-highlight {
+#tut-highlight, #tut-highlight2 {
   display: none;
   position: fixed;
   pointer-events: none;
@@ -1069,6 +1069,24 @@ canvas {
   transition: color 0.15s;
 }
 .tut-x:hover { color: #ff4444; }
+
+.tut-repeat {
+  background: none;
+  border: 1px solid rgba(0,180,255,0.30);
+  border-radius: 3px;
+  color: rgba(0,180,255,0.65);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  padding: 2px 7px;
+  margin-left: auto;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tut-repeat:hover {
+  color: #00e5ff;
+  border-color: rgba(0,229,255,0.60);
+}
 
 /* Key hint */
 .tut-keyhint {

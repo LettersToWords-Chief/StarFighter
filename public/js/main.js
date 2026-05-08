@@ -308,40 +308,8 @@
     // Wire the BEGIN MISSION button — this click is the user gesture for AudioContext
     document.getElementById('intro-begin').addEventListener('click', _beginGame, { once: true });
 
-    // Wire the TUTORIAL button — same flow as BEGIN MISSION, then activates tutorial overlay
-    document.getElementById('tut-btn')?.addEventListener('click', () => {
-      _beginGame();
-      // Small delay so SectorView has finished entering before we start the tutorial
-      setTimeout(() => {
-        if (typeof Tutorial === 'undefined') return;
-        Tutorial.start({
-          onStart() {
-            // Freeze galaxy simulation — no Zylon movement, no supply events, no messages
-            if (galaxyMap) galaxyMap.frozen = true;
-            // Suppress SectorView game alerts and loss conditions
-            SectorView.tutorialMode = true;
-          },
-          onExit() {
-            // Reload the page — returns player cleanly to the intro crawl
-            window.location.reload();
-          },
-          onSlideChange(idx) {
-            // Slide 8 (index 8) — SUBSPACE MESSAGES: inject a demo ticker message
-            if (idx === 8) {
-              setTimeout(() => {
-                SectorView.tutorialTicker('CENTRAL COMMAND \u2014 ZYLON SEEKER DETECTED \u2014 SECTOR 2,3');
-              }, 400);
-            }
-            // Slide 9 (index 9) — URGENT ALERTS: inject a demo scrolling banner
-            if (idx === 9) {
-              setTimeout(() => {
-                SectorView.tutorialTicker('\u26a0 SIRIUS BASE \u2014 SHIELDS FAILING \u2014 ENEMY FIRE');
-              }, 400);
-            }
-          },
-        });
-      }, 600);
-    }, { once: true });
+    // Wire the TUTORIAL button — completely separate code path from the real game
+    document.getElementById('tut-btn')?.addEventListener('click', _beginTutorial, { once: true });
   }
 
   // ---- Begin the game (called by the intro BEGIN MISSION button click) ----
@@ -385,6 +353,111 @@
       : { q: 0, r: 0 };
     galaxyMap.teleportPlayer(startHex);
     _enterSector(startHex);
+  }
+
+  // ---- Begin tutorial (completely separate from _beginGame — no Zylons, no simulation) ----
+  function _beginTutorial() {
+    if (typeof IntroCrawl !== 'undefined') IntroCrawl.stop();
+    const intro = document.getElementById('intro-overlay');
+    if (intro) intro.style.display = 'none';
+
+    // Initialize audio — this click is the required user gesture
+    if (typeof SoundManager !== 'undefined') SoundManager.init();
+
+    // Silence every Zylon in the galaxy — nothing alive, nothing to fast-forward
+    galaxyMap.zylonSpawners?.forEach(s  => { s.alive = false; });
+    galaxyMap.zylonSeekers?.forEach(s   => { s.alive = false; });
+
+    // Leave galaxyMap.frozen = true (already set at galaxy init) — no simulation ticks ever run
+    // Do NOT call _fastForwardZylons(), do NOT unfreeze, do NOT start the stardate clock
+
+    // Start at the Capital sector — always has a starbase (good for the docking lesson later)
+    const tutorialStart = { q: 0, r: 0 };
+    galaxyMap.teleportPlayer(tutorialStart);
+    _enterSector(tutorialStart);
+
+    // Offset the initial heading before the first frame renders — starbase won't be dead-center
+    SectorView.setYawOffset(10);
+
+    // Suspend all cockpit input — no steering, no firing while tutorial panel is up
+    SectorView.suspendInput();
+
+    // Wait 1 second so the player can take in the cockpit before the tutorial panel opens
+    if (typeof Tutorial === 'undefined') return;
+    setTimeout(() => Tutorial.start({
+      onStart() {
+        // Suppress game alerts and loss conditions
+        SectorView.tutorialMode = true;
+        // Start with tracking computer OFF — player turns it on at slide 5 (KeyC)
+        SectorView.toggleComputer();
+      },
+      onExit() {
+        // Reload the page — returns player cleanly to the intro crawl
+        window.location.reload();
+      },
+      onKeyDown(code, idx) {
+        // Slide 5 (TRACKING COMPUTER) — allow C to toggle the computer on/off
+        // Audio paused at 1.5s waiting for this — resume it now
+        if (idx === 5 && code === 'KeyC') {
+          SectorView.toggleComputer();
+          Tutorial.showHighlights();   // reveal scope + targets boxes when computer activates
+          Tutorial.resumeAudio();
+        }
+        // Slide 6 (AFT VIEW) — toggle PIP, start 360° cinematic spin, resume audio
+        // 36°/s × 10s = full rotation; starbase passes through the rear view window
+        if (idx === 6 && code === 'KeyA') {
+          SectorView.toggleAftPip();
+          SectorView.startTutorialSpin(36, 360, () => {});
+          Tutorial.showHighlights();   // reveal aftpip box + arrow when PIP activates
+          Tutorial.resumeAudio();
+        }
+        // Slide 11 (plan) / idx 10 (0-based) — GALACTIC MAP
+        // Direct DOM open: bypasses game-state guards (cancelWarpMode etc.) that can
+        // throw during tutorial context. All we need is the panel visible + log rendered.
+        if (idx === 10 && code === 'KeyG') {
+          const gv = document.getElementById('galaxy-view');
+          if (gv) gv.classList.add('map-open');
+          SubspaceComm._renderLog();
+          Tutorial.resumeAudio();
+        }
+      },
+      onSlideChange(idx) {
+        // Slide 7 (STEERING) — enable mouse look only; no firing, no thrust yet
+        if (idx === 7) {
+          SectorView.enableLookOnly();
+        }
+        // Slide 8 (SUBSPACE MESSAGES) — send real SubspaceComm messages so they appear
+        // in the galactic map log when the player opens it on slide 10
+        if (idx === 8) {
+          const msgs = [
+            ['CENTRAL COMMAND',  'ZYLON SEEKER DETECTED — SECTOR 2,3'],
+            ['SIRIUS BASE',      'SHIELDS AT 40% — REQUESTING SUPPORT'],
+            ['CENTRAL COMMAND',  'ALL THE COOL KIDS ARE FINISHING THE TUTORIAL'],
+          ];
+          msgs.forEach(([from, text], i) => {
+            setTimeout(() => {
+              SubspaceComm.send(from, SubspaceComm.clockStr(), text);
+            }, 400 + i * 6500);
+          });
+        }
+        // Slide 9 (URGENT ALERTS) — trigger the scrolling amber ticker banner at top
+        if (idx === 9) {
+          setTimeout(() => {
+            SectorView.tutorialTicker('\u26a0 SIRIUS BASE \u2014 SHIELDS FAILING \u2014 ENEMY FIRE');
+          }, 400);
+        }
+        // Slides 17-20 (plan) / idx 16-19 — freeze controls, showcase each enemy type
+        if (idx === 16) {
+          SectorView.suspendInput();               // stop flying, freeze all controls
+          SectorView.showTutorialEnemy('spawner');
+        }
+        if (idx === 17) SectorView.showTutorialEnemy('seeker_beacon');
+        if (idx === 18) SectorView.showTutorialEnemy('birds_and_ties');
+        if (idx === 19) SectorView.showTutorialEnemy('warrior');
+        // Slide 21+ — clear the enemy showcase when done with Zylon section
+        if (idx >= 20) SectorView.clearTutorialEnemy();
+      },
+    }), 1000);
   }
 
   // ---- Enter a sector without the warp tunnel ----
