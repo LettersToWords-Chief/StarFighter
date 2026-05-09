@@ -385,7 +385,7 @@ const SoundManager = (() => {
     },
 
     // (5) MESSAGE FROM STARBASE: 438 → 491 → 390 Hz, 33-tick, 9-tick pause, 1×
-    starbsMessage()  { _beeper([0x48, 0x40, 0x51], 0x20, 0x08, 0, 9); },
+    starbsMessage()  { _beeper([0x48, 0x40, 0x51], 0x20, 0x08, 0, 2); },
 
     // NOISE EFFECTS
     torpedoFire()    { _torpedoFire(); },

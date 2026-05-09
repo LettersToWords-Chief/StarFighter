@@ -1121,7 +1121,12 @@ class GalaxyMap {
         habitable: 'rgba(10,60,30,0.55)',
         void:      'rgba(5,15,35,0.55)',
       };
-      ctx.fillStyle = colors[hex.type] || 'rgba(5,15,35,0.55)';
+      // Void resource sectors (RARE ISOTOPES) get a teal tint so players can distinguish
+      // them from empty void space — otherwise they look identical
+      const fillColor = (hex.isResource && hex.type === 'void')
+        ? 'rgba(10,50,65,0.60)'
+        : (colors[hex.type] || 'rgba(5,15,35,0.55)');
+      ctx.fillStyle = fillColor;
     }
     ctx.fill();
 
@@ -1145,8 +1150,9 @@ class GalaxyMap {
     }
 
     // Resource / type dot — show for all charted sectors (live or revealed)
-    if ((isVis || isRev) && hex.type !== 'void') {
-      const dotColors = { nebula: '#8844aa', asteroid: '#aa7722', habitable: '#22aa55' };
+    // Void resource sectors (RARE ISOTOPES) get a teal dot; empty void gets none
+    if ((isVis || isRev) && (hex.type !== 'void' || hex.isResource)) {
+      const dotColors = { nebula: '#8844aa', asteroid: '#aa7722', habitable: '#22aa55', void: '#33aacc' };
       ctx.fillStyle   = dotColors[hex.type] || '#fff';
       ctx.globalAlpha = isVis ? 0.5 : 0.35;  // slightly dimmer when unmonitored
       ctx.beginPath();
